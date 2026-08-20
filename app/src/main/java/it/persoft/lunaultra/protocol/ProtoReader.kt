@@ -144,6 +144,17 @@ class ProtoReader(private val buffer: ByteArray) {
         else -> null
     }
 
+    /**
+     * Come [intOrNull] ma senza troncare: lo spazio di una scheda si misura in decine di
+     * miliardi di byte, che in un Int non ci stanno.
+     */
+    fun longOrNull(vararg path: Int): Long? = when (val f = find(*path)) {
+        is ProtoField.VarInt -> f.value
+        is ProtoField.Fixed32 -> f.value.toLong()
+        is ProtoField.Fixed64 -> f.value
+        else -> null
+    }
+
     fun floatOrNull(vararg path: Int): Float? = when (val f = find(*path)) {
         is ProtoField.Fixed32 -> f.asFloat
         is ProtoField.Fixed64 -> f.asDouble.toFloat()

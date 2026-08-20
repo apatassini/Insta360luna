@@ -15,13 +15,24 @@ import java.util.concurrent.atomic.AtomicLong
  *   dati vengono scartati: alimentarlo con fotogrammi che dipendono da un riferimento mai
  *   ricevuto produce solo artefatti o un errore;
  * - il codec non è dichiarato da nessuna parte, va riconosciuto dai set di parametri nel
- *   flusso. La Luna manda H.264 nella configurazione che usiamo, ma il riconoscimento resta
- *   dinamico perché altre risoluzioni potrebbero usare H.265.
+ *   flusso. Sulla Luna Ultra (firmware 1.0.288) l'anteprima arriva in **H.265**, non H.264:
+ *   il riconoscimento resta dinamico perché altre risoluzioni potrebbero cambiarlo.
  */
 class VideoDecoder(private val log: EventLog) {
 
     private var codec: MediaCodec? = null
     private var codecKind: AnnexB.Codec? = null
+
+    /**
+     * La Surface con cui il decoder è stato configurato.
+     *
+     * Il decoder tiene la Surface che gli è stata data al `configure`, e la SurfaceView ne
+     * crea una nuova ogni volta che viene ricomposta o esce e rientra nello schermo. Continuare
+     * a disegnare sulla precedente fa fallire il decoder con "rendering to non-initialized
+     * (obsolete) surface": va riconfigurato sulla nuova.
+     */
+    private var codecSurface: Surface? = null
+
     private var sawKeyframe = false
     private val presentationUs = AtomicLong(0)
 
@@ -42,6 +53,11 @@ class VideoDecoder(private val log: EventLog) {
     @Synchronized
     fun feed(surface: Surface, chunk: ByteArray) {
         bytesReceived += chunk.size
+
+        if (codec != null && codecSurface !== surface) {
+            log.info("Anteprima: la Surface è cambiata, riconfiguro il decoder")
+            release()
+        }
 
         if (codec == null) {
             val kind = codecKind ?: AnnexB.detectCodec(chunk) ?: return
@@ -75,12 +91,14 @@ class VideoDecoder(private val log: EventLog) {
             created.configure(format, surface, null, 0)
             created.start()
             codec = created
+            codecSurface = surface
             sawKeyframe = false
             framesDecoded = 0
             log.info("Anteprima: decoder ${kind.mime} avviato")
         } catch (e: Exception) {
             log.error("Impossibile avviare il decoder ${kind.mime}: ${e.message}")
             codec = null
+            codecSurface = null
         }
     }
 
@@ -115,7 +133,8 @@ class VideoDecoder(private val log: EventLog) {
             runCatching { it.release() }
         }
         codec = null
-        codecKind = null
+        codecSurface = null
+        // Il codec riconosciuto resta valido: è una proprietà del flusso, non della Surface.
         sawKeyframe = false
         presentationUs.set(0)
     }

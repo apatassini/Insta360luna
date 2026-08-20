@@ -259,11 +259,11 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
             onClick = viewModel::calibrateProbe,
             enabled = !probe.running,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("1. Calibra l'oracolo") }
+        ) { Text("1. Misura le risposte note") }
 
         probe.calibration?.let { calibration ->
             LabeledValue("Codice inesistente", calibration.absent)
-            LabeledValue("Argomenti sbagliati", calibration.badPayload)
+            LabeledValue("Payload spazzatura", calibration.badPayload)
             LabeledValue("Corpo vuoto su codice reale", calibration.emptyOnReal)
             Text(
                 text = calibration.reason,
@@ -303,10 +303,10 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
             HorizontalDivider()
             Text(
                 text = "${probe.hits.size} codici hanno risposto diversamente da uno inesistente. " +
-                    "I più interessanti sono quelli che rifiutano il corpo vuoto: esistono e vogliono argomenti.",
+                    "In cima quelli che rispondono con dati: esistono di sicuro.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            probe.hits.sortedByDescending { it.existsAndTakesArguments }.forEach { hit ->
+            probe.hits.sortedByDescending { it.rank }.forEach { hit ->
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -319,7 +319,7 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
                         )
                         Text(text = hit.reply.describe, style = MaterialTheme.typography.bodySmall)
                     }
-                    if (hit.existsAndTakesArguments) {
+                    if (hit.rank > 0) {
                         OutlinedButton(onClick = { viewModel.setGimbalControlCode(hit.code) }) {
                             Text("Usa per il gimbal")
                         }

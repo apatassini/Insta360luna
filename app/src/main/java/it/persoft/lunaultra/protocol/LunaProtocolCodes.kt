@@ -26,6 +26,17 @@ object LunaProtocolCodes {
     const val START_TIMELAPSE = 22
     const val STOP_TIMELAPSE = 23
 
+    /**
+     * Codici che la camera mette al posto del comando nelle risposte.
+     *
+     * L'estrazione descriveva una risposta che rimanda indietro il codice del comando; la Luna
+     * Ultra (firmware 1.0.288) fa un'altra cosa: risponde sempre 200, e la correlazione la
+     * regge il `requestId`. Il codice 500 esiste nell'estrazione come errore, ma questo
+     * firmware non lo usa — a un comando inesistente risponde 200 con corpo vuoto.
+     */
+    const val RESPONSE_OK = 200
+    const val RESPONSE_ERROR = 500
+
     // ---- Notifiche camera -> telefono (CAMERA_NOTIFICATION_*) ----
     const val NOTIFICATION_BEGIN = 8192
     const val NOTIFICATION_BATTERY_UPDATE = 8195
@@ -197,7 +208,11 @@ object LunaProtocolCodes {
     /** Nome noto di un codice, se l'estrazione lo descrive. */
     fun nameOf(code: Int): String? = NAMES[code]
 
-    fun describe(code: Int): String = NAMES[code] ?: "SCONOSCIUTO_$code"
+    fun describe(code: Int): String = when (code) {
+        RESPONSE_OK -> "RISPOSTA_OK"
+        RESPONSE_ERROR -> "RISPOSTA_ERRORE"
+        else -> NAMES[code] ?: "SCONOSCIUTO_$code"
+    }
 
     /**
      * I 164 codici che l'estrazione pubblica descrive. L'app Insta360 del 2026 ne nomina 459:

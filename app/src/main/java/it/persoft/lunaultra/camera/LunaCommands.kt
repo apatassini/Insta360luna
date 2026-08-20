@@ -69,8 +69,8 @@ class LunaCommands(
 
         val level = reader.intOrNull(OPTIONS, OptionsField.BATTERY_STATUS, BatteryField.BATTERY_LEVEL)
         val scale = reader.intOrNull(OPTIONS, OptionsField.BATTERY_STATUS, BatteryField.BATTERY_SCALE)
-        val free = reader.intOrNull(OPTIONS, OptionsField.STORAGE_STATE, StorageField.FREE_SPACE)
-        val total = reader.intOrNull(OPTIONS, OptionsField.STORAGE_STATE, StorageField.TOTAL_SPACE)
+        val free = reader.longOrNull(OPTIONS, OptionsField.STORAGE_STATE, StorageField.FREE_SPACE)
+        val total = reader.longOrNull(OPTIONS, OptionsField.STORAGE_STATE, StorageField.TOTAL_SPACE)
 
         val capture = fetchCaptureState()
 
@@ -80,8 +80,8 @@ class LunaCommands(
                 recording = capture?.let { LunaProtocolCodes.CaptureState.isRecording(it.state) },
                 captureMode = capture?.let { LunaProtocolCodes.CaptureState.name(it.state) },
                 captureSeconds = capture?.seconds,
-                freeSpaceBytes = free?.toLong(),
-                totalSpaceBytes = total?.toLong(),
+                freeSpaceBytes = free,
+                totalSpaceBytes = total,
                 lastUpdateMs = System.currentTimeMillis(),
                 rawDump = optionsFrame.describePayload(),
             )

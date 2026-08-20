@@ -12,15 +12,21 @@ import kotlinx.coroutines.isActive
  * Scanner dei codici di comando, per trovare i numeri che l'estrazione pubblica non nomina —
  * in pratica: il comando del gimbal.
  *
- * Il metodo si regge su un dettaglio del protocollo: `Error.ErrorCode` distingue
- * `UNKNOWN_MSG_CODE` (comando inesistente) da `UNKNOWN_MSG_PAYLOAD` (comando esistente,
- * argomenti sbagliati). Inviando un corpo VUOTO a un codice sconosciuto, una risposta
- * "argomenti sbagliati" dice che il comando c'è **e non ha eseguito nulla**. È questo che
- * rende la scansione difendibile: un comando che rifiuta il payload non è mai partito.
+ * **Il metodo previsto non funziona su questo firmware.** L'idea era usare `Error.ErrorCode`,
+ * che distingue `UNKNOWN_MSG_CODE` (comando inesistente) da `UNKNOWN_MSG_PAYLOAD` (comando
+ * esistente, argomenti sbagliati): un corpo vuoto che riceve "argomenti sbagliati" avrebbe
+ * detto che il comando c'è e non ha eseguito nulla. Misurato sulla Luna Ultra 1.0.288, la
+ * camera non manda messaggi `Error` affatto: risponde **200 con corpo vuoto** sia a un codice
+ * inesistente, sia a un payload spazzatura, sia a un comando reale con argomenti mancanti.
  *
- * Prima di scansionare, [calibrate] verifica che l'oracolo funzioni davvero su questa camera.
- * Se un codice inesistente e uno esistente rispondono allo stesso modo, la scansione non
- * distingue nulla e viene rifiutata invece di produrre migliaia di righe senza significato.
+ * Resta però un segnale, ed è quello che questa versione usa: un codice che risponde **con
+ * dati** a un corpo vuoto esiste ed è un *getter* — restituisce qualcosa senza bisogno di
+ * argomenti. `PHONE_COMMAND_GET_PTZ_OPTION` è esattamente uno di questi, e trovarlo dà anche
+ * il vicinato dove cercare gli altri comandi PTZ: nei protocolli Insta360 i codici affini
+ * stanno vicini.
+ *
+ * [calibrate] misura come risponde un codice inesistente e verifica che almeno un segnale
+ * distinguibile esista, invece di dare per scontato quale sia.
  */
 class CodeProbe(
     private val session: CameraSession,
@@ -61,9 +67,22 @@ class CodeProbe(
     data class Hit(val code: Int, val reply: Reply) {
         val name: String? get() = LunaProtocolCodes.nameOf(code)
 
-        /** Il comando esiste e vuole argomenti: è il candidato più interessante. */
+        /** Il comando esiste e vuole argomenti. Su firmware che mandano messaggi Error. */
         val existsAndTakesArguments: Boolean
             get() = (reply as? Reply.Error)?.error?.isBadPayload == true
+
+        /**
+         * Ha risposto con dati a un corpo vuoto: esiste ed è un getter. Sulla Luna Ultra è
+         * l'unico segnale disponibile, ed è quello che porta a GET_PTZ_OPTION.
+         */
+        val answersWithData: Boolean get() = reply is Reply.Data
+
+        /** Ordine di interesse per la lista dei risultati. */
+        val rank: Int get() = when {
+            answersWithData -> 2
+            existsAndTakesArguments -> 1
+            else -> 0
+        }
     }
 
     data class Calibration(
@@ -89,22 +108,33 @@ class CodeProbe(
 
     private suspend fun probe(code: Int, body: ByteArray, timeoutMs: Long): Reply {
         val frame = session.requestRaw(code, body, timeoutMs).getOrNull() ?: return Reply.Silent
+        // La camera risponde 200 a tutto: l'eco del codice non è un segnale, ma va registrata
+        // perché su un firmware diverso potrebbe tornare a esserlo.
         val echo = frame.code == code
         if (frame.payload.isEmpty()) return Reply.Empty(echo)
-        val error = LunaError.parse(frame.payload)
-        return if (error != null) {
-            Reply.Error(error, echo)
+        val declared = if (frame.code == LunaProtocolCodes.RESPONSE_ERROR) {
+            LunaError.parse(frame.payload) ?: LunaError(LunaProtocolCodes.ErrorCode.UNKNOWN_ERROR, null)
+        } else {
+            LunaError.parse(frame.payload)
+        }
+        return if (declared != null) {
+            Reply.Error(declared, echo)
         } else {
             Reply.Data(frame.payload.size, Hex.encode(frame.payload, limit = 24), echo)
         }
     }
 
     /**
-     * Stabilisce come rispondono un codice inesistente e un payload sbagliato, e si rifiuta di
-     * benedire l'oracolo se i due casi non sono distinguibili.
+     * Misura come risponde la camera nei casi noti, e stabilisce se una scansione può dire
+     * qualcosa.
+     *
+     * Il requisito è volutamente più debole di "distinguere comando assente da argomenti
+     * sbagliati", perché su questo firmware quella distinzione non esiste. Basta che la
+     * risposta a un codice inesistente sia **stabile** e che almeno un caso noto risponda in
+     * modo **diverso**: quel diverso è ciò che la scansione va a cercare.
      */
     suspend fun calibrate(timeoutMs: Long = 3_000): Calibration {
-        log.info("Calibrazione dell'oracolo sui codici di errore")
+        log.info("Calibrazione: misuro come risponde la camera nei casi noti")
 
         val validBody = ProtoWriter().int32(1, LunaProtocolCodes.OptionType.CAMERA_TYPE).toByteArray()
         val known = probe(LunaProtocolCodes.GET_OPTIONS, validBody, timeoutMs)
@@ -128,23 +158,33 @@ class CodeProbe(
 
         val absent = absent1.signature
         val stable = absent == absent2.signature
+        val knownDiffers = known.signature != absent
 
         val reason = when {
             !stable ->
-                "Due codici inesistenti rispondono in modo diverso: la risposta non dipende dal codice, quindi non lo identifica."
+                "Due codici inesistenti rispondono in modo diverso: la risposta non dipende dal " +
+                    "codice, quindi non lo identifica. Scansione inutile."
 
             absent1 is Reply.Silent ->
-                "La camera non risponde ai codici inesistenti. Silenzio e comando bloccato sono indistinguibili: la scansione produrrebbe solo timeout."
+                "La camera non risponde ai codici inesistenti. Silenzio e comando bloccato sono " +
+                    "indistinguibili: la scansione produrrebbe solo timeout."
 
-            absent == junk.signature || absent == emptyOnReal.signature ->
-                "Un codice inesistente risponde come uno esistente: niente separa \"comando assente\" da \"argomenti sbagliati\"."
+            !knownDiffers ->
+                "Anche un comando reale con argomenti validi risponde come uno inesistente: non " +
+                    "c'è nessun segnale su cui basare la ricerca."
+
+            junk.signature == absent && emptyOnReal.signature == absent ->
+                "Questa camera non manda messaggi Error: a un codice inesistente, a un payload " +
+                    "sbagliato e a un comando reale senza argomenti risponde sempre \"$absent\". " +
+                    "Resta un solo segnale utile: un codice che risponde CON DATI a un corpo " +
+                    "vuoto esiste ed è un getter — ed è così che si trova GET_PTZ_OPTION."
 
             else ->
-                "Oracolo utilizzabile: un codice che risponde diversamente da \"$absent\" è un comando che questo firmware ha e l'estrazione non nomina."
+                "Un codice che risponde diversamente da \"$absent\" è un comando che questo " +
+                    "firmware ha e l'estrazione non nomina."
         }
 
-        val usable = stable && absent1 !is Reply.Silent &&
-            absent != junk.signature && absent != emptyOnReal.signature
+        val usable = stable && absent1 !is Reply.Silent && knownDiffers
 
         if (usable) log.info(reason) else log.warn(reason)
 
@@ -189,9 +229,15 @@ class CodeProbe(
         }
 
         val takingArguments = hits.filter { it.existsAndTakesArguments }
+        val getters = hits.filter { it.answersWithData }
         log.info("${hits.size} codici su ${codes.size} hanno risposto diversamente da uno inesistente")
+        if (getters.isNotEmpty()) {
+            log.info("Rispondono con dati a un corpo vuoto (esistono, sono getter): " +
+                getters.joinToString { "${it.code} (${(it.reply as Reply.Data).bytes}B)" })
+        }
         if (takingArguments.isNotEmpty()) {
-            log.info("Esistono e vogliono argomenti: ${takingArguments.joinToString { it.code.toString() }}")
+            log.info("Rifiutano il corpo vuoto (esistono e vogliono argomenti): " +
+                takingArguments.joinToString { it.code.toString() })
         }
         return hits
     }

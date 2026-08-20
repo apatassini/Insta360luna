@@ -391,9 +391,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Verifica che l'oracolo sui codici di errore funzioni su questa camera. Senza questo passo
-     * la scansione non parte: se un codice inesistente rispondesse come uno esistente, i
-     * risultati non direbbero nulla.
+     * Misura come risponde la camera nei casi noti. Senza questo passo la scansione non parte:
+     * se un codice inesistente rispondesse come uno esistente, i risultati non direbbero nulla.
      */
     fun calibrateProbe() {
         if (_probe.value.running) return
@@ -405,7 +404,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _probe.value = _probe.value.copy(running = true, done = 0, total = 0)
             val calibration = container.probe.calibrate()
             _probe.value = _probe.value.copy(running = false, calibration = calibration)
-            showMessage(if (calibration.usable) "Oracolo utilizzabile" else "Oracolo non utilizzabile")
+            showMessage(
+                if (calibration.usable) "Misura fatta: la scansione può partire"
+                else "Su questa camera la scansione non distinguerebbe nulla"
+            )
         }
     }
 
@@ -418,7 +420,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val calibration = _probe.value.calibration
         if (calibration == null || !calibration.usable) {
-            showMessage("Calibra l'oracolo prima di scansionare")
+            showMessage("Misura prima le risposte note")
             return
         }
         probeJob = viewModelScope.launch {

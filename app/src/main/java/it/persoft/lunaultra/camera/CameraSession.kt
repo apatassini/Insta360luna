@@ -63,9 +63,18 @@ class CameraSession(
     private var keepAliveJob: Job? = null
     private var dispatchJob: Job? = null
 
+    /** Momento dell'ultima connessione riuscita: serve a riconoscere una sessione rifiutata. */
+    @Volatile
+    private var connectedAtMs: Long = 0
+
+    /** Distingue una disconnessione voluta da una caduta: solo la seconda va ritentata. */
+    @Volatile
+    private var userDisconnected: Boolean = false
+
     suspend fun connect(): Result<Unit> {
         val cfg = settings.value
         _lastError.value = null
+        userDisconnected = false
         _state.value = ConnectionState.CONNECTING
         startDispatcher()
 
@@ -75,6 +84,7 @@ class CameraSession(
             _lastError.value = result.exceptionOrNull()?.message ?: "Connessione fallita"
             return Result.failure(result.exceptionOrNull() ?: IllegalStateException("Connessione fallita"))
         }
+        connectedAtMs = System.currentTimeMillis()
 
         _state.value = ConnectionState.HANDSHAKE
         val hello = client.send(Ucd2.hello(nextSequence()))
@@ -87,12 +97,24 @@ class CameraSession(
 
         // La camera impiega un attimo ad accettare i comandi dopo l'hello.
         delay(HANDSHAKE_SETTLE_MS)
+
+        // Il socket può essere già caduto durante l'attesa: la camera accetta una sola sessione
+        // di controllo e chiude subito quella di troppo. Dichiararsi connessi senza verificarlo
+        // lascerebbe un keep-alive a scrivere su un socket morto all'infinito.
+        if (!client.connected.value) {
+            _state.value = ConnectionState.ERROR
+            _lastError.value = SINGLE_SESSION_MESSAGE
+            log.error(SINGLE_SESSION_MESSAGE)
+            return Result.failure(SessionRefusedException())
+        }
+
         _state.value = ConnectionState.CONNECTED
         startKeepAlive()
         return Result.success(Unit)
     }
 
     suspend fun disconnect() {
+        userDisconnected = true
         keepAliveJob?.cancel()
         keepAliveJob = null
         client.disconnect()
@@ -121,15 +143,34 @@ class CameraSession(
         }
         scope.launch {
             client.connected.collect { connected ->
-                if (!connected && _state.value != ConnectionState.DISCONNECTED) {
-                    _state.value = ConnectionState.DISCONNECTED
-                    keepAliveJob?.cancel()
+                if (connected || _state.value == ConnectionState.DISCONNECTED) return@collect
+                keepAliveJob?.cancel()
+                keepAliveJob = null
+                pending.values.forEach { it.cancel() }
+                pending.clear()
+
+                // Una caduta pochi istanti dopo la connessione non è un problema di rete: è la
+                // camera che rifiuta la seconda sessione di controllo.
+                val alive = System.currentTimeMillis() - connectedAtMs
+                if (alive < REFUSED_WINDOW_MS) {
+                    _lastError.value = SINGLE_SESSION_MESSAGE
+                    log.error(SINGLE_SESSION_MESSAGE)
+                } else {
+                    _lastError.value = "La camera ha chiuso la connessione"
+                    log.warn("Connessione caduta dopo ${alive / 1000}s")
                 }
+                _state.value = ConnectionState.DISCONNECTED
             }
         }
     }
 
-    /** Il keep-alive è lo stesso frame dell'handshake, ripetuto. */
+    /**
+     * Il keep-alive è lo stesso frame dell'handshake, ripetuto.
+     *
+     * Si ferma al primo invio fallito invece di riprovare all'infinito: su un socket chiuso
+     * ogni tentativo produce solo una riga di errore, e il log serve a leggere cosa è successo,
+     * non a essere sommerso da centinaia di righe identiche.
+     */
     private fun startKeepAlive() {
         keepAliveJob?.cancel()
         val periodSeconds = settings.value.keepAliveSeconds
@@ -137,11 +178,18 @@ class CameraSession(
         keepAliveJob = scope.launch {
             while (isActive && _state.value == ConnectionState.CONNECTED) {
                 delay(periodSeconds * 1000L)
-                client.send(Ucd2.hello(nextSequence()))
-                    .onFailure { log.debug("Keep-alive non inviato: ${it.message}") }
+                val sent = client.send(Ucd2.hello(nextSequence()))
+                if (sent.isFailure) {
+                    log.warn("Keep-alive non inviato, sessione chiusa: ${sent.exceptionOrNull()?.message}")
+                    return@launch
+                }
             }
         }
     }
+
+    /** Vero se la sessione è caduta da sola e ha senso ritentare. */
+    val shouldRetry: Boolean
+        get() = !userDisconnected && _state.value != ConnectionState.CONNECTED
 
     /**
      * Invia un comando e attende la risposta.
@@ -157,9 +205,19 @@ class CameraSession(
     ): Result<Ucd2Frame> {
         val raw = requestRaw(code, body, timeoutMs)
         val frame = raw.getOrElse { return Result.failure(it) }
+        val label = LunaProtocolCodes.describe(code)
+
+        // Sulla Luna Ultra la risposta porta 200, non il codice del comando: un 500 è un
+        // errore dichiarato, e va trattato come tale anche se il corpo non è leggibile.
+        if (frame.code == LunaProtocolCodes.RESPONSE_ERROR) {
+            val declared = LunaError.parse(frame.payload)
+                ?: LunaError(LunaProtocolCodes.ErrorCode.UNKNOWN_ERROR, null)
+            return Result.failure(CameraErrorException(label, declared))
+        }
+
         val error = LunaError.parse(frame.payload)
         return if (error != null) {
-            Result.failure(CameraErrorException(LunaProtocolCodes.describe(code), error))
+            Result.failure(CameraErrorException(label, error))
         } else {
             Result.success(frame)
         }
@@ -219,7 +277,20 @@ class CameraSession(
                 (error.message?.let { " (\"$it\")" } ?: "")
         )
 
+    class SessionRefusedException : IllegalStateException(SINGLE_SESSION_MESSAGE)
+
     companion object {
         const val HANDSHAKE_SETTLE_MS = 1_500L
+
+        /**
+         * Entro questa finestra una caduta si legge come rifiuto della sessione, non come
+         * problema di rete: la camera chiude la connessione di troppo in poche decine di ms.
+         */
+        const val REFUSED_WINDOW_MS = 5_000L
+
+        const val SINGLE_SESSION_MESSAGE =
+            "La camera accetta una sola connessione di controllo alla volta e ha chiuso questa. " +
+                "Chiudi del tutto l'app Insta360 ufficiale (non basta metterla in secondo piano) " +
+                "e riprova."
     }
 }

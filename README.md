@@ -63,6 +63,19 @@ Nei frame di comando il corpo si apre con 9 byte:
 La sessione **non** si apre con un comando: si autorizza inviando un frame di tipo `0x05` a
 lunghezza zero con il token costante `f6 cc 4f 09`, ripetuto ogni 3 secondi come keep-alive.
 
+Due cose misurate sul campo (firmware **v1.0.288**) che correggono l'estrazione pubblica:
+
+- **la risposta non rimanda indietro il codice del comando: porta sempre `200`.** A correlare
+  richiesta e risposta è solo il `requestId`;
+- **la camera non manda messaggi `Error`.** A un codice inesistente, a un payload spazzatura e a
+  un comando reale senza argomenti risponde allo stesso modo: `200` con corpo vuoto.
+
+E soprattutto: **la camera accetta una sola connessione di controllo alla volta.** Se l'app
+Insta360 ufficiale è attiva, prende lei la sessione e questa app viene chiusa fuori — non è un
+bug, è il comportamento della camera. Non si possono usare le due app insieme, e non si possono
+"intercettare" i comandi dell'app ufficiale collegandosi in parallelo: servirebbe una cattura
+del traffico a livello di rete.
+
 Comandi usati dall'app, tutti con numero noto:
 
 | Codice | Comando | Uso |
@@ -131,6 +144,10 @@ Due trasporti, provati in quest'ordine:
    (tipo `0x01`, sottoflusso `0x20`) come stream elementare Annex-B, che l'app decodifica con
    MediaCodec su una `SurfaceView`.
 
+Sulla Luna Ultra 1.0.288 il MJPEG OSC non c'è, e lo stream di controllo arriva in **H.265**
+(1280×720 a 29 fps, dichiarati dalla notifica 8234), non in H.264: il codec viene riconosciuto
+dai set di parametri nel flusso, non dato per scontato.
+
 La sorgente in uso è scritta sotto l'anteprima. Se resta nera, il messaggio sopra dice a che
 punto si è fermata — rifiuto della camera, attesa del primo keyframe, flusso chiuso.
 
@@ -162,29 +179,33 @@ Tutto nella scheda **Diagnostica**, con la camera connessa e ferma.
 
 ### Il metodo
 
-Il messaggio `Error` della camera distingue `UNKNOWN_MSG_CODE` (comando inesistente) da
-`UNKNOWN_MSG_PAYLOAD` (comando esistente, argomenti sbagliati). Questa differenza è un oracolo:
-inviando un corpo **vuoto** a un codice sconosciuto, una risposta «argomenti sbagliati» dice che
-il comando c'è **e non ha eseguito nulla**.
+L'idea di partenza era usare i codici di errore come oracolo: `UNKNOWN_MSG_CODE` (comando
+inesistente) contro `UNKNOWN_MSG_PAYLOAD` (comando esistente, argomenti sbagliati). **Misurato
+sulla camera, non funziona**: la Luna Ultra non manda messaggi `Error`, risponde `200` con corpo
+vuoto in tutti e tre i casi.
 
-È ciò che rende la scansione difendibile, dove sparare payload inventati non lo sarebbe: un
-comando che rifiuta i suoi argomenti non è mai partito.
+Resta un segnale, ed è quello che l'app usa: **un codice che risponde con dati a un corpo vuoto
+esiste ed è un getter** — restituisce qualcosa senza bisogno di argomenti.
+`PHONE_COMMAND_GET_PTZ_OPTION` è esattamente uno di questi, e trovarlo dà anche il vicinato in
+cui cercare gli altri comandi PTZ.
+
+Un corpo vuoto resta la sonda più prudente possibile, e i comandi distruttivi (cancellazione
+file, riavvio, ripristino di fabbrica, Wi-Fi) e l'intero blocco di fabbrica `12288+` sono
+esclusi a monte: lì un corpo vuoto non protegge, perché un comando senza argomenti si limita a
+eseguire.
 
 ### I passi
 
-1. **Calibra l'oracolo.** Confronta come risponde un codice sicuramente inesistente con come
-   risponde uno reale. Se le due risposte fossero identiche la scansione non distinguerebbe
-   nulla, e l'app si rifiuta di procedere invece di produrre migliaia di righe senza significato.
+1. **Misura le risposte note.** L'app confronta un codice sicuramente inesistente con casi reali
+   e ti dice, in chiaro, quale segnale è disponibile su questa camera. Se non ce ne fosse
+   nessuno, si rifiuta di scansionare invece di produrre migliaia di righe senza significato.
 2. **Scansiona una gamma.** La più promettente è **Blocco richieste (4096–8191)**: è dichiarato
    `PHONE_REQUEST_*` e l'estrazione pubblica non ci mette dentro niente — un pan/tilt interattivo
    è esattamente ciò per cui esiste un blocco «richieste». In alternativa i buchi dentro
    **Comandi telefono (0–152)**, dove atterrano le aggiunte successive al 2020.
-3. **Prova i candidati.** Chi rifiuta il corpo vuoto esiste e vuole argomenti: dal risultato,
-   il pulsante *Usa per il gimbal* lo imposta. Poi la croce direzionale, guardando la camera.
-
-Comandi distruttivi (cancellazione file, riavvio, ripristino di fabbrica, Wi-Fi) e l'intero
-blocco di fabbrica `12288+` sono esclusi a monte dallo scanner: lì un corpo vuoto non protegge,
-perché un comando senza argomenti si limita a eseguire.
+3. **Prova i candidati.** In cima alla lista stanno quelli che rispondono con dati: esistono di
+   sicuro. Il pulsante *Usa per il gimbal* imposta il codice; poi la croce direzionale,
+   guardando la camera.
 
 ### Il log
 
@@ -251,11 +272,12 @@ it.persoft.lunaultra
 ```
 
 Il core (tutto tranne `ui/` e `WifiNetworkBinder`) non dipende dall'SDK Android ed è testato
-come codice JVM puro: 49 test coprono framing UCD2 e checksum, riaggancio al magic dopo byte
+come codice JVM puro: 54 test coprono framing UCD2 e checksum, riaggancio al magic dopo byte
 spuri, frame media, riconoscimento degli errori, corpi dei comandi confrontati con quelli
 osservati, riconoscimento dei NAL Annex-B e dei keyframe, conteggio degli scatti di una
-panoramica, roundtrip protobuf, interpolazione, calcolo delle durate e un giro completo su
-socket in loopback.
+panoramica, roundtrip protobuf, interpolazione, calcolo delle durate, un giro completo su socket
+in loopback e le **risposte reali catturate dalla camera** — batteria, spazio disco a 64 bit,
+modello, seriale e firmware, byte per byte come sono arrivati.
 
 ---
 

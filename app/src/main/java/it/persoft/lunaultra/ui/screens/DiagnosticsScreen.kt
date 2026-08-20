@@ -9,9 +9,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -29,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.CodeProbe
+import it.persoft.lunaultra.net.LogLevel
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.LabeledValue
@@ -95,7 +95,7 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
                 Text("Nessuna notifica ricevuta finora.", style = MaterialTheme.typography.bodyMedium)
             } else {
                 sightings.forEach { sighting ->
-                    Divider()
+                    HorizontalDivider()
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -117,10 +117,9 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
                             )
                         }
                         if (!sighting.isNamed) {
-                            AssistChip(
+                            OutlinedButton(
                                 onClick = { viewModel.updateGimbal { it.copy(ptzNotificationCode = sighting.code) } },
-                                label = { Text("È il PTZ") },
-                            )
+                            ) { Text("È il PTZ") }
                         }
                     }
                     if (sighting.lastDump.isNotBlank()) {
@@ -168,9 +167,14 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
             ) {
                 log.forEach { entry ->
                     Text(
-                        text = entry.format(),
+                        text = "${entry.time}  ${entry.level}  ${entry.message}",
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
+                        color = when (entry.level) {
+                            LogLevel.ERROR, LogLevel.WARN -> MaterialTheme.colorScheme.error
+                            LogLevel.TX, LogLevel.RX -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurface
+                        },
                     )
                 }
             }
@@ -272,7 +276,7 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
         }
 
         if (probe.hits.isNotEmpty()) {
-            Divider()
+            HorizontalDivider()
             Text(
                 text = "${probe.hits.size} codici hanno risposto diversamente da uno inesistente. " +
                     "I più interessanti sono quelli che rifiutano il corpo vuoto: esistono e vogliono argomenti.",
@@ -292,10 +296,9 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
                         Text(text = hit.reply.describe, style = MaterialTheme.typography.bodySmall)
                     }
                     if (hit.existsAndTakesArguments) {
-                        AssistChip(
-                            onClick = { viewModel.setGimbalControlCode(hit.code) },
-                            label = { Text("Usa per il gimbal") },
-                        )
+                        OutlinedButton(onClick = { viewModel.setGimbalControlCode(hit.code) }) {
+                            Text("Usa per il gimbal")
+                        }
                     }
                 }
             }

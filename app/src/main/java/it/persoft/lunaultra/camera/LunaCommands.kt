@@ -154,6 +154,27 @@ class LunaCommands(
             LunaMessages.stopCapture(LunaProtocolCodes.CaptureMode.NORMAL),
         ).map { }
 
+    /** `TakePicture { CaptureMode mode = 1 }` — uno scatto singolo. */
+    suspend fun takePicture(): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.TAKE_PICTURE,
+            LunaMessages.takePicture(LunaProtocolCodes.CaptureMode.NORMAL),
+            timeoutMs = PHOTO_TIMEOUT_MS,
+        ).map { }
+
+    // ---- Anteprima dal vivo ----
+
+    /**
+     * Chiede alla camera di aprire lo stream di anteprima. Il video non arriva come risposta:
+     * viene spinto sui frame media della stessa sessione, che [CameraSession.videoFrames]
+     * ripubblica.
+     */
+    suspend fun startLiveStream(): Result<Unit> =
+        session.request(LunaProtocolCodes.START_LIVE_STREAM, LunaMessages.startLiveStream()).map { }
+
+    suspend fun stopLiveStream(): Result<Unit> =
+        session.request(LunaProtocolCodes.STOP_LIVE_STREAM).map { }
+
     // ---- Timelapse ----
 
     /**
@@ -191,11 +212,11 @@ class LunaCommands(
      * registrazione normale è spesso la scelta giusta (il timelapse interno accelera i tempi
      * e rende difficile far coincidere durata reale e durata della sequenza).
      */
-    suspend fun startRecording(): Result<Unit> =
-        if (settings.value.useCameraTimelapse) startTimelapse() else startCapture()
+    suspend fun startRecording(useCameraTimelapse: Boolean): Result<Unit> =
+        if (useCameraTimelapse) startTimelapse() else startCapture()
 
-    suspend fun stopRecording(): Result<Unit> =
-        if (settings.value.useCameraTimelapse) stopTimelapse() else stopCapture()
+    suspend fun stopRecording(useCameraTimelapse: Boolean): Result<Unit> =
+        if (useCameraTimelapse) stopTimelapse() else stopCapture()
 
     // ---- Gimbal ----
 
@@ -255,5 +276,8 @@ class LunaCommands(
 
     companion object {
         private const val OPTIONS = LunaMessages.FIELD_OPTIONS_VALUE
+
+        /** Uno scatto può richiedere più tempo di un comando qualsiasi: HDR, posa lunga, salvataggio. */
+        private const val PHOTO_TIMEOUT_MS = 15_000L
     }
 }

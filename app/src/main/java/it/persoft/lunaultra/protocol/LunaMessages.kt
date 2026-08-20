@@ -37,6 +37,27 @@ object LunaMessages {
             .int32(2, mode)
             .toByteArray()
 
+    /** `TakePicture { CaptureMode mode = 1 }` */
+    fun takePicture(mode: Int): ByteArray = ProtoWriter().int32(1, mode).toByteArray()
+
+    /**
+     * `StartLiveStream`, con i campi:
+     * `2 enableVideo, 6 videoBitrate, 7 resolution, 8 enableGyro, 9 videoBitrate1, 10 resolution1`.
+     *
+     * I valori sono quelli di una cattura funzionante dell'app ufficiale — risoluzione 9 è
+     * `RES_1440_720P30`, 18 è `RES_480_240P30` — e sono lasciati identici di proposito: se la
+     * camera rifiuta, significa che non è d'accordo lei, non che abbiamo tirato a indovinare.
+     */
+    fun startLiveStream(): ByteArray =
+        ProtoWriter()
+            .int32(2, 1)
+            .int32(6, 40)
+            .int32(7, 9)
+            .int32(8, 1)
+            .int32(9, 40)
+            .int32(10, 18)
+            .toByteArray()
+
     /** Corpo del comando gimbal: due velocità con segno. Forma da confermare sulla camera. */
     fun gimbalVelocity(panField: Int, panValue: Int, tiltField: Int, tiltValue: Int): ByteArray =
         ProtoWriter()

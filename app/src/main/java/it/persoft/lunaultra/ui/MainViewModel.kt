@@ -9,9 +9,11 @@ import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
+import it.persoft.lunaultra.preview.PreviewState
 import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.timelapse.InterpolationMode
+import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
 import kotlinx.coroutines.Job
@@ -52,6 +54,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val ptz = container.gimbal.position
     val gimbalMoving = container.gimbal.moving
     val runState = container.engine.state
+    val preview: StateFlow<PreviewState> = container.preview.state
 
     private val _status = MutableStateFlow(CameraStatus())
     val status: StateFlow<CameraStatus> = _status
@@ -172,6 +175,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sightings.value = emptyList()
     }
 
+    // ---------------------------------------------------------------- anteprima
+
+    fun startPreview() {
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti alla camera prima di aprire l'anteprima")
+            return
+        }
+        container.preview.start()
+    }
+
+    fun stopPreview() = container.preview.stop()
+
+    fun togglePreview() {
+        if (preview.value.active) stopPreview() else startPreview()
+    }
+
+    fun attachPreviewSurface(surface: android.view.Surface?) =
+        container.preview.attachSurface(surface)
+
     // ---------------------------------------------------------------- gimbal
 
     fun jogStart(pan: Float, tilt: Float) {
@@ -272,6 +294,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setConfigureCameraTimelapse(enabled: Boolean) =
         container.sequenceStore.update { it.copy(configureCameraTimelapse = enabled) }
 
+    fun setShootingMode(mode: ShootingMode) =
+        container.sequenceStore.update { it.copy(mode = mode) }
+
+    fun setShotsPerLeg(shots: Int) =
+        container.sequenceStore.update { it.copy(shotsPerLeg = shots.coerceIn(2, 200)) }
+
+    fun setSettleSeconds(seconds: Float) =
+        container.sequenceStore.update { it.copy(settleSeconds = seconds.coerceIn(0f, 30f)) }
+
     fun startRun() {
         val seq = sequence.value
         if (!seq.isRunnable) {
@@ -290,9 +321,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { container.gimbal.stop() }
     }
 
+    private val usesCameraTimelapse: Boolean
+        get() = sequence.value.mode == ShootingMode.TIMELAPSE_CAMERA
+
     fun startRecording() {
         viewModelScope.launch {
-            container.commands.startRecording()
+            container.commands.startRecording(usesCameraTimelapse)
                 .onSuccess { showMessage("Registrazione avviata") }
                 .onFailure { showMessage("Start non riuscito: ${it.message}") }
         }
@@ -300,9 +334,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopRecording() {
         viewModelScope.launch {
-            container.commands.stopRecording()
+            container.commands.stopRecording(usesCameraTimelapse)
                 .onSuccess { showMessage("Registrazione fermata") }
                 .onFailure { showMessage("Stop non riuscito: ${it.message}") }
+        }
+    }
+
+    /** Scatto singolo, utile per provare l'inquadratura prima di lanciare una panoramica. */
+    fun takePicture() {
+        viewModelScope.launch {
+            container.commands.takePicture()
+                .onSuccess { showMessage("Scatto eseguito") }
+                .onFailure { showMessage("Scatto non riuscito: ${it.message}") }
         }
     }
 
@@ -316,9 +359,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         container.settingsStore.update { it.copy(gimbal = transform(it.gimbal)) }
 
     fun setGimbalControlCode(code: Int) = updateGimbal { it.copy(controlCode = code) }
-
-    fun setUseCameraTimelapse(enabled: Boolean) =
-        container.settingsStore.update { it.copy(useCameraTimelapse = enabled) }
 
     fun setTimelapseMode(mode: Int) = container.settingsStore.update { it.copy(timelapseMode = mode) }
 
@@ -398,6 +438,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearLog() = container.log.clear()
 
     fun exportLog(): String = container.log.exportText()
+
+    /**
+     * Salva il log su file e apre la condivisione. L'intestazione porta host, stato e codice
+     * gimbal in uso: senza quel contesto le righe del log si leggono a metà.
+     */
+    fun shareLog(context: android.content.Context) {
+        val header = listOf(
+            "camera: ${settings.value.host}:${settings.value.port}",
+            "stato: ${connectionState.value}",
+            "codice gimbal: ${settings.value.gimbal.controlCode.takeIf { it != 0 } ?: "ignoto"}",
+            "notifica PTZ: ${settings.value.gimbal.ptzNotificationCode}",
+            "modello: ${status.value.model ?: "?"} firmware: ${status.value.firmware ?: "?"}",
+            "modalità sequenza: ${sequence.value.mode.name}",
+        )
+        LogSharing.share(context, container.log.exportText(), header)
+            .onSuccess { showMessage("Log pronto per la condivisione") }
+            .onFailure { showMessage("Condivisione non riuscita: ${it.message}") }
+    }
 
     fun showMessage(text: String) {
         _message.value = text

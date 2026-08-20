@@ -10,6 +10,36 @@ enum class InterpolationMode(val label: String) {
     ;
 }
 
+/**
+ * Cosa deve fare la camera mentre il gimbal percorre la sequenza.
+ *
+ * La differenza fra le tre non è un dettaglio di comando: cambia il senso della durata che
+ * imposti. In [VIDEO] la durata è tempo reale di ripresa; in [TIMELAPSE_CAMERA] è il tempo che
+ * la camera comprimerà da sé; in [FOTO] non è tempo di ripresa affatto, ma il tempo che il
+ * gimbal impiega a passare da uno scatto al successivo.
+ */
+@Serializable
+enum class ShootingMode(val label: String, val description: String) {
+    VIDEO(
+        "Video",
+        "Registra video normale lungo tutto il percorso. Durata reale = durata della sequenza: " +
+            "l'accelerazione la fai in montaggio, con pieno controllo.",
+    ),
+    TIMELAPSE_CAMERA(
+        "Timelapse camera",
+        "Usa il timelapse interno della camera, che comprime i tempi da sé. Comodo, ma il " +
+            "risultato finale non dura quanto la sequenza.",
+    ),
+    FOTO(
+        "Foto a scatti",
+        "Si ferma a ogni punto di scatto, aspetta che il gimbal sia immobile e fotografa. " +
+            "È la modalità per le panoramiche da unire in post produzione.",
+    ),
+    ;
+
+    val movesContinuously: Boolean get() = this != FOTO
+}
+
 @Serializable
 data class Waypoint(
     val id: String = UUID.randomUUID().toString(),
@@ -23,6 +53,7 @@ data class Waypoint(
 @Serializable
 data class TimelapseSequence(
     val waypoints: List<Waypoint> = emptyList(),
+    val mode: ShootingMode = ShootingMode.VIDEO,
     val intervalSeconds: Float = 2f,
     val totalDurationSeconds: Float = 60f,
     val interpolation: InterpolationMode = InterpolationMode.SMOOTH,
@@ -31,6 +62,15 @@ data class TimelapseSequence(
     val controlRecording: Boolean = true,
     /** Se true invia a monte durata e intervallo alla camera con SET_TIMELAPSE_OPTIONS. */
     val configureCameraTimelapse: Boolean = true,
+
+    /** Scatti per tratto in modalità [ShootingMode.FOTO], estremi inclusi. */
+    val shotsPerLeg: Int = 6,
+
+    /**
+     * Pausa fra l'arrivo in posizione e lo scatto. Il gimbal ha un'inerzia: fotografare subito
+     * dopo un movimento produce scatti mossi, che in una panoramica si vedono all'unione.
+     */
+    val settleSeconds: Float = 1.5f,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)
 
@@ -49,7 +89,26 @@ data class TimelapseSequence(
 
     fun effectiveTotalSeconds(): Float = legDurations().sum()
 
-    /** Numero di scatti previsti, informativo (dipende dall'intervallo impostato in camera). */
+    /** Scatti effettivi per tratto: almeno due, altrimenti non è un percorso. */
+    fun effectiveShotsPerLeg(): Int = shotsPerLeg.coerceAtLeast(2)
+
+    /**
+     * Numero totale di scatti in modalità foto. Il punto di arrivo di un tratto coincide con la
+     * partenza del successivo, quindi si conta una volta sola.
+     */
+    fun totalShots(): Int {
+        if (legCount == 0) return 0
+        return legCount * (effectiveShotsPerLeg() - 1) + 1
+    }
+
+    /**
+     * Quanto dura davvero la sequenza in modalità foto: al movimento va aggiunto il tempo di
+     * assestamento e di scatto, che su una panoramica lunga cambia il totale in modo netto.
+     */
+    fun estimatedPhotoSeconds(): Float =
+        effectiveTotalSeconds() + totalShots() * (settleSeconds + ESTIMATED_SHOT_SECONDS)
+
+    /** Numero di scatti previsti dal timelapse interno della camera, informativo. */
     fun estimatedShots(): Int {
         val interval = intervalSeconds.coerceAtLeast(0.1f)
         return (effectiveTotalSeconds() / interval).toInt().coerceAtLeast(0)
@@ -57,5 +116,8 @@ data class TimelapseSequence(
 
     companion object {
         const val MIN_LEG_SECONDS = 1f
+
+        /** Stima prudente del tempo di uno scatto, dal comando al salvataggio. */
+        const val ESTIMATED_SHOT_SECONDS = 1.5f
     }
 }

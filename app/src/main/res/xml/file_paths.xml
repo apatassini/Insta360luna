@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- I log esportati finiscono qui: cache privata, ripulita dal sistema quando serve spazio. -->
+    <cache-path
+        name="log"
+        path="log/" />
+</paths>

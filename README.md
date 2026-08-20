@@ -101,18 +101,58 @@ In alternativa, aprire la cartella con Android Studio (Ladybug o successivo).
 2. Aprire l'app, scheda **Controllo**, premere **Connetti**
    (l'app forza il routing dei socket sulla rete Wi-Fi anche se non offre Internet).
    Batteria, modello e stato di registrazione compaiono subito: se li vedi, il protocollo gira.
-3. **La prima volta**: scheda **Diagnostica** → trovare il codice del comando gimbal
+3. **Accendi** l'anteprima: da lì in poi vedi dove punti mentre memorizzi i punti.
+4. **La prima volta**: scheda **Diagnostica** → trovare il codice del comando gimbal
    (vedi sotto). È l'unico passo di configurazione.
-4. Con la croce direzionale portare il gimbal sulla prima inquadratura, premere
-   **Memorizza punto**.
-5. Ripetere per gli altri punti (A, B, C…).
-6. Scheda **Sequenza**: impostare durata totale (o durata per tratto), intervallo e tipo di
-   movimento (`Lineare` o `Smooth`).
-7. Tornare in **Controllo** e premere **AVVIA TIMELAPSE**.
-8. **STOP** interrompe tutto immediatamente: ferma il gimbal e la registrazione.
+5. Scheda **Sequenza**: scegliere **cosa vuoi fare** — video, timelapse della camera, o foto a
+   scatti per una panoramica.
+6. In **Controllo**, con la croce direzionale portare il gimbal sulla prima inquadratura e
+   premere **Memorizza punto**. Ripetere per gli altri (A, B, C…).
+7. In **Sequenza** impostare durata (totale o per tratto) e, in modalità foto, scatti per tratto
+   e attesa prima dello scatto.
+8. Tornare in **Controllo** e premere **AVVIA**.
+9. **STOP** interrompe tutto immediatamente: ferma il gimbal e la registrazione.
 
 I punti e le impostazioni sono salvati in JSON nella memoria privata dell'app e ricaricati
 all'avvio.
+
+---
+
+## Anteprima dal vivo
+
+Due trasporti, provati in quest'ordine:
+
+1. **MJPEG via OSC** — `POST http://192.168.42.1/osc/commands/execute` con
+   `{"name":"camera.getLivePreview"}`. Quando la camera lo offre è la strada migliore: un JPEG
+   per fotogramma, nessun decoder, nessun keyframe da attendere.
+2. **Stream della sessione di controllo** — `START_LIVE_STREAM` (codice 1) con i campi
+   `2 enableVideo, 6 videoBitrate, 7 resolution, 8 enableGyro, 9 videoBitrate1, 10 resolution1`.
+   Il video non torna come risposta: arriva sui frame media della stessa connessione TCP
+   (tipo `0x01`, sottoflusso `0x20`) come stream elementare Annex-B, che l'app decodifica con
+   MediaCodec su una `SurfaceView`.
+
+La sorgente in uso è scritta sotto l'anteprima. Se resta nera, il messaggio sopra dice a che
+punto si è fermata — rifiuto della camera, attesa del primo keyframe, flusso chiuso.
+
+---
+
+## Le tre modalità
+
+La scelta non cambia solo quale comando parte: cambia il significato della durata che imposti.
+
+| Modalità | Cosa fa | La durata è… |
+|---|---|---|
+| **Video** | Registra video normale lungo tutto il percorso | tempo reale di ripresa: l'accelerazione la fai in montaggio |
+| **Timelapse camera** | Usa il timelapse interno (`START_TIMELAPSE`) | il tempo che la camera comprimerà da sé |
+| **Foto a scatti** | Si ferma a ogni punto, aspetta, scatta (`TAKE_PICTURE`) | il tempo di movimento **fra** uno scatto e il successivo |
+
+La modalità **foto** è quella per le panoramiche da unire in post produzione. Due dettagli che
+cambiano il risultato:
+
+- **l'attesa prima dello scatto** esiste perché il gimbal ha inerzia. Fotografare subito dopo un
+  movimento dà scatti mossi, e in una panoramica il difetto si vede proprio sulle giunzioni;
+- **il punto in comune fra due tratti si scatta una volta sola**. Due foto identiche nello stesso
+  punto complicano l'unione invece di aiutarla.
 
 ---
 
@@ -145,6 +185,13 @@ comando che rifiuta i suoi argomenti non è mai partito.
 Comandi distruttivi (cancellazione file, riavvio, ripristino di fabbrica, Wi-Fi) e l'intero
 blocco di fabbrica `12288+` sono esclusi a monte dallo scanner: lì un corpo vuoto non protegge,
 perché un comando senza argomenti si limita a eseguire.
+
+### Il log
+
+La scheda Diagnostica registra **ogni comando inviato e ogni risposta ricevuta**, con i byte
+grezzi e i campi protobuf decodificati. Il pulsante **Condividi** lo salva su file e lo allega:
+è il formato giusto per farlo analizzare, e l'intestazione porta host, stato, codice gimbal in
+uso, modello e firmware.
 
 ### In parallelo: le notifiche
 
@@ -196,6 +243,7 @@ it.persoft.lunaultra
 ├─ net/          EventLog, SocketBinder, TcpClient, WifiNetworkBinder
 ├─ camera/       CameraSession (handshake, keep-alive, requestId), LunaCommands,
 │                LunaError, CodeProbe (scanner), modelli
+├─ preview/      AnnexB, VideoDecoder (MediaCodec), MjpegStream, PreviewController
 ├─ gimbal/       GimbalController (jog manuale, dead reckoning, drive verso target)
 ├─ timelapse/    Waypoint, TimelapseSequence, Interpolation, TimelapseEngine
 ├─ data/         AppSettings, JsonFileStore (persistenza JSON)
@@ -203,10 +251,11 @@ it.persoft.lunaultra
 ```
 
 Il core (tutto tranne `ui/` e `WifiNetworkBinder`) non dipende dall'SDK Android ed è testato
-come codice JVM puro: 36 test coprono framing UCD2 e checksum, riaggancio al magic dopo byte
+come codice JVM puro: 49 test coprono framing UCD2 e checksum, riaggancio al magic dopo byte
 spuri, frame media, riconoscimento degli errori, corpi dei comandi confrontati con quelli
-osservati, roundtrip protobuf, interpolazione, calcolo delle durate e un giro completo su socket
-in loopback.
+osservati, riconoscimento dei NAL Annex-B e dei keyframe, conteggio degli scatti di una
+panoramica, roundtrip protobuf, interpolazione, calcolo delle durate e un giro completo su
+socket in loopback.
 
 ---
 

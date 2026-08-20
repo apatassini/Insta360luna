@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.timelapse.InterpolationMode
+import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
@@ -119,6 +120,55 @@ fun SequenceScreen(viewModel: MainViewModel) {
             }
         }
 
+        SectionCard(title = "Cosa vuoi fare") {
+            ShootingMode.entries.forEach { mode ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = sequence.mode == mode,
+                        onClick = { viewModel.setShootingMode(mode) },
+                        label = { Text(mode.label) },
+                    )
+                }
+                Text(mode.description, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
+        if (sequence.mode == ShootingMode.FOTO) {
+            SectionCard(title = "Panoramica a scatti") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    NumberField(
+                        label = "Scatti per tratto",
+                        value = sequence.shotsPerLeg.toString(),
+                        onValueChange = { text -> text.toIntOrNull()?.let(viewModel::setShotsPerLeg) },
+                        modifier = Modifier.weight(1f),
+                    )
+                    NumberField(
+                        label = "Attesa prima dello scatto (s)",
+                        value = sequence.settleSeconds.toString(),
+                        onValueChange = { text -> text.toFloatOrNull()?.let(viewModel::setSettleSeconds) },
+                        keyboardType = KeyboardType.Decimal,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                LabeledValue("Scatti totali", sequence.totalShots().toString())
+                LabeledValue("Durata stimata", "${sequence.estimatedPhotoSeconds().roundToInt()} s")
+                Text(
+                    "L'attesa serve a far esaurire l'inerzia del gimbal: scattare subito dopo un " +
+                        "movimento produce foto mosse, e in una panoramica il difetto si vede " +
+                        "proprio sulle giunzioni. Sotto il secondo è raramente sufficiente.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "Il punto finale di un tratto coincide con l'iniziale del successivo e viene " +
+                        "scattato una volta sola.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+
         SectionCard(title = "Tempi") {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Switch(checked = sequence.useTotalDuration, onCheckedChange = viewModel::setUseTotalDuration)
@@ -144,11 +194,27 @@ fun SequenceScreen(viewModel: MainViewModel) {
                 )
             }
             LabeledValue("Durata effettiva", "${sequence.effectiveTotalSeconds().roundToInt()} s")
-            LabeledValue("Scatti stimati", sequence.estimatedShots().toString())
-            Text(
-                "L'intervallo è indicativo: se la camera non espone il parametro va impostato dal menu della Luna.",
-                style = MaterialTheme.typography.bodySmall,
-            )
+            when (sequence.mode) {
+                ShootingMode.TIMELAPSE_CAMERA -> {
+                    LabeledValue("Scatti stimati dalla camera", sequence.estimatedShots().toString())
+                    Text(
+                        "In questa modalità l'intervallo lo usa la camera. Se non accetta il " +
+                            "comando va impostato dal suo menu: il log lo dice.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                ShootingMode.VIDEO -> Text(
+                    "In modalità video l'intervallo non viene usato: la durata è tempo reale di ripresa.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+
+                ShootingMode.FOTO -> Text(
+                    "In modalità foto questa durata è il tempo di movimento fra gli scatti, a cui " +
+                        "si aggiungono attesa e scatto.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
 
         SectionCard(title = "Movimento") {
@@ -161,16 +227,20 @@ fun SequenceScreen(viewModel: MainViewModel) {
                     )
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(
-                    checked = sequence.configureCameraTimelapse,
-                    onCheckedChange = viewModel::setConfigureCameraTimelapse,
-                )
-                Text("Invia durata e intervallo alla camera", style = MaterialTheme.typography.bodyMedium)
+            if (sequence.mode == ShootingMode.TIMELAPSE_CAMERA) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Switch(
+                        checked = sequence.configureCameraTimelapse,
+                        onCheckedChange = viewModel::setConfigureCameraTimelapse,
+                    )
+                    Text("Invia durata e intervallo alla camera", style = MaterialTheme.typography.bodyMedium)
+                }
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(checked = sequence.controlRecording, onCheckedChange = viewModel::setControlRecording)
-                Text("Avvia e ferma la registrazione", style = MaterialTheme.typography.bodyMedium)
+            if (sequence.mode.movesContinuously) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Switch(checked = sequence.controlRecording, onCheckedChange = viewModel::setControlRecording)
+                    Text("Avvia e ferma la registrazione", style = MaterialTheme.typography.bodyMedium)
+                }
             }
         }
     }

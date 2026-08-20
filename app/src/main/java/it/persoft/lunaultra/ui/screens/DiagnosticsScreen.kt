@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.CodeProbe
@@ -45,6 +46,7 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
     val probe by viewModel.probe.collectAsState()
     val sightings by viewModel.sightings.collectAsState()
     val log by viewModel.logEntries.collectAsState()
+    val context = LocalContext.current
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
 
@@ -159,23 +161,45 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
 
         SectionCard(
             title = "Log",
-            trailing = { OutlinedButton(onClick = viewModel::clearLog) { Text("Pulisci") } },
+            trailing = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { viewModel.shareLog(context) }) { Text("Condividi") }
+                    OutlinedButton(onClick = viewModel::clearLog) { Text("Pulisci") }
+                }
+            },
         ) {
+            Text(
+                text = "Ogni comando inviato e ogni risposta ricevuta, con i byte grezzi e i campi " +
+                    "protobuf decodificati. \"Condividi\" lo salva su file e lo allega: è così " +
+                    "che va mandato per farlo analizzare.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             Column(
                 modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 log.forEach { entry ->
+                    val color = when (entry.level) {
+                        LogLevel.ERROR, LogLevel.WARN -> MaterialTheme.colorScheme.error
+                        LogLevel.TX -> MaterialTheme.colorScheme.tertiary
+                        LogLevel.RX -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.onSurface
+                    }
                     Text(
                         text = "${entry.time}  ${entry.level}  ${entry.message}",
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        color = when (entry.level) {
-                            LogLevel.ERROR, LogLevel.WARN -> MaterialTheme.colorScheme.error
-                            LogLevel.TX, LogLevel.RX -> MaterialTheme.colorScheme.primary
-                            else -> MaterialTheme.colorScheme.onSurface
-                        },
+                        color = color,
                     )
+                    entry.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                        Text(
+                            text = detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = color.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(start = 12.dp),
+                        )
+                    }
                 }
             }
         }
@@ -397,24 +421,6 @@ private fun GimbalTuningCard(viewModel: MainViewModel) {
             Switch(
                 checked = gimbal.invertTilt,
                 onCheckedChange = { on -> viewModel.updateGimbal { it.copy(invertTilt = on) } },
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Usa il timelapse interno", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    text = "Se spento la camera registra video normale e l'accelerazione la fai in montaggio: " +
-                        "durata reale e durata della sequenza coincidono.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Switch(
-                checked = settings.useCameraTimelapse,
-                onCheckedChange = viewModel::setUseCameraTimelapse,
             )
         }
     }

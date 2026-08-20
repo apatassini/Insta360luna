@@ -13,36 +13,52 @@ data class LogEntry(
     val timestampMs: Long,
     val level: LogLevel,
     val message: String,
+    /** Righe aggiuntive: dump esadecimale e campi protobuf decodificati. */
+    val detail: String? = null,
 ) {
     val time: String get() = TIME_FORMAT.format(Date(timestampMs))
+
+    /** Riga completa per l'esportazione: il dettaglio va indentato per restare leggibile. */
+    fun toText(): String {
+        val head = "$time ${level.name.padEnd(5)} $message"
+        if (detail.isNullOrBlank()) return head
+        return head + "\n" + detail.trimEnd().lines().joinToString("\n") { "                  $it" }
+    }
 
     private companion object {
         val TIME_FORMAT = SimpleDateFormat("HH:mm:ss.SSS", Locale.ITALY)
     }
 }
 
-/** Log circolare condiviso: alimenta la schermata Diagnostica e l'export testuale. */
-class EventLog(private val capacity: Int = 500) {
+/**
+ * Log circolare condiviso: alimenta la schermata Diagnostica e l'esportazione.
+ *
+ * La capienza è ampia di proposito. Il log non serve a farsi un'idea mentre si guarda: serve a
+ * essere esportato e letto dopo, per capire cosa la camera ha risposto davvero. Una sessione di
+ * scansione produce centinaia di righe e troncarle vanificherebbe l'esportazione.
+ */
+class EventLog(private val capacity: Int = 5_000) {
 
     private val _entries = MutableStateFlow<List<LogEntry>>(emptyList())
     val entries: StateFlow<List<LogEntry>> = _entries
 
-    fun log(level: LogLevel, message: String) {
-        val entry = LogEntry(System.currentTimeMillis(), level, message)
+    fun log(level: LogLevel, message: String, detail: String? = null) {
+        val entry = LogEntry(System.currentTimeMillis(), level, message, detail)
         _entries.update { current ->
             val next = current + entry
             if (next.size > capacity) next.subList(next.size - capacity, next.size) else next
         }
     }
 
-    fun debug(message: String) = log(LogLevel.DEBUG, message)
-    fun info(message: String) = log(LogLevel.INFO, message)
-    fun tx(message: String) = log(LogLevel.TX, message)
-    fun rx(message: String) = log(LogLevel.RX, message)
-    fun warn(message: String) = log(LogLevel.WARN, message)
-    fun error(message: String) = log(LogLevel.ERROR, message)
+    fun debug(message: String, detail: String? = null) = log(LogLevel.DEBUG, message, detail)
+    fun info(message: String, detail: String? = null) = log(LogLevel.INFO, message, detail)
+    fun tx(message: String, detail: String? = null) = log(LogLevel.TX, message, detail)
+    fun rx(message: String, detail: String? = null) = log(LogLevel.RX, message, detail)
+    fun warn(message: String, detail: String? = null) = log(LogLevel.WARN, message, detail)
+    fun error(message: String, detail: String? = null) = log(LogLevel.ERROR, message, detail)
 
     fun clear() = _entries.update { emptyList() }
 
-    fun exportText(): String = _entries.value.joinToString("\n") { "${it.time} ${it.level} ${it.message}" }
+    /** Testo completo, con dettagli: è questo che si condivide per farlo analizzare. */
+    fun exportText(): String = _entries.value.joinToString("\n") { it.toText() }
 }

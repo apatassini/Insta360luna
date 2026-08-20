@@ -64,12 +64,4 @@ data class AppSettings(
      * (`insta360.messages.TimelapseMode`).
      */
     val timelapseMode: Int = LunaProtocolCodes.TimelapseMode.STATIC_TIMELAPSE_VIDEO,
-
-    /**
-     * Se true la ripresa usa il timelapse interno della camera; se false una registrazione
-     * video normale, con l'accelerazione lasciata al montaggio. Con il gimbal pilotato
-     * dall'app la seconda è di solito la scelta giusta, perché durata reale e durata della
-     * sequenza coincidono.
-     */
-    val useCameraTimelapse: Boolean = false,
 )

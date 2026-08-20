@@ -95,11 +95,16 @@ class TcpClient(
                 assembler.append(copy, read)
                 val frames = assembler.drain { reason -> log.warn("Frame scartato: $reason") }
                 for (frame in frames) {
+                    // I frame media arrivano a 30 al secondo: annegherebbero il log.
                     if (frame.isCommandFrame) {
                         log.rx(
-                            "%s req=%d len=%dB".format(
-                                LunaProtocolCodes.describe(frame.code), frame.requestId, frame.payload.size,
-                            )
+                            "%s (%d) req=%d len=%dB".format(
+                                LunaProtocolCodes.describe(frame.code),
+                                frame.code,
+                                frame.requestId,
+                                frame.payload.size,
+                            ),
+                            detail = describeFrame(frame),
                         )
                     }
                     _frames.tryEmit(frame)
@@ -112,6 +117,21 @@ class TcpClient(
         }
     }
 
+    /**
+     * Dettaglio di un frame ricevuto: byte grezzi e campi protobuf decodificati.
+     *
+     * Serve a leggere il log dopo, non durante: davanti a una risposta inattesa è la differenza
+     * fra "la camera ha risposto qualcosa" e sapere esattamente cosa.
+     */
+    private fun describeFrame(frame: Ucd2Frame): String = buildString {
+        if (frame.payload.isEmpty()) {
+            append("(nessun payload)")
+            return@buildString
+        }
+        append("hex: ").append(Hex.encode(frame.payload, limit = 96)).append('\n')
+        append(frame.describePayload())
+    }
+
     suspend fun send(bytes: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val out = output ?: error("Non connesso")
@@ -119,7 +139,6 @@ class TcpClient(
                 out.write(bytes)
                 out.flush()
             }
-            log.tx(Hex.encode(bytes, limit = 48))
         }.onFailure { log.error("Errore in scrittura: ${it.message}") }
     }
 

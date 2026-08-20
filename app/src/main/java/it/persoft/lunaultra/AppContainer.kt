@@ -10,6 +10,7 @@ import it.persoft.lunaultra.gimbal.GimbalController
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
 import it.persoft.lunaultra.net.WifiNetworkBinder
+import it.persoft.lunaultra.preview.PreviewController
 import it.persoft.lunaultra.timelapse.TimelapseEngine
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import kotlinx.coroutines.CoroutineScope
@@ -41,6 +42,7 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val session = CameraSession(log, tcpClient, scope, settingsStore.state)
     val commands = LunaCommands(session, settingsStore.state, log)
     val probe = CodeProbe(session, log)
+    val preview = PreviewController(session, commands, settingsStore.state, wifiBinder, log, scope)
     val gimbal = GimbalController(commands, settingsStore.state, log, scope)
     val engine = TimelapseEngine(commands, gimbal, log, scope)
 

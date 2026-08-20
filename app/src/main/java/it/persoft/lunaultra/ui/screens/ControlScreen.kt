@@ -25,10 +25,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.timelapse.RunPhase
+import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.GimbalPad
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
+import it.persoft.lunaultra.ui.components.PreviewView
 import it.persoft.lunaultra.ui.components.SectionCard
 import it.persoft.lunaultra.ui.italianLabel
 import kotlin.math.roundToInt
@@ -41,6 +43,7 @@ fun ControlScreen(viewModel: MainViewModel) {
     val ptz by viewModel.ptz.collectAsState()
     val run by viewModel.runState.collectAsState()
     val sequence by viewModel.sequence.collectAsState()
+    val preview by viewModel.preview.collectAsState()
     val connected = connection == ConnectionState.CONNECTED
 
     Column(
@@ -49,6 +52,31 @@ fun ControlScreen(viewModel: MainViewModel) {
             .verticalScroll(rememberScrollState())
             .padding(vertical = 8.dp),
     ) {
+        SectionCard(
+            title = "Inquadratura",
+            trailing = {
+                OutlinedButton(onClick = viewModel::togglePreview, enabled = connected) {
+                    Text(if (preview.active) "Spegni" else "Accendi")
+                }
+            },
+        ) {
+            PreviewView(
+                state = preview,
+                onSurfaceChanged = viewModel::attachPreviewSurface,
+            )
+            if (preview.active && preview.framesDecoded > 0) {
+                Text(
+                    text = "${preview.source.name.lowercase()} · ${preview.framesDecoded} fotogrammi",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                text = "Serve a vedere dove punti prima di memorizzare un punto. " +
+                    "Se resta nera, il messaggio sopra dice a che punto si è fermata.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
         SectionCard(title = "Connessione") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 NumberField(
@@ -105,6 +133,9 @@ fun ControlScreen(viewModel: MainViewModel) {
                 OutlinedButton(onClick = viewModel::stopRecording, enabled = connected, modifier = Modifier.weight(1f)) {
                     Text("REC stop")
                 }
+                OutlinedButton(onClick = viewModel::takePicture, enabled = connected, modifier = Modifier.weight(1f)) {
+                    Text("Scatta")
+                }
             }
         }
 
@@ -137,8 +168,14 @@ fun ControlScreen(viewModel: MainViewModel) {
         }
 
         SectionCard(title = "Esecuzione") {
+            LabeledValue("Modalità", sequence.mode.label)
             LabeledValue("Punti memorizzati", sequence.waypoints.size.toString())
-            LabeledValue("Durata sequenza", "${sequence.effectiveTotalSeconds().roundToInt()} s")
+            if (sequence.mode == ShootingMode.FOTO) {
+                LabeledValue("Scatti previsti", sequence.totalShots().toString())
+                LabeledValue("Durata stimata", "${sequence.estimatedPhotoSeconds().roundToInt()} s")
+            } else {
+                LabeledValue("Durata sequenza", "${sequence.effectiveTotalSeconds().roundToInt()} s")
+            }
             LabeledValue("Fase", run.phase.italianLabel())
             run.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             if (run.running || run.phase == RunPhase.COMPLETED) {
@@ -147,8 +184,11 @@ fun ControlScreen(viewModel: MainViewModel) {
                     modifier = Modifier.fillMaxWidth().height(6.dp),
                 )
                 Text(
-                    text = "Tratto ${run.legIndex + 1}/${run.legCount.coerceAtLeast(1)} · " +
-                        "target %.1f° / %.1f°".format(run.targetPan, run.targetTilt),
+                    text = buildString {
+                        append("Tratto ${run.legIndex + 1}/${run.legCount.coerceAtLeast(1)}")
+                        if (run.shotsPlanned > 0) append(" · scatto ${run.shotsTaken}/${run.shotsPlanned}")
+                        append(" · target %.1f° / %.1f°".format(run.targetPan, run.targetTilt))
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -157,7 +197,13 @@ fun ControlScreen(viewModel: MainViewModel) {
                 enabled = connected && sequence.isRunnable && !run.running,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("AVVIA TIMELAPSE")
+                Text(
+                    when (sequence.mode) {
+                        ShootingMode.FOTO -> "AVVIA PANORAMICA"
+                        ShootingMode.TIMELAPSE_CAMERA -> "AVVIA TIMELAPSE"
+                        ShootingMode.VIDEO -> "AVVIA VIDEO"
+                    }
+                )
             }
             Button(
                 onClick = viewModel::emergencyStop,

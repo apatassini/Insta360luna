@@ -3,7 +3,9 @@ package it.persoft.lunaultra.camera
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
+import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
+import it.persoft.lunaultra.protocol.ProtoReader
 import it.persoft.lunaultra.protocol.Ucd2
 import it.persoft.lunaultra.protocol.Ucd2Frame
 import kotlinx.coroutines.CompletableDeferred
@@ -49,6 +51,14 @@ class CameraSession(
 
     private val _notifications = MutableSharedFlow<Ucd2Frame>(replay = 0, extraBufferCapacity = 64)
     val notifications: SharedFlow<Ucd2Frame> = _notifications
+
+    /**
+     * Payload video dell'anteprima dal vivo: stream elementare Annex-B, già privato
+     * dell'intestazione media. Buffer ampio e `tryEmit`: se il decoder è in ritardo si perdono
+     * fotogrammi, che è preferibile a far crescere la memoria senza limite.
+     */
+    private val _videoFrames = MutableSharedFlow<ByteArray>(replay = 0, extraBufferCapacity = 256)
+    val videoFrames: SharedFlow<ByteArray> = _videoFrames
 
     private var keepAliveJob: Job? = null
     private var dispatchJob: Job? = null
@@ -97,6 +107,13 @@ class CameraSession(
         if (dispatchJob?.isActive == true) return
         dispatchJob = scope.launch {
             client.frames.collect { frame ->
+                if (frame.type == Ucd2.TYPE_MEDIA) {
+                    // Solo il video principale: 0x30 è l'anteprima secondaria, 0x40 il giroscopio.
+                    if (frame.substream == Ucd2.MEDIA_VIDEO && frame.payload.isNotEmpty()) {
+                        _videoFrames.tryEmit(frame.payload)
+                    }
+                    return@collect
+                }
                 if (!frame.isCommandFrame) return@collect
                 val waiter = pending.remove(frame.requestId)
                 if (waiter != null) waiter.complete(frame) else _notifications.tryEmit(frame)
@@ -166,7 +183,11 @@ class CameraSession(
             pending.remove(id)
             return Result.failure(sent.exceptionOrNull() ?: IllegalStateException("Invio fallito"))
         }
-        log.debug("→ ${LunaProtocolCodes.describe(code)} req=$id payload=${body.size}B")
+        log.tx(
+            "%s (%d) req=%d len=%dB".format(LunaProtocolCodes.describe(code), code, id, body.size),
+            detail = if (body.isEmpty()) "(nessun payload)" else
+                "hex: ${Hex.encode(body, limit = 96)}\n${ProtoReader(body).describe()}",
+        )
         val response = withTimeoutOrNull(timeoutMs) { waiter.await() }
         pending.remove(id)
         return if (response == null) {

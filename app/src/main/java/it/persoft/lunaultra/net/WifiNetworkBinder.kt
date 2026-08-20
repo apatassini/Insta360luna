@@ -9,6 +9,8 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.Socket
+import java.net.URL
+import java.net.URLConnection
 import kotlin.coroutines.resume
 
 /**
@@ -69,6 +71,25 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
         } catch (e: Exception) {
             log.warn("Binding del socket alla rete Wi-Fi fallito: ${e.message}")
             false
+        }
+    }
+
+    /**
+     * Apre una connessione HTTP sulla rete Wi-Fi della camera. `Network.openConnection` è
+     * l'equivalente HTTP di `bindSocket`: senza, l'anteprima MJPEG partirebbe sui dati mobili
+     * e non troverebbe nessuna camera.
+     */
+    override fun openConnection(url: URL): URLConnection {
+        val net = network
+        if (net == null) {
+            log.warn("Connessione HTTP non associata al Wi-Fi: nessuna rete acquisita")
+            return url.openConnection()
+        }
+        return try {
+            net.openConnection(url)
+        } catch (e: Exception) {
+            log.warn("Binding HTTP alla rete Wi-Fi fallito: ${e.message}")
+            url.openConnection()
         }
     }
 

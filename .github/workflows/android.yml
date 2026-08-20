@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Serve a pubblicare la release con l'APK allegato.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -42,3 +45,24 @@ jobs:
           name: luna-timelapse-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      # Gli artefatti delle Actions si scaricano solo da browser desktop e da
+      # utenti autenticati: dal telefono non compaiono. La release invece dà un
+      # link diretto, che è come si installa un APK in pratica.
+      - name: Pubblica l'APK come release scaricabile
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="apk-${BRANCH//\//-}"
+          NOTES="Build automatica del commit ${COMMIT}. Scarica app-debug.apk qui sotto. E' una build di debug: sul telefono va consentita l'installazione da origini sconosciute."
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" \
+            --target "$COMMIT" \
+            --title "APK di debug - $BRANCH" \
+            --notes "$NOTES" \
+            --prerelease \
+            app/build/outputs/apk/debug/app-debug.apk

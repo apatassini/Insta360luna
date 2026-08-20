@@ -90,14 +90,14 @@ fun ControlScreen(viewModel: MainViewModel) {
             LabeledValue("Modello", status.model ?: "—")
             if (!status.hasData && connected) {
                 Text(
-                    text = "Nessun dato decodificato: configura gli id comando e i campi di stato in Diagnostica.",
+                    text = "Connesso ma nessun dato letto: guarda il log in Diagnostica.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = viewModel::selectTimelapseMode, enabled = connected, modifier = Modifier.weight(1f)) {
-                    Text("Modalità TL")
+                OutlinedButton(onClick = viewModel::refreshStatus, enabled = connected, modifier = Modifier.weight(1f)) {
+                    Text("Aggiorna")
                 }
                 OutlinedButton(onClick = viewModel::startRecording, enabled = connected, modifier = Modifier.weight(1f)) {
                     Text("REC start")

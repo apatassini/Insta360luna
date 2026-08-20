@@ -1,6 +1,5 @@
 package it.persoft.lunaultra.ui.screens
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,309 +9,410 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Divider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import it.persoft.lunaultra.camera.LunaCommand
-import it.persoft.lunaultra.camera.LunaNotification
-import it.persoft.lunaultra.data.GimbalDriveMode
-import it.persoft.lunaultra.net.LogLevel
+import it.persoft.lunaultra.camera.CodeProbe
+import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
 import it.persoft.lunaultra.ui.components.SectionCard
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Diagnostica: è qui che si chiude l'unico buco rimasto del protocollo, il numero del comando
+ * del gimbal. Il resto della schermata serve a guardare cosa passa sul canale di controllo.
+ */
 @Composable
 fun DiagnosticsScreen(viewModel: MainViewModel) {
     val settings by viewModel.settings.collectAsState()
-    val logEntries by viewModel.logEntries.collectAsState()
-    val scanning by viewModel.scanning.collectAsState()
-    val scanResults by viewModel.scanResults.collectAsState()
+    val probe by viewModel.probe.collectAsState()
+    val sightings by viewModel.sightings.collectAsState()
+    val log by viewModel.logEntries.collectAsState()
 
-    var rawCommand by rememberSaveable { mutableStateOf("") }
-    var rawPayload by rememberSaveable { mutableStateOf("") }
-    var scanFrom by rememberSaveable { mutableStateOf("1") }
-    var scanTo by rememberSaveable { mutableStateOf("200") }
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(vertical = 8.dp),
-    ) {
-        SectionCard(title = "Id dei comandi") {
-            Text(
-                "Gli id numerici del protocollo non sono pubblici. Inseriscili qui man mano che li " +
-                    "ricavi da una cattura o dallo scanner qui sotto: un id a 0 disabilita il comando.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            LunaCommand.entries.forEach { command ->
-                NumberField(
-                    label = "${command.label} · ${command.key}",
-                    value = (settings.commandIds[command.key] ?: 0).toString(),
-                    onValueChange = { text -> text.toIntOrNull()?.let { viewModel.setCommandId(command, it) } },
-                    supportingText = command.description,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            LunaNotification.entries.forEach { notification ->
-                NumberField(
-                    label = "${notification.label} · ${notification.key}",
-                    value = (settings.notificationIds[notification.key] ?: 0).toString(),
-                    onValueChange = { text -> text.toIntOrNull()?.let { viewModel.setNotificationId(notification, it) } },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            NumberField(
-                label = "Valore modalità Timelapse",
-                value = settings.timelapseModeValue.toString(),
-                onValueChange = { text -> text.toIntOrNull()?.let(viewModel::setTimelapseModeValue) },
+        SectionCard(title = "Connessione") {
+            var host by remember(settings.host) { mutableStateOf(settings.host) }
+            var port by remember(settings.port) { mutableStateOf(settings.port.toString()) }
+            OutlinedTextField(
+                value = host,
+                onValueChange = { host = it; viewModel.setHost(it) },
+                label = { Text("Indirizzo camera") },
+                singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-        }
-
-        SectionCard(title = "Layout dei frame") {
+            NumberField(
+                label = "Porta",
+                value = port,
+                onValueChange = { text ->
+                    port = text
+                    text.toIntOrNull()?.let(viewModel::setPort)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                supportingText = "Il controllo della Luna Ultra è su TCP/6666",
+            )
             Text(
-                "Header binario davanti al payload protobuf. Confronta i byte ricevuti (log RX) " +
-                    "con questi valori finché i frame vengono decodificati senza scarti.",
+                text = "La sessione si apre con un frame di handshake UCD2 e si mantiene ripetendolo " +
+                    "ogni ${settings.keepAliveSeconds}s.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NumberField(
-                    label = "Header (byte)",
-                    value = settings.layout.headerSize.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateLayout { it.copy(headerSize = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "Offset lunghezza",
-                    value = settings.layout.lengthOffset.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateLayout { it.copy(lengthOffset = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NumberField(
-                    label = "Offset comando",
-                    value = settings.layout.commandOffset.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateLayout { it.copy(commandOffset = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "Offset sequenza",
-                    value = settings.layout.sequenceOffset.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateLayout { it.copy(sequenceOffset = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(
-                    checked = settings.layout.lengthIncludesHeader,
-                    onCheckedChange = { v -> viewModel.updateLayout { it.copy(lengthIncludesHeader = v) } },
-                )
-                Text("La lunghezza include l'header", style = MaterialTheme.typography.bodyMedium)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(
-                    checked = settings.layout.littleEndian,
-                    onCheckedChange = { v -> viewModel.updateLayout { it.copy(littleEndian = v) } },
-                )
-                Text("Little endian", style = MaterialTheme.typography.bodyMedium)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(
-                    checked = settings.layout.validateVersion,
-                    onCheckedChange = { v -> viewModel.updateLayout { it.copy(validateVersion = v) } },
-                )
-                Text("Usa il byte di versione per risincronizzare", style = MaterialTheme.typography.bodyMedium)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NumberField(
-                    label = "Valore versione",
-                    value = settings.layout.version.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateLayout { it.copy(version = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "Offset versione",
-                    value = settings.layout.versionOffset.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateLayout { it.copy(versionOffset = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(
-                    checked = settings.handshakeEnabled,
-                    onCheckedChange = { v -> viewModel.updateHandshake(v) },
-                )
-                Text("Handshake alla connessione", style = MaterialTheme.typography.bodyMedium)
-            }
         }
 
-        SectionCard(title = "Parametri gimbal") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                GimbalDriveMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = settings.gimbal.driveMode == mode,
-                        onClick = { viewModel.setDriveMode(mode) },
-                        label = { Text(if (mode == GimbalDriveMode.VELOCITY) "Velocità" else "Posizione") },
-                    )
+        GimbalCodeCard(viewModel)
+
+        ProbeCard(viewModel, probe)
+
+        SectionCard(
+            title = "Notifiche osservate",
+            trailing = {
+                OutlinedButton(onClick = viewModel::clearSightings) { Text("Azzera") }
+            },
+        ) {
+            Text(
+                text = "Muovi il gimbal dallo schermo della camera e guarda quale codice si sveglia. " +
+                    "Un codice con molti payload diversi porta numeri che cambiano; uno che ripete " +
+                    "sempre gli stessi byte è un battito.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (sightings.isEmpty()) {
+                Text("Nessuna notifica ricevuta finora.", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                sightings.forEach { sighting ->
+                    Divider()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${sighting.code} · ${sighting.name}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (sighting.isNamed) {
+                                    MaterialTheme.colorScheme.onSurface
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                },
+                            )
+                            Text(
+                                text = "${sighting.count} volte · ${sighting.distinctPayloads} payload distinti",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        if (!sighting.isNamed) {
+                            AssistChip(
+                                onClick = { viewModel.updateGimbal { it.copy(ptzNotificationCode = sighting.code) } },
+                                label = { Text("È il PTZ") },
+                            )
+                        }
+                    }
+                    if (sighting.lastDump.isNotBlank()) {
+                        Text(
+                            text = sighting.lastDump,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NumberField(
-                    label = "Pan max (°/s)",
-                    value = settings.gimbal.maxPanSpeedDegPerSec.toString(),
-                    onValueChange = { t -> t.toFloatOrNull()?.let { v -> viewModel.updateGimbal { it.copy(maxPanSpeedDegPerSec = v) } } },
-                    keyboardType = KeyboardType.Decimal,
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "Tilt max (°/s)",
-                    value = settings.gimbal.maxTiltSpeedDegPerSec.toString(),
-                    onValueChange = { t -> t.toFloatOrNull()?.let { v -> viewModel.updateGimbal { it.copy(maxTiltSpeedDegPerSec = v) } } },
-                    keyboardType = KeyboardType.Decimal,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NumberField(
-                    label = "Campo pan",
-                    value = settings.gimbal.panFieldNumber.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateGimbal { it.copy(panFieldNumber = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "Campo tilt",
-                    value = settings.gimbal.tiltFieldNumber.toString(),
-                    onValueChange = { t -> t.toIntOrNull()?.let { v -> viewModel.updateGimbal { it.copy(tiltFieldNumber = v) } } },
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "Scala angoli",
-                    value = settings.gimbal.angleScale.toString(),
-                    onValueChange = { t -> t.toFloatOrNull()?.let { v -> viewModel.updateGimbal { it.copy(angleScale = v) } } },
-                    keyboardType = KeyboardType.Decimal,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(
-                    checked = settings.gimbal.invertPan,
-                    onCheckedChange = { v -> viewModel.updateGimbal { it.copy(invertPan = v) } },
-                )
-                Text("Inverti pan", style = MaterialTheme.typography.bodyMedium)
-                Switch(
-                    checked = settings.gimbal.invertTilt,
-                    onCheckedChange = { v -> viewModel.updateGimbal { it.copy(invertTilt = v) } },
-                )
-                Text("Inverti tilt", style = MaterialTheme.typography.bodyMedium)
-            }
         }
+
+        GimbalTuningCard(viewModel)
 
         SectionCard(title = "Invio manuale") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NumberField(
-                    label = "Id comando (dec o 0x…)",
-                    value = rawCommand,
-                    onValueChange = { rawCommand = it },
-                    keyboardType = KeyboardType.Text,
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "Payload hex",
-                    value = rawPayload,
-                    onValueChange = { rawPayload = it },
-                    keyboardType = KeyboardType.Text,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Button(onClick = { viewModel.sendRaw(rawCommand, rawPayload) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Invia frame")
-            }
-        }
-
-        SectionCard(title = "Scanner comandi") {
-            Text(
-                "Invia un payload vuoto a ogni id nell'intervallo e annota chi risponde. " +
-                    "Da usare con la camera ferma e senza registrazione in corso.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NumberField(
-                    label = "Da",
-                    value = scanFrom,
-                    onValueChange = { scanFrom = it },
-                    keyboardType = KeyboardType.Text,
-                    modifier = Modifier.weight(1f),
-                )
-                NumberField(
-                    label = "A",
-                    value = scanTo,
-                    onValueChange = { scanTo = it },
-                    keyboardType = KeyboardType.Text,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Button(
-                onClick = { viewModel.scanCommands(scanFrom, scanTo) },
+            var code by remember { mutableStateOf("") }
+            var payload by remember { mutableStateOf("") }
+            NumberField(
+                label = "Codice comando (decimale o 0x…)",
+                value = code,
+                onValueChange = { code = it },
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (scanning) "Interrompi scansione" else "Avvia scansione")
-            }
-            scanResults.forEach { result ->
-                LabeledValue(
-                    "0x%04X (%d)".format(result.commandId, result.commandId),
-                    "err=${result.errorCode} · ${result.payloadSize} byte",
-                )
-            }
+            )
+            OutlinedTextField(
+                value = payload,
+                onValueChange = { payload = it },
+                label = { Text("Payload esadecimale (vuoto = nessuno)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { viewModel.sendRaw(code, payload) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Invia") }
         }
 
         SectionCard(
             title = "Log",
-            trailing = {
-                OutlinedButton(onClick = viewModel::clearLog) { Text("Pulisci") }
-            },
+            trailing = { OutlinedButton(onClick = viewModel::clearLog) { Text("Pulisci") } },
         ) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 320.dp)
-                    .verticalScroll(rememberScrollState())
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(8.dp),
+                modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                logEntries.takeLast(200).forEach { entry ->
+                log.forEach { entry ->
                     Text(
-                        text = "${entry.time} ${entry.message}",
+                        text = entry.format(),
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        color = when (entry.level) {
-                            LogLevel.ERROR -> MaterialTheme.colorScheme.error
-                            LogLevel.WARN -> MaterialTheme.colorScheme.secondary
-                            LogLevel.TX -> MaterialTheme.colorScheme.primary
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
-                        },
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun GimbalCodeCard(viewModel: MainViewModel) {
+    val settings by viewModel.settings.collectAsState()
+    val gimbal = settings.gimbal
+    var manual by remember(gimbal.controlCode) {
+        mutableStateOf(if (gimbal.controlCode == 0) "" else gimbal.controlCode.toString())
+    }
+
+    SectionCard(title = "Comando gimbal") {
+        Text(
+            text = if (gimbal.isControlCodeKnown) {
+                "In uso il codice ${gimbal.controlCode}. Se il gimbal non si muove, non è quello giusto."
+            } else {
+                "Ancora ignoto. PHONE_COMMAND_GIMBAL_CONTROL esiste con questo nome nell'app " +
+                    "Insta360, ma il suo numero non è pubblico: nessuna estrazione lo riporta. " +
+                    "Finché resta a 0 l'app non muove il gimbal, invece di sparare byte a caso."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        NumberField(
+            label = "Codice (0 = ignoto)",
+            value = manual,
+            onValueChange = { text ->
+                manual = text
+                viewModel.setGimbalControlCode(text.trim().toIntOrNull() ?: 0)
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        LabeledValue("Notifica PTZ", gimbal.ptzNotificationCode.toString())
+        Text(
+            text = "Il valore predefinito ${LunaProtocolCodes.NOTIFICATION_PTZ_STATE_OBSERVED} " +
+                "viene da traffico osservato durante il movimento del gimbal, compatibile con " +
+                "CAMERA_NOTIFICATION_PTZ_STATE. È un indizio forte, non una certezza.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.ProbeUiState) {
+    SectionCard(title = "Scanner dei codici") {
+        Text(
+            text = "La camera distingue \"comando inesistente\" da \"argomenti sbagliati\". " +
+                "Inviando un corpo vuoto, una risposta \"argomenti sbagliati\" dice che il comando " +
+                "c'è e non ha eseguito nulla: è così che si trova un codice senza rischiare di " +
+                "farlo partire. Comandi distruttivi e blocco di fabbrica sono esclusi a monte.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+
+        Button(
+            onClick = viewModel::calibrateProbe,
+            enabled = !probe.running,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("1. Calibra l'oracolo") }
+
+        probe.calibration?.let { calibration ->
+            LabeledValue("Codice inesistente", calibration.absent)
+            LabeledValue("Argomenti sbagliati", calibration.badPayload)
+            LabeledValue("Corpo vuoto su codice reale", calibration.emptyOnReal)
+            Text(
+                text = calibration.reason,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (calibration.usable) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+            )
+        }
+
+        val usable = probe.calibration?.usable == true
+        CodeProbe.Range.entries.forEach { range ->
+            OutlinedButton(
+                onClick = { viewModel.scanRange(range) },
+                enabled = usable || probe.running,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (probe.running) "Interrompi"
+                    else "2. Scansiona ${range.label} (${range.from}–${range.to})"
+                )
+            }
+            Text(text = range.note, style = MaterialTheme.typography.bodySmall)
+        }
+
+        if (probe.running && probe.total > 0) {
+            LinearProgressIndicator(
+                progress = { probe.done.toFloat() / probe.total },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text("${probe.done} / ${probe.total}", style = MaterialTheme.typography.bodySmall)
+        }
+
+        if (probe.hits.isNotEmpty()) {
+            Divider()
+            Text(
+                text = "${probe.hits.size} codici hanno risposto diversamente da uno inesistente. " +
+                    "I più interessanti sono quelli che rifiutano il corpo vuoto: esistono e vogliono argomenti.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            probe.hits.sortedByDescending { it.existsAndTakesArguments }.forEach { hit ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "${hit.code}${hit.name?.let { " · $it" } ?: ""}",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(text = hit.reply.describe, style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (hit.existsAndTakesArguments) {
+                        AssistChip(
+                            onClick = { viewModel.setGimbalControlCode(hit.code) },
+                            label = { Text("Usa per il gimbal") },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GimbalTuningCard(viewModel: MainViewModel) {
+    val settings by viewModel.settings.collectAsState()
+    val gimbal = settings.gimbal
+
+    SectionCard(title = "Taratura gimbal") {
+        Text(
+            text = "La forma del messaggio del gimbal non è descritta da nessuna estrazione. " +
+                "Questi numeri sono l'ipotesi di partenza — due campi di velocità con segno — " +
+                "e si correggono guardando la camera.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberField(
+                label = "Campo pan",
+                value = gimbal.panFieldNumber.toString(),
+                onValueChange = { text ->
+                    text.toIntOrNull()?.let { n -> viewModel.updateGimbal { it.copy(panFieldNumber = n) } }
+                },
+                modifier = Modifier.weight(1f),
+            )
+            NumberField(
+                label = "Campo tilt",
+                value = gimbal.tiltFieldNumber.toString(),
+                onValueChange = { text ->
+                    text.toIntOrNull()?.let { n -> viewModel.updateGimbal { it.copy(tiltFieldNumber = n) } }
+                },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberField(
+                label = "Velocità manuale %",
+                value = gimbal.manualSpeedPercent.toString(),
+                onValueChange = { text ->
+                    text.toIntOrNull()?.let { n -> viewModel.updateGimbal { it.copy(manualSpeedPercent = n) } }
+                },
+                modifier = Modifier.weight(1f),
+            )
+            NumberField(
+                label = "Comandi al secondo",
+                value = gimbal.commandRateHz.toString(),
+                onValueChange = { text ->
+                    text.toIntOrNull()?.let { n -> viewModel.updateGimbal { it.copy(commandRateHz = n) } }
+                },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberField(
+                label = "Pan max °/s",
+                value = gimbal.maxPanSpeedDegPerSec.toString(),
+                onValueChange = { text ->
+                    text.toFloatOrNull()?.let { v -> viewModel.updateGimbal { it.copy(maxPanSpeedDegPerSec = v) } }
+                },
+                modifier = Modifier.weight(1f),
+            )
+            NumberField(
+                label = "Tilt max °/s",
+                value = gimbal.maxTiltSpeedDegPerSec.toString(),
+                onValueChange = { text ->
+                    text.toFloatOrNull()?.let { v -> viewModel.updateGimbal { it.copy(maxTiltSpeedDegPerSec = v) } }
+                },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            text = "Le velocità massime servono a convertire la sequenza in tempi di comando: " +
+                "misurale cronometrando una rotazione completa e correggile qui.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Inverti pan", style = MaterialTheme.typography.bodyMedium)
+            Switch(
+                checked = gimbal.invertPan,
+                onCheckedChange = { on -> viewModel.updateGimbal { it.copy(invertPan = on) } },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Inverti tilt", style = MaterialTheme.typography.bodyMedium)
+            Switch(
+                checked = gimbal.invertTilt,
+                onCheckedChange = { on -> viewModel.updateGimbal { it.copy(invertTilt = on) } },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Usa il timelapse interno", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = "Se spento la camera registra video normale e l'accelerazione la fai in montaggio: " +
+                        "durata reale e durata della sequenza coincidono.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Switch(
+                checked = settings.useCameraTimelapse,
+                onCheckedChange = viewModel::setUseCameraTimelapse,
+            )
         }
     }
 }

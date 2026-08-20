@@ -29,7 +29,8 @@ data class TimelapseSequence(
     /** Se true le durate dei tratti derivano da [totalDurationSeconds] divisa equamente. */
     val useTotalDuration: Boolean = true,
     val controlRecording: Boolean = true,
-    val setTimelapseMode: Boolean = true,
+    /** Se true invia a monte durata e intervallo alla camera con SET_TIMELAPSE_OPTIONS. */
+    val configureCameraTimelapse: Boolean = true,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)
 

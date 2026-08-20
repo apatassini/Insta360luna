@@ -2,7 +2,7 @@ package it.persoft.lunaultra
 
 import android.content.Context
 import it.persoft.lunaultra.camera.CameraSession
-import it.persoft.lunaultra.camera.CommandRegistry
+import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.JsonFileStore
@@ -38,9 +38,9 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
 
     val wifiBinder = WifiNetworkBinder(appContext, log)
     val tcpClient = TcpClient(log, wifiBinder)
-    val registry = CommandRegistry(settingsStore.state)
-    val session = CameraSession(log, tcpClient, scope, settingsStore.state, registry)
+    val session = CameraSession(log, tcpClient, scope, settingsStore.state)
     val commands = LunaCommands(session, settingsStore.state, log)
+    val probe = CodeProbe(session, log)
     val gimbal = GimbalController(commands, settingsStore.state, log, scope)
     val engine = TimelapseEngine(commands, gimbal, log, scope)
 

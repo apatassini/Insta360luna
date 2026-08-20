@@ -11,21 +11,67 @@ lettura stato, controllo manuale pan/tilt, memorizzazione waypoint, interpolazio
 
 ## ⚠️ Stato del progetto: leggere prima di usarla
 
-Il protocollo di controllo Insta360 (**UCD2 + protobuf** su `192.168.42.1:6666`) **non è
-documentato pubblicamente**. Di esso sono noti host, porta e i nomi simbolici dei comandi
-(`PHONE_COMMAND_GIMBAL_CONTROL`, `PHONE_COMMAND_GET_PTZ_OPTION`, …), **non** i loro id numerici
-né gli schemi `.proto` dei payload.
+Insta360 non pubblica il protocollo di controllo, ma non è terra incognita: framing, comandi e
+messaggi sono stati ricostruiti da più progetti di reverse engineering indipendenti, alcuni
+verificati proprio sulla Luna Ultra. Questa app usa **quei numeri**, non ipotesi.
 
-Di conseguenza l'app è divisa in due parti con maturità diversa:
+Resta però un buco, ed è esattamente quello che serve qui:
 
 | Parte | Stato |
 |---|---|
-| Trasporto TCP, framing, encoder/decoder protobuf, sessione, motore timelapse, interpolazione, UI, persistenza | **Completi e coperti da test** |
-| Id numerici dei comandi, numeri di campo dei payload, layout esatto dell'header | **Da ricavare sulla propria camera** (l'app fornisce gli strumenti per farlo) |
+| Framing UCD2, checksum, handshake, keep-alive, correlazione richiesta/risposta | **Noto e verificato sulla Luna Ultra** |
+| Stato camera, batteria, storage, avvio/stop registrazione, opzioni timelapse | **Numeri di comando e di campo noti** |
+| **Comando del gimbal (pan/tilt)** | **Nome noto, numero ignoto** — nessuna fonte pubblica lo riporta |
+| Lettura della posizione PTZ | Codice della notifica molto probabile (8302), contenuto non decodificato |
 
-L'app **non inventa** i valori mancanti: un comando privo di id configurato non viene inviato e
-l'errore viene mostrato a schermo. La schermata **Diagnostica** contiene tutto il necessario per
-completare la mappatura senza ricompilare nulla.
+`PHONE_COMMAND_GIMBAL_CONTROL` esiste con questo nome nell'app Insta360 2.30.0, insieme ad altri
+13 comandi PTZ. I loro **numeri** no: l'app Android è protetta da AppShield (bytecode cifrato a
+runtime), il firmware della camera è cifrato per intero e l'IPA iOS è protetta da FairPlay.
+Tutte e tre le strade statiche sono chiuse, ognuna per un motivo diverso.
+
+Per questo l'app **non inventa** il numero mancante. Finché non è noto rifiuta di muovere il
+gimbal, e la scheda **Diagnostica** contiene lo scanner che lo trova interrogando la camera.
+
+---
+
+## Il protocollo, in breve
+
+Controllo su `192.168.42.1:6666`, framing **UCD2**, payload **protobuf**
+(namespace `insta360.messages`).
+
+```text
+ 0   4   'U' 'C' 'D' '2'      magic
+ 4   1   0x01                 versione
+ 5   1   0x0c                 flag
+ 6   1   tipo                 0x01 media, 0x04 comando/risposta, 0x05 stream
+ 7   1   seq                  contatore a 8 bit
+ 8   4   len (LE)             lunghezza del corpo
+12   len corpo
+     4   checksum (LE)        CRC-32 variante Insta360, su tutto ciò che precede
+```
+
+Nei frame di comando il corpo si apre con 9 byte:
+
+```text
+ 0   2   code (LE)            codice messaggio; la risposta lo rimanda indietro
+ 2   1   direzione            0x02 richiesta, 0x03 risposta
+ 3   2   requestId (LE)       correla richiesta e risposta (non il seq!)
+ 5   4   0x00008000 (LE)      costante
+ 9   ..  messaggio protobuf
+```
+
+La sessione **non** si apre con un comando: si autorizza inviando un frame di tipo `0x05` a
+lunghezza zero con il token costante `f6 cc 4f 09`, ripetuto ogni 3 secondi come keep-alive.
+
+Comandi usati dall'app, tutti con numero noto:
+
+| Codice | Comando | Uso |
+|---|---|---|
+| 4 / 5 | `START_CAPTURE` / `STOP_CAPTURE` | registrazione video |
+| 7 / 8 | `SET_OPTIONS` / `GET_OPTIONS` | batteria (opzione 11), storage (20), modello (48), seriale (15), firmware (30) |
+| 15 | `GET_CURRENT_CAPTURE_STATUS` | sta registrando? da quanto? |
+| 17 / 18 | `GET` / `SET_TIMELAPSE_OPTIONS` | durata e intervallo |
+| 22 / 23 | `START` / `STOP_TIMELAPSE` | timelapse interno della camera |
 
 ---
 
@@ -54,70 +100,75 @@ In alternativa, aprire la cartella con Android Studio (Ladybug o successivo).
 1. Collegare il telefono alla rete Wi-Fi della Luna Ultra.
 2. Aprire l'app, scheda **Controllo**, premere **Connetti**
    (l'app forza il routing dei socket sulla rete Wi-Fi anche se non offre Internet).
-3. Con la croce direzionale portare il gimbal sulla prima inquadratura, premere **Memorizza punto**.
-4. Ripetere per gli altri punti (A, B, C…).
-5. Scheda **Sequenza**: impostare durata totale (o durata per tratto), intervallo e tipo di
+   Batteria, modello e stato di registrazione compaiono subito: se li vedi, il protocollo gira.
+3. **La prima volta**: scheda **Diagnostica** → trovare il codice del comando gimbal
+   (vedi sotto). È l'unico passo di configurazione.
+4. Con la croce direzionale portare il gimbal sulla prima inquadratura, premere
+   **Memorizza punto**.
+5. Ripetere per gli altri punti (A, B, C…).
+6. Scheda **Sequenza**: impostare durata totale (o durata per tratto), intervallo e tipo di
    movimento (`Lineare` o `Smooth`).
-6. Tornare in **Controllo** e premere **AVVIA TIMELAPSE**.
-7. **STOP** interrompe tutto immediatamente: ferma il gimbal e la registrazione.
+7. Tornare in **Controllo** e premere **AVVIA TIMELAPSE**.
+8. **STOP** interrompe tutto immediatamente: ferma il gimbal e la registrazione.
 
 I punti e le impostazioni sono salvati in JSON nella memoria privata dell'app e ricaricati
 all'avvio.
 
 ---
 
-## Completare la mappatura del protocollo
+## Trovare il codice del comando gimbal
 
-Tutto avviene nella scheda **Diagnostica**, con la camera connessa.
+Tutto nella scheda **Diagnostica**, con la camera connessa e ferma.
 
-### 1. Verificare il layout dell'header
+### Il metodo
 
-L'ipotesi di lavoro predefinita è un header di 16 byte, little endian:
+Il messaggio `Error` della camera distingue `UNKNOWN_MSG_CODE` (comando inesistente) da
+`UNKNOWN_MSG_PAYLOAD` (comando esistente, argomenti sbagliati). Questa differenza è un oracolo:
+inviando un corpo **vuoto** a un codice sconosciuto, una risposta «argomenti sbagliati» dice che
+il comando c'è **e non ha eseguito nulla**.
 
-```text
-offset 0  uint32  lunghezza totale (header incluso)
-offset 4  uint8   versione (2) — usata anche come marcatore di sincronizzazione
-offset 5  uint8   tipo (0 richiesta, 1 risposta, 2 notifica)
-offset 6  uint16  numero di sequenza
-offset 8  uint32  id comando
-offset 12 uint32  codice di errore
-payload   protobuf
-```
+È ciò che rende la scansione difendibile, dove sparare payload inventati non lo sarebbe: un
+comando che rifiuta i suoi argomenti non è mai partito.
 
-Nel log RX compaiono i byte grezzi ricevuti: se i frame vengono scartati («Frame scartato…»),
-correggere offset, dimensioni, endianness o il valore del byte di versione finché la decodifica
-è pulita. Ogni campo del layout è modificabile a caldo.
+### I passi
 
-### 2. Trovare gli id dei comandi
+1. **Calibra l'oracolo.** Confronta come risponde un codice sicuramente inesistente con come
+   risponde uno reale. Se le due risposte fossero identiche la scansione non distinguerebbe
+   nulla, e l'app si rifiuta di procedere invece di produrre migliaia di righe senza significato.
+2. **Scansiona una gamma.** La più promettente è **Blocco richieste (4096–8191)**: è dichiarato
+   `PHONE_REQUEST_*` e l'estrazione pubblica non ci mette dentro niente — un pan/tilt interattivo
+   è esattamente ciò per cui esiste un blocco «richieste». In alternativa i buchi dentro
+   **Comandi telefono (0–152)**, dove atterrano le aggiunte successive al 2020.
+3. **Prova i candidati.** Chi rifiuta il corpo vuoto esiste e vuole argomenti: dal risultato,
+   il pulsante *Usa per il gimbal* lo imposta. Poi la croce direzionale, guardando la camera.
 
-* **Scanner comandi**: invia un payload vuoto a ogni id di un intervallo e annota chi risponde.
-  Da usare con la camera ferma, senza registrazione in corso.
-* **Invio manuale**: manda un singolo frame (id in decimale o `0x…` e payload esadecimale) e
-  mostra la risposta decodificata campo per campo.
-* Una cattura del traffico dell'app ufficiale (`tcpdump`/Wireshark su un hotspot condiviso)
-  resta il metodo più rapido e affidabile.
+Comandi distruttivi (cancellazione file, riavvio, ripristino di fabbrica, Wi-Fi) e l'intero
+blocco di fabbrica `12288+` sono esclusi a monte dallo scanner: lì un corpo vuoto non protegge,
+perché un comando senza argomenti si limita a eseguire.
 
-Gli id trovati si inseriscono nei campi della sezione **Id dei comandi**; 0 = comando disattivato.
+### In parallelo: le notifiche
 
-### 3. Regolare i payload
+La sezione **Notifiche osservate** conta i frame che la camera manda di sua iniziativa. Muovendo
+il gimbal dallo schermo della camera si vede quale codice si sveglia: uno con molti payload
+distinti porta numeri che cambiano, uno che ripete gli stessi byte è un battito. Il predefinito
+`8302` viene da traffico osservato durante il movimento del gimbal, compatibile con
+`CAMERA_NOTIFICATION_PTZ_STATE` — indizio forte, non certezza.
 
-I payload sono composti campo per campo dal writer protobuf incluso: nella sezione **Parametri
-gimbal** si impostano i numeri di campo di pan/tilt, la scala degli angoli (1 = gradi,
-10 = decimi di grado), le velocità massime e le eventuali inversioni di segno.
+### La via più rapida, se hai gli strumenti
+
+Una cattura Wireshark del traffico dell'app ufficiale resta il modo più diretto: il codice del
+gimbal si legge nei byte 12–13 di ogni frame `UCD2` inviato mentre muovi il joystick.
 
 ---
 
 ## Movimento del gimbal
 
-Due strategie, selezionabili in Diagnostica:
+Il movimento è **a velocità**: l'app invia comandi ripetuti a ~10 Hz e integra la posizione
+stimata (dead reckoning). Non usa la posizione assoluta perché `PHONE_COMMAND_SET_PTZ_OPTION`
+condivide lo stesso problema del comando di controllo — nome noto, numero no.
 
-* **Velocità** (default): invia comandi di velocità a ~10 Hz e integra la posizione stimata
-  (dead reckoning). Funziona anche se la camera non espone la posizione PTZ.
-* **Posizione**: invia direttamente la posizione assoluta con `SET_PTZ_OPTION`. Più preciso,
-  ma richiede che quel comando sia supportato e mappato.
-
-Se arriva una posizione reale dalla camera (risposta a `GET_PTZ_OPTION` o notifica
-`CAMERA_NOTIFICATION_PTZ_STATE`) la stima viene corretta automaticamente.
+Le velocità massime in °/s si tarano in Diagnostica: cronometra una rotazione completa e
+correggi. Da quelle dipende la corrispondenza fra la durata impostata e il movimento reale.
 
 L'interpolazione fra due waypoint segue le formule della specifica:
 
@@ -127,15 +178,24 @@ smooth:   smooth(t)   = t² * (3 - 2t)
           position(t) = start + (end - start) * smooth(t)
 ```
 
+### Timelapse interno o video normale?
+
+L'interruttore *Usa il timelapse interno* in Diagnostica sceglie fra `START_TIMELAPSE` e
+`START_CAPTURE`. Con il gimbal pilotato dall'app la registrazione video normale è di solito la
+scelta giusta: durata reale e durata della sequenza coincidono, e l'accelerazione la fai in
+montaggio. Il timelapse interno comprime i tempi e rende difficile far quadrare le due cose.
+
 ---
 
 ## Architettura
 
 ```text
 it.persoft.lunaultra
-├─ protocol/     Hex, ProtoWriter, ProtoReader, Ucd2Codec, FrameAssembler
+├─ protocol/     Ucd2 (framing + checksum), FrameAssembler, LunaProtocolCodes,
+│                LunaMessages, ProtoWriter, ProtoReader, Hex
 ├─ net/          EventLog, SocketBinder, TcpClient, WifiNetworkBinder
-├─ camera/       LunaCommand, CommandRegistry, CameraSession, LunaCommands, modelli
+├─ camera/       CameraSession (handshake, keep-alive, requestId), LunaCommands,
+│                LunaError, CodeProbe (scanner), modelli
 ├─ gimbal/       GimbalController (jog manuale, dead reckoning, drive verso target)
 ├─ timelapse/    Waypoint, TimelapseSequence, Interpolation, TimelapseEngine
 ├─ data/         AppSettings, JsonFileStore (persistenza JSON)
@@ -143,8 +203,33 @@ it.persoft.lunaultra
 ```
 
 Il core (tutto tranne `ui/` e `WifiNetworkBinder`) non dipende dall'SDK Android ed è testato
-come codice JVM puro: 23 test coprono framing, risincronizzazione dopo byte spuri, roundtrip
-protobuf, interpolazione, calcolo delle durate e un giro completo su socket in loopback.
+come codice JVM puro: 36 test coprono framing UCD2 e checksum, riaggancio al magic dopo byte
+spuri, frame media, riconoscimento degli errori, corpi dei comandi confrontati con quelli
+osservati, roundtrip protobuf, interpolazione, calcolo delle durate e un giro completo su socket
+in loopback.
+
+---
+
+## Crediti
+
+Il protocollo non l'ho ricostruito io. Questa app sta sulle spalle di:
+
+* **[Ripwords/insta360-luna-ultra-desktop](https://github.com/Ripwords/insta360-luna-ultra-desktop)**
+  — framing UCD2, checksum, handshake e keep-alive, verificati sulla Luna Ultra; la
+  [documentazione del buco nel protocollo](https://github.com/Ripwords/insta360-luna-ultra-desktop/blob/main/docs/PROTOCOL-GAP.md)
+  è ciò che stabilisce che i numeri del gimbal non sono pubblici, e da lì viene sia il codice
+  8302 osservato sia il metodo dell'oracolo sugli errori.
+* **[RigacciOrg/insta360-wifi-api](https://github.com/RigacciOrg/insta360-wifi-api)** (GPLv3)
+  — l'estrazione dei `.proto`, l'enum `MessageCode` con i 164 codici noti e i numeri di campo di
+  `Options`, `BatteryStatus`, `CameraCaptureStatus`, `TimelapseOptions`.
+* **[diamondfsd/luna-ai-cut](https://github.com/diamondfsd/luna-ai-cut)** — l'estrazione da cui
+  parte il lavoro sulla Luna Ultra.
+* **[Cedric-Hsu/insta360-go3s-mac-import](https://github.com/Cedric-Hsu/insta360-go3s-mac-import)**
+  e **[NiklasVoigt/Insta360-Livestream](https://github.com/NiklasVoigt/Insta360-Livestream)**
+  — conferme indipendenti del framing su altri modelli.
+
+Il codice qui è scritto da zero in Kotlin; da quei progetti vengono i **fatti sul protocollo**
+(numeri, offset, formato), non righe di codice.
 
 ---
 

@@ -3,7 +3,6 @@ package it.persoft.lunaultra.gimbal
 import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.camera.PtzState
 import it.persoft.lunaultra.data.AppSettings
-import it.persoft.lunaultra.data.GimbalDriveMode
 import it.persoft.lunaultra.net.EventLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -18,9 +17,10 @@ import kotlin.math.sign
 /**
  * Pilota il gimbal e mantiene una stima della posizione corrente.
  *
- * Se la camera espone la posizione (GET_PTZ_OPTION o notifica PTZ) la stima viene corretta con
- * il dato reale; altrimenti si usa dead reckoning integrando le velocità comandate — è
- * sufficiente per memorizzare i waypoint e per ripercorrerli in modo ripetibile.
+ * Sulla Luna Ultra la posizione reale non è leggibile: la notifica PTZ è identificata solo per
+ * numero, non per contenuto. La stima usa quindi dead reckoning, integrando le velocità
+ * comandate — sufficiente a memorizzare i waypoint e a ripercorrerli in modo ripetibile.
+ * Se un giorno la notifica verrà decodificata, [onCameraPosition] la sostituisce al dato stimato.
  */
 class GimbalController(
     private val commands: LunaCommands,
@@ -84,31 +84,24 @@ class GimbalController(
     }
 
     /**
-     * Porta il gimbal verso [targetPan]/[targetTilt] nell'arco di [stepSeconds].
-     * In modalità ABSOLUTE invia direttamente la posizione, altrimenti calcola la velocità
-     * necessaria a coprire l'errore residuo nel tempo del tick.
+     * Porta il gimbal verso [targetPan]/[targetTilt] nell'arco di [stepSeconds], calcolando la
+     * velocità necessaria a coprire l'errore residuo nel tempo del tick.
+     *
+     * Il movimento è solo a velocità: il comando di posizione assoluta
+     * (`PHONE_COMMAND_SET_PTZ_OPTION`) esiste per nome ma non se ne conosce il numero, quindi
+     * non c'è modo di inviarlo.
      */
     suspend fun driveTo(targetPan: Float, targetTilt: Float, stepSeconds: Float): Result<Unit> {
         val cfg = settings.value.gimbal
-        return when (cfg.driveMode) {
-            GimbalDriveMode.ABSOLUTE -> {
-                val result = commands.gimbalAbsolute(targetPan, targetTilt)
-                if (result.isSuccess) setEstimated(targetPan, targetTilt)
-                result
-            }
-
-            GimbalDriveMode.VELOCITY -> {
-                val current = _position.value
-                val dt = stepSeconds.coerceAtLeast(0.02f)
-                val panSpeed = clampSpeed((targetPan - current.pan) / dt, cfg.maxPanSpeedDegPerSec)
-                val tiltSpeed = clampSpeed((targetTilt - current.tilt) / dt, cfg.maxTiltSpeedDegPerSec)
-                val panPercent = if (cfg.maxPanSpeedDegPerSec > 0f) panSpeed / cfg.maxPanSpeedDegPerSec else 0f
-                val tiltPercent = if (cfg.maxTiltSpeedDegPerSec > 0f) tiltSpeed / cfg.maxTiltSpeedDegPerSec else 0f
-                val result = commands.gimbalVelocity(panPercent, tiltPercent)
-                if (result.isSuccess) integrate(panPercent, tiltPercent, dt)
-                result
-            }
-        }
+        val current = _position.value
+        val dt = stepSeconds.coerceAtLeast(0.02f)
+        val panSpeed = clampSpeed((targetPan - current.pan) / dt, cfg.maxPanSpeedDegPerSec)
+        val tiltSpeed = clampSpeed((targetTilt - current.tilt) / dt, cfg.maxTiltSpeedDegPerSec)
+        val panPercent = if (cfg.maxPanSpeedDegPerSec > 0f) panSpeed / cfg.maxPanSpeedDegPerSec else 0f
+        val tiltPercent = if (cfg.maxTiltSpeedDegPerSec > 0f) tiltSpeed / cfg.maxTiltSpeedDegPerSec else 0f
+        val result = commands.gimbalVelocity(panPercent, tiltPercent)
+        if (result.isSuccess) integrate(panPercent, tiltPercent, dt)
+        return result
     }
 
     private fun clampSpeed(requested: Float, max: Float): Float {

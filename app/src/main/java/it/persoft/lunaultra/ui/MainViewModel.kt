@@ -5,14 +5,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import it.persoft.lunaultra.AppContainer
 import it.persoft.lunaultra.camera.CameraStatus
+import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
-import it.persoft.lunaultra.camera.LunaCommand
-import it.persoft.lunaultra.camera.LunaNotification
 import it.persoft.lunaultra.data.AppSettings
-import it.persoft.lunaultra.data.GimbalDriveMode
 import it.persoft.lunaultra.data.GimbalSettings
-import it.persoft.lunaultra.data.LayoutSettings
 import it.persoft.lunaultra.protocol.Hex
+import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
@@ -23,7 +21,24 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-data class ScanResult(val commandId: Int, val errorCode: Int, val payloadSize: Int, val dump: String)
+/** Una notifica spontanea osservata sul canale di controllo. */
+data class NotificationSighting(
+    val code: Int,
+    val count: Int,
+    val distinctPayloads: Int,
+    val lastDump: String,
+) {
+    val name: String get() = LunaProtocolCodes.nameOf(code) ?: "SCONOSCIUTO_$code"
+    val isNamed: Boolean get() = LunaProtocolCodes.nameOf(code) != null
+}
+
+data class ProbeUiState(
+    val running: Boolean = false,
+    val done: Int = 0,
+    val total: Int = 0,
+    val hits: List<CodeProbe.Hit> = emptyList(),
+    val calibration: CodeProbe.Calibration? = null,
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -44,14 +59,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
-    private val _scanResults = MutableStateFlow<List<ScanResult>>(emptyList())
-    val scanResults: StateFlow<List<ScanResult>> = _scanResults
+    private val _probe = MutableStateFlow(ProbeUiState())
+    val probe: StateFlow<ProbeUiState> = _probe
 
-    private val _scanning = MutableStateFlow(false)
-    val scanning: StateFlow<Boolean> = _scanning
+    private val _sightings = MutableStateFlow<List<NotificationSighting>>(emptyList())
+    val sightings: StateFlow<List<NotificationSighting>> = _sightings
+
+    private val payloadsByCode = mutableMapOf<Int, MutableSet<String>>()
+    private val countsByCode = mutableMapOf<Int, Int>()
 
     private var pollJob: Job? = null
-    private var scanJob: Job? = null
+    private var probeJob: Job? = null
 
     init {
         viewModelScope.launch { container.load() }
@@ -67,7 +85,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.wifiBinder.acquire()
             container.session.connect()
                 .onFailure { showMessage("Connessione fallita: ${it.message}") }
-                .onSuccess { showMessage("Connesso a ${settings.value.host}") }
+                .onSuccess {
+                    showMessage("Connesso a ${settings.value.host}")
+                    refreshStatus()
+                }
         }
     }
 
@@ -83,12 +104,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshStatus() {
         viewModelScope.launch {
             container.commands.fetchStatus()
-                .onSuccess { _status.value = it }
+                .onSuccess { _status.value = _status.value.mergedWith(it) }
                 .onFailure { showMessage("Stato non disponibile: ${it.message}") }
-            container.commands.fetchCameraInfo().onSuccess { info ->
-                _status.value = _status.value.copy(model = info.model, firmware = info.firmware)
-            }
-            container.commands.readPtz().onSuccess { container.gimbal.onCameraPosition(it) }
+            container.commands.fetchCameraInfo()
+                .onSuccess { _status.value = _status.value.mergedWith(it) }
         }
     }
 
@@ -99,8 +118,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (state == ConnectionState.CONNECTED) {
                     pollJob = viewModelScope.launch {
                         while (isActive) {
-                            container.commands.fetchStatus().onSuccess { _status.value = it }
                             delay(STATUS_POLL_MS)
+                            container.commands.fetchStatus()
+                                .onSuccess { _status.value = _status.value.mergedWith(it) }
                         }
                     }
                 }
@@ -108,25 +128,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Le notifiche servono a due cose: aggiornare lo stato senza interrogare la camera, e
+     * costruire l'inventario dei codici visti — che è il modo per riconoscere quale notifica
+     * accompagna il movimento del gimbal.
+     */
     private fun observeNotifications() {
         viewModelScope.launch {
             container.session.notifications.collect { frame ->
-                when (container.registry.notificationFor(frame.commandId)) {
-                    LunaNotification.PTZ_STATE ->
-                        container.commands.parsePtz(frame)?.let { container.gimbal.onCameraPosition(it) }
-
-                    LunaNotification.CAMERA_STATE ->
-                        _status.value = container.commands.parseStatus(frame)
-
-                    else -> Unit
+                container.commands.statusFromNotification(frame)?.let {
+                    _status.value = _status.value.mergedWith(it)
                 }
+                if (frame.code == settings.value.gimbal.ptzNotificationCode) {
+                    container.commands.parsePtz(frame)?.let { container.gimbal.onCameraPosition(it) }
+                }
+                recordSighting(frame.code, frame.describePayload(), Hex.encode(frame.payload, limit = 32))
             }
         }
     }
 
+    private fun recordSighting(code: Int, dump: String, hex: String) {
+        countsByCode[code] = (countsByCode[code] ?: 0) + 1
+        payloadsByCode.getOrPut(code) { mutableSetOf() }.add(hex)
+        lastDumpByCode[code] = dump
+        _sightings.value = countsByCode.entries
+            .sortedByDescending { it.value }
+            .map { (seen, count) ->
+                NotificationSighting(
+                    code = seen,
+                    count = count,
+                    distinctPayloads = payloadsByCode[seen]?.size ?: 0,
+                    lastDump = lastDumpByCode[seen].orEmpty(),
+                )
+            }
+    }
+
+    private val lastDumpByCode = mutableMapOf<Int, String>()
+
+    fun clearSightings() {
+        countsByCode.clear()
+        payloadsByCode.clear()
+        lastDumpByCode.clear()
+        _sightings.value = emptyList()
+    }
+
     // ---------------------------------------------------------------- gimbal
 
-    fun jogStart(pan: Float, tilt: Float) = container.gimbal.startJog(pan, tilt)
+    fun jogStart(pan: Float, tilt: Float) {
+        if (!settings.value.gimbal.isControlCodeKnown) {
+            showMessage("Codice del comando gimbal non ancora noto: usa lo scanner in Diagnostica")
+            return
+        }
+        container.gimbal.startJog(pan, tilt)
+    }
 
     fun jogStop() {
         viewModelScope.launch { container.gimbal.stop() }
@@ -215,8 +269,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setControlRecording(enabled: Boolean) =
         container.sequenceStore.update { it.copy(controlRecording = enabled) }
 
-    fun setSetTimelapseMode(enabled: Boolean) =
-        container.sequenceStore.update { it.copy(setTimelapseMode = enabled) }
+    fun setConfigureCameraTimelapse(enabled: Boolean) =
+        container.sequenceStore.update { it.copy(configureCameraTimelapse = enabled) }
 
     fun startRun() {
         val seq = sequence.value
@@ -238,22 +292,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startRecording() {
         viewModelScope.launch {
-            container.commands.startCapture()
+            container.commands.startRecording()
+                .onSuccess { showMessage("Registrazione avviata") }
                 .onFailure { showMessage("Start non riuscito: ${it.message}") }
         }
     }
 
     fun stopRecording() {
         viewModelScope.launch {
-            container.commands.stopCapture()
+            container.commands.stopRecording()
+                .onSuccess { showMessage("Registrazione fermata") }
                 .onFailure { showMessage("Stop non riuscito: ${it.message}") }
-        }
-    }
-
-    fun selectTimelapseMode() {
-        viewModelScope.launch {
-            container.commands.selectTimelapseMode()
-                .onFailure { showMessage("Modalità non impostata: ${it.message}") }
         }
     }
 
@@ -263,30 +312,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setPort(port: Int) = container.settingsStore.update { it.copy(port = port) }
 
-    fun setCommandId(command: LunaCommand, id: Int) = container.settingsStore.update { settings ->
-        val ids = settings.commandIds.toMutableMap()
-        if (id == 0) ids.remove(command.key) else ids[command.key] = id
-        settings.copy(commandIds = ids)
-    }
-
-    fun setNotificationId(notification: LunaNotification, id: Int) = container.settingsStore.update { settings ->
-        val ids = settings.notificationIds.toMutableMap()
-        if (id == 0) ids.remove(notification.key) else ids[notification.key] = id
-        settings.copy(notificationIds = ids)
-    }
-
-    fun updateHandshake(enabled: Boolean) =
-        container.settingsStore.update { it.copy(handshakeEnabled = enabled) }
-
-    fun updateLayout(transform: (LayoutSettings) -> LayoutSettings) =
-        container.settingsStore.update { it.copy(layout = transform(it.layout)) }
-
     fun updateGimbal(transform: (GimbalSettings) -> GimbalSettings) =
         container.settingsStore.update { it.copy(gimbal = transform(it.gimbal)) }
 
-    fun setDriveMode(mode: GimbalDriveMode) = updateGimbal { it.copy(driveMode = mode) }
+    fun setGimbalControlCode(code: Int) = updateGimbal { it.copy(controlCode = code) }
 
-    fun setTimelapseModeValue(value: Int) = container.settingsStore.update { it.copy(timelapseModeValue = value) }
+    fun setUseCameraTimelapse(enabled: Boolean) =
+        container.settingsStore.update { it.copy(useCameraTimelapse = enabled) }
+
+    fun setTimelapseMode(mode: Int) = container.settingsStore.update { it.copy(timelapseMode = mode) }
 
     fun exportSettings(): String = container.settingsStore.exportJson()
 
@@ -298,10 +332,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---------------------------------------------------------------- diagnostica
 
-    fun sendRaw(commandIdText: String, payloadHex: String) {
-        val commandId = parseIntFlexible(commandIdText)
-        if (commandId == null) {
-            showMessage("Id comando non valido")
+    fun sendRaw(codeText: String, payloadHex: String) {
+        val code = parseIntFlexible(codeText)
+        if (code == null) {
+            showMessage("Codice comando non valido")
             return
         }
         val payload = if (payloadHex.isBlank()) ByteArray(0) else Hex.decodeOrNull(payloadHex)
@@ -310,45 +344,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         viewModelScope.launch {
-            container.session.requestRaw(commandId, payload)
+            container.session.requestRaw(code, payload)
                 .onSuccess { container.log.info("Risposta:\n${it.describePayload()}") }
                 .onFailure { showMessage(it.message ?: "Nessuna risposta") }
         }
     }
 
     /**
-     * Sonda una serie di id comando con payload vuoto e registra quelli che rispondono:
-     * è il modo pratico per ricostruire la tabella dei comandi senza documentazione.
+     * Verifica che l'oracolo sui codici di errore funzioni su questa camera. Senza questo passo
+     * la scansione non parte: se un codice inesistente rispondesse come uno esistente, i
+     * risultati non direbbero nulla.
      */
-    fun scanCommands(fromText: String, toText: String) {
-        if (_scanning.value) {
-            scanJob?.cancel()
-            _scanning.value = false
+    fun calibrateProbe() {
+        if (_probe.value.running) return
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti prima di calibrare")
             return
         }
-        val from = parseIntFlexible(fromText) ?: return showMessage("Range iniziale non valido")
-        val to = parseIntFlexible(toText) ?: return showMessage("Range finale non valido")
-        if (to < from || to - from > MAX_SCAN_RANGE) {
-            showMessage("Range non valido (massimo $MAX_SCAN_RANGE id)")
+        probeJob = viewModelScope.launch {
+            _probe.value = _probe.value.copy(running = true, done = 0, total = 0)
+            val calibration = container.probe.calibrate()
+            _probe.value = _probe.value.copy(running = false, calibration = calibration)
+            showMessage(if (calibration.usable) "Oracolo utilizzabile" else "Oracolo non utilizzabile")
+        }
+    }
+
+    /** Avvia (o interrompe) la scansione di una gamma di codici. */
+    fun scanRange(range: CodeProbe.Range) {
+        if (_probe.value.running) {
+            probeJob?.cancel()
+            _probe.value = _probe.value.copy(running = false)
             return
         }
-        _scanResults.value = emptyList()
-        _scanning.value = true
-        scanJob = viewModelScope.launch {
-            for (id in from..to) {
-                if (!isActive) break
-                container.session.requestRaw(id, ByteArray(0), timeoutMs = SCAN_TIMEOUT_MS)
-                    .onSuccess { frame ->
-                        _scanResults.value = _scanResults.value + ScanResult(
-                            commandId = id,
-                            errorCode = frame.errorCode,
-                            payloadSize = frame.payload.size,
-                            dump = frame.describePayload(),
-                        )
-                        container.log.info("Comando 0x%04X → risposta di %d byte".format(id, frame.payload.size))
-                    }
-            }
-            _scanning.value = false
+        val calibration = _probe.value.calibration
+        if (calibration == null || !calibration.usable) {
+            showMessage("Calibra l'oracolo prima di scansionare")
+            return
+        }
+        probeJob = viewModelScope.launch {
+            _probe.value = _probe.value.copy(running = true, done = 0, total = range.codes().size, hits = emptyList())
+            val hits = container.probe.scan(
+                range = range,
+                calibration = calibration,
+                onProgress = { done, total, _ ->
+                    _probe.value = _probe.value.copy(done = done, total = total)
+                },
+            )
+            _probe.value = _probe.value.copy(running = false, hits = hits)
+            showMessage("Scansione conclusa: ${hits.size} risposte diverse da un codice inesistente")
         }
     }
 
@@ -385,7 +428,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val STATUS_POLL_MS = 3_000L
-        const val SCAN_TIMEOUT_MS = 400L
-        const val MAX_SCAN_RANGE = 1024
     }
 }

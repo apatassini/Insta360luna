@@ -33,8 +33,9 @@ data class RunState(
 }
 
 /**
- * Esegue la sequenza: opzionalmente imposta la modalità Timelapse e avvia la registrazione,
- * poi muove il gimbal lungo i waypoint con l'interpolazione scelta e infine ferma tutto.
+ * Esegue la sequenza: opzionalmente configura il timelapse della camera e avvia la
+ * registrazione, poi muove il gimbal lungo i waypoint con l'interpolazione scelta e infine
+ * ferma tutto.
  */
 class TimelapseEngine(
     private val commands: LunaCommands,
@@ -91,13 +92,14 @@ class TimelapseEngine(
             log.info("Vado al punto iniziale ${first.name}")
             approach(first.pan, first.tilt)
 
-            // 2. Modalità e avvio registrazione.
-            if (sequence.setTimelapseMode) {
-                commands.selectTimelapseMode()
-                    .onFailure { log.warn("Impostazione modalità Timelapse non riuscita: ${it.message}") }
+            // 2. Parametri timelapse e avvio registrazione.
+            if (sequence.configureCameraTimelapse) {
+                commands.setTimelapseOptions(total.roundToInt(), sequence.intervalSeconds.roundToInt())
+                    .onFailure { log.warn("Parametri timelapse non accettati: ${it.message}") }
+                    .onSuccess { log.info("Timelapse impostato: ${total.roundToInt()}s ogni ${sequence.intervalSeconds}s") }
             }
             if (sequence.controlRecording) {
-                commands.startCapture()
+                commands.startRecording()
                     .onFailure { log.warn("Avvio registrazione non riuscito: ${it.message}") }
                     .onSuccess { log.info("Registrazione avviata") }
             }
@@ -163,7 +165,7 @@ class TimelapseEngine(
         runCatching { gimbal.stop() }
         if (controlRecording) {
             runCatching {
-                commands.stopCapture()
+                commands.stopRecording()
                     .onFailure { log.warn("Stop registrazione non confermato: ${it.message}") }
                     .onSuccess { log.info("Registrazione fermata") }
             }

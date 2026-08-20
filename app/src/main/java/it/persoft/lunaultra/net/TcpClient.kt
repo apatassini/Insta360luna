@@ -2,7 +2,7 @@ package it.persoft.lunaultra.net
 
 import it.persoft.lunaultra.protocol.FrameAssembler
 import it.persoft.lunaultra.protocol.Hex
-import it.persoft.lunaultra.protocol.Ucd2Codec
+import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.protocol.Ucd2Frame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -55,7 +55,6 @@ class TcpClient(
     suspend fun connect(
         host: String,
         port: Int,
-        codec: Ucd2Codec,
         scope: CoroutineScope,
         connectTimeoutMs: Int = 5_000,
     ): Result<Unit> = withContext(Dispatchers.IO) {
@@ -73,15 +72,15 @@ class TcpClient(
             output = s.getOutputStream()
             _connected.value = true
             log.info("Connesso a $host:$port")
-            readJob = scope.launch(Dispatchers.IO) { readLoop(s.getInputStream(), codec) }
+            readJob = scope.launch(Dispatchers.IO) { readLoop(s.getInputStream()) }
         }.onFailure {
             log.error("Connessione a $host:$port fallita: ${it.message}")
             cleanup()
         }
     }
 
-    private suspend fun readLoop(input: InputStream, codec: Ucd2Codec) {
-        val assembler = FrameAssembler(codec)
+    private suspend fun readLoop(input: InputStream) {
+        val assembler = FrameAssembler()
         val chunk = ByteArray(8 * 1024)
         try {
             while (currentCoroutineContext().isActive) {
@@ -96,11 +95,13 @@ class TcpClient(
                 assembler.append(copy, read)
                 val frames = assembler.drain { reason -> log.warn("Frame scartato: $reason") }
                 for (frame in frames) {
-                    log.rx(
-                        "cmd=0x%08X seq=%d type=%d err=%d len=%d".format(
-                            frame.commandId, frame.sequence, frame.type, frame.errorCode, frame.payload.size,
+                    if (frame.isCommandFrame) {
+                        log.rx(
+                            "%s req=%d len=%dB".format(
+                                LunaProtocolCodes.describe(frame.code), frame.requestId, frame.payload.size,
+                            )
                         )
-                    )
+                    }
                     _frames.tryEmit(frame)
                 }
             }

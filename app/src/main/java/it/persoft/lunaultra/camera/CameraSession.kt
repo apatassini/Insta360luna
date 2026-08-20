@@ -3,8 +3,10 @@ package it.persoft.lunaultra.camera
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
-import it.persoft.lunaultra.protocol.Ucd2Codec
+import it.persoft.lunaultra.protocol.LunaProtocolCodes
+import it.persoft.lunaultra.protocol.Ucd2
 import it.persoft.lunaultra.protocol.Ucd2Frame
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -17,21 +19,26 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.CompletableDeferred
 
 /**
- * Gestisce la sessione applicativa: numerazione dei messaggi, correlazione richiesta/risposta,
- * handshake e keep-alive. Il trasporto è delegato a [TcpClient].
+ * Sessione di controllo UCD2: handshake, keep-alive e correlazione richiesta/risposta.
+ *
+ * Due dettagli del protocollo che non sono intuitivi:
+ * - la sessione si autorizza inviando il frame di *stream hello*, non un comando;
+ * - a correlare risposta e richiesta è il `requestId` dell'intestazione di comando, non il
+ *   `seq` dell'header UCD2, che scorre per ogni frame inviato.
  */
 class CameraSession(
     private val log: EventLog,
     private val client: TcpClient,
     private val scope: CoroutineScope,
     private val settings: StateFlow<AppSettings>,
-    private val registry: CommandRegistry,
 ) {
 
-    private val sequence = AtomicInteger(1)
+    /** Valori iniziali osservati nel traffico dell'app ufficiale. */
+    private val sequence = AtomicInteger(0x24)
+    private val requestId = AtomicInteger(1)
+
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<Ucd2Frame>>()
 
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
@@ -43,38 +50,33 @@ class CameraSession(
     private val _notifications = MutableSharedFlow<Ucd2Frame>(replay = 0, extraBufferCapacity = 64)
     val notifications: SharedFlow<Ucd2Frame> = _notifications
 
-    private var codec: Ucd2Codec = Ucd2Codec(settings.value.layout.toLayout())
     private var keepAliveJob: Job? = null
     private var dispatchJob: Job? = null
-
-    val currentCodec: Ucd2Codec get() = codec
 
     suspend fun connect(): Result<Unit> {
         val cfg = settings.value
         _lastError.value = null
         _state.value = ConnectionState.CONNECTING
-        codec = Ucd2Codec(cfg.layout.toLayout())
         startDispatcher()
 
-        val result = client.connect(cfg.host, cfg.port, codec, scope)
+        val result = client.connect(cfg.host, cfg.port, scope)
         if (result.isFailure) {
             _state.value = ConnectionState.ERROR
             _lastError.value = result.exceptionOrNull()?.message ?: "Connessione fallita"
             return Result.failure(result.exceptionOrNull() ?: IllegalStateException("Connessione fallita"))
         }
 
-        if (cfg.handshakeEnabled) {
-            val handshakeId = registry.idOf(LunaCommand.CONNECT)
-            if (handshakeId == null) {
-                log.warn("Handshake saltato: id di ${LunaCommand.CONNECT.key} non configurato")
-            } else {
-                _state.value = ConnectionState.HANDSHAKE
-                val response = request(LunaCommand.CONNECT, ByteArray(0))
-                response.onFailure { log.warn("Handshake senza risposta: ${it.message}") }
-                response.onSuccess { log.info("Handshake completato (err=${it.errorCode})") }
-            }
+        _state.value = ConnectionState.HANDSHAKE
+        val hello = client.send(Ucd2.hello(nextSequence()))
+        if (hello.isFailure) {
+            _state.value = ConnectionState.ERROR
+            _lastError.value = "Handshake non inviato: ${hello.exceptionOrNull()?.message}"
+            return Result.failure(hello.exceptionOrNull() ?: IllegalStateException("Handshake fallito"))
         }
+        log.info("Handshake inviato (stream hello)")
 
+        // La camera impiega un attimo ad accettare i comandi dopo l'hello.
+        delay(HANDSHAKE_SETTLE_MS)
         _state.value = ConnectionState.CONNECTED
         startKeepAlive()
         return Result.success(Unit)
@@ -83,9 +85,6 @@ class CameraSession(
     suspend fun disconnect() {
         keepAliveJob?.cancel()
         keepAliveJob = null
-        if (_state.value == ConnectionState.CONNECTED && registry.isConfigured(LunaCommand.DISCONNECT)) {
-            runCatching { request(LunaCommand.DISCONNECT, ByteArray(0), timeoutMs = 500) }
-        }
         client.disconnect()
         dispatchJob?.cancel()
         dispatchJob = null
@@ -98,12 +97,9 @@ class CameraSession(
         if (dispatchJob?.isActive == true) return
         dispatchJob = scope.launch {
             client.frames.collect { frame ->
-                val waiter = pending.remove(frame.sequence)
-                if (waiter != null && frame.type != Ucd2Frame.TYPE_NOTIFICATION) {
-                    waiter.complete(frame)
-                } else {
-                    _notifications.tryEmit(frame)
-                }
+                if (!frame.isCommandFrame) return@collect
+                val waiter = pending.remove(frame.requestId)
+                if (waiter != null) waiter.complete(frame) else _notifications.tryEmit(frame)
             }
         }
         scope.launch {
@@ -116,83 +112,93 @@ class CameraSession(
         }
     }
 
+    /** Il keep-alive è lo stesso frame dell'handshake, ripetuto. */
     private fun startKeepAlive() {
         keepAliveJob?.cancel()
         val periodSeconds = settings.value.keepAliveSeconds
-        if (periodSeconds <= 0 || !registry.isConfigured(LunaCommand.KEEP_ALIVE)) return
+        if (periodSeconds <= 0) return
         keepAliveJob = scope.launch {
             while (isActive && _state.value == ConnectionState.CONNECTED) {
                 delay(periodSeconds * 1000L)
-                request(LunaCommand.KEEP_ALIVE, ByteArray(0), timeoutMs = 1_500)
-                    .onFailure { log.debug("Keep-alive senza risposta") }
+                client.send(Ucd2.hello(nextSequence()))
+                    .onFailure { log.debug("Keep-alive non inviato: ${it.message}") }
             }
         }
     }
 
-    /** Invia un comando simbolico e attende la risposta correlata. */
+    /**
+     * Invia un comando e attende la risposta.
+     *
+     * Una risposta che contiene un messaggio `Error` viene restituita come fallimento con
+     * [CameraErrorException], così il chiamante distingue "comando inesistente" da
+     * "argomenti sbagliati" senza reinterpretare i byte.
+     */
     suspend fun request(
-        command: LunaCommand,
-        payload: ByteArray,
+        code: Int,
+        body: ByteArray = ByteArray(0),
         timeoutMs: Long = settings.value.requestTimeoutMs,
     ): Result<Ucd2Frame> {
-        val id = registry.idOf(command)
-            ?: return Result.failure(
-                UnconfiguredCommandException(command)
-            )
-        return requestRaw(id, payload, timeoutMs, label = command.key)
+        val raw = requestRaw(code, body, timeoutMs)
+        val frame = raw.getOrElse { return Result.failure(it) }
+        val error = LunaError.parse(frame.payload)
+        return if (error != null) {
+            Result.failure(CameraErrorException(LunaProtocolCodes.describe(code), error))
+        } else {
+            Result.success(frame)
+        }
     }
 
-    /** Invia un comando "a fuoco e dimentica": non attende risposta (utile ad alta frequenza). */
-    suspend fun fire(command: LunaCommand, payload: ByteArray): Result<Unit> {
-        val id = registry.idOf(command) ?: return Result.failure(UnconfiguredCommandException(command))
-        val frame = Ucd2Frame(
-            commandId = id,
-            sequence = nextSequence(),
-            type = Ucd2Frame.TYPE_REQUEST,
-            payload = payload,
-        )
-        return client.send(codec.encode(frame))
-    }
-
+    /**
+     * Come [request] ma senza interpretare il corpo: restituisce la risposta anche quando è
+     * un errore. È ciò che serve allo scanner, per cui l'errore *è* il dato.
+     */
     suspend fun requestRaw(
-        commandId: Int,
-        payload: ByteArray,
+        code: Int,
+        body: ByteArray = ByteArray(0),
         timeoutMs: Long = settings.value.requestTimeoutMs,
-        label: String = "0x%08X".format(commandId),
     ): Result<Ucd2Frame> {
         if (!client.connected.value) return Result.failure(IllegalStateException("Non connesso"))
-        val seq = nextSequence()
+        val id = nextRequestId()
         val waiter = CompletableDeferred<Ucd2Frame>()
-        pending[seq] = waiter
-        val frame = Ucd2Frame(commandId = commandId, sequence = seq, type = Ucd2Frame.TYPE_REQUEST, payload = payload)
-        val sent = client.send(codec.encode(frame))
+        pending[id] = waiter
+        val sent = client.send(Ucd2.command(nextSequence(), code, id, body))
         if (sent.isFailure) {
-            pending.remove(seq)
+            pending.remove(id)
             return Result.failure(sent.exceptionOrNull() ?: IllegalStateException("Invio fallito"))
         }
-        log.debug("→ $label seq=$seq payload=${payload.size}B")
+        log.debug("→ ${LunaProtocolCodes.describe(code)} req=$id payload=${body.size}B")
         val response = withTimeoutOrNull(timeoutMs) { waiter.await() }
-        pending.remove(seq)
-        return when {
-            response == null -> Result.failure(TimeoutException(label, timeoutMs))
-            response.isError -> Result.failure(CameraErrorException(label, response.errorCode))
-            else -> Result.success(response)
+        pending.remove(id)
+        return if (response == null) {
+            Result.failure(TimeoutException(LunaProtocolCodes.describe(code), timeoutMs))
+        } else {
+            Result.success(response)
         }
     }
 
-    private fun nextSequence(): Int {
-        val bits = settings.value.layout.sequenceSize.coerceIn(1, 4) * 8
-        val mask = if (bits >= 31) Int.MAX_VALUE else (1 shl bits) - 1
-        val next = sequence.incrementAndGet() and mask
-        return if (next == 0) sequence.incrementAndGet() and mask else next
+    /** Invio senza attesa della risposta, per i comandi ripetuti ad alta frequenza. */
+    suspend fun fire(code: Int, body: ByteArray = ByteArray(0)): Result<Unit> {
+        if (!client.connected.value) return Result.failure(IllegalStateException("Non connesso"))
+        return client.send(Ucd2.command(nextSequence(), code, nextRequestId(), body))
     }
 
-    class UnconfiguredCommandException(val command: LunaCommand) :
-        IllegalStateException("Id non configurato per ${command.key}: impostalo in Diagnostica")
+    private fun nextSequence(): Int = sequence.getAndIncrement() and 0xFF
+
+    private fun nextRequestId(): Int {
+        val next = requestId.getAndIncrement() and 0xFFFF
+        return if (next == 0) requestId.getAndIncrement() and 0xFFFF else next
+    }
 
     class TimeoutException(label: String, timeoutMs: Long) :
         IllegalStateException("Nessuna risposta per $label entro $timeoutMs ms")
 
-    class CameraErrorException(label: String, val code: Int) :
-        IllegalStateException("La camera ha risposto con errore $code a $label")
+    class CameraErrorException(label: String, val error: LunaError) :
+        IllegalStateException(
+            "La camera ha rifiutato $label: ${error.name}" +
+                (error.message?.let { " (\"$it\")" } ?: "")
+        )
+
+    companion object {
+        const val HANDSHAKE_SETTLE_MS = 1_500L
+    }
 }

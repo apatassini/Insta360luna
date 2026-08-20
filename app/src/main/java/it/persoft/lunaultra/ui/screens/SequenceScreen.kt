@@ -162,8 +162,11 @@ fun SequenceScreen(viewModel: MainViewModel) {
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Switch(checked = sequence.setTimelapseMode, onCheckedChange = viewModel::setSetTimelapseMode)
-                Text("Imposta la modalità Timelapse all'avvio", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = sequence.configureCameraTimelapse,
+                    onCheckedChange = viewModel::setConfigureCameraTimelapse,
+                )
+                Text("Invia durata e intervallo alla camera", style = MaterialTheme.typography.bodyMedium)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Switch(checked = sequence.controlRecording, onCheckedChange = viewModel::setControlRecording)

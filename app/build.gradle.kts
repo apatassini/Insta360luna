@@ -18,11 +18,17 @@ android {
     }
 
     buildTypes {
+        // La build di debug è quella che viene distribuita: è l'unica firmabile senza una
+        // chiave, e va scaricata sul telefono. Senza R8 pesa 10 MB di dex non ottimizzato, che
+        // su una connessione incerta è un download che non arriva in fondo.
         debug {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

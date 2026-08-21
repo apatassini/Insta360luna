@@ -95,6 +95,12 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
             )
         }
 
+        // In cima anche questa: è la prova che porta al comando del gimbal, e sepolta a metà
+        // schermata non veniva fatta.
+        HuntCard(viewModel)
+
+        MonitorCard(viewModel)
+
         GimbalCodeCard(viewModel)
 
         ProbeCard(viewModel, probe)
@@ -154,8 +160,6 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
                 }
             }
         }
-
-        MonitorCard(viewModel)
 
         GimbalTuningCard(viewModel)
 
@@ -369,6 +373,90 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
  * È l'unico punto dell'app che manda comandi che la camera può eseguire davvero, e per questo
  * chiede un codice esplicito invece di girare da solo su una lista.
  */
+/**
+ * La caccia al comando del gimbal, in un pulsante.
+ *
+ * Fa quello che le altre due sonde facevano a pezzi: tiene fisso il campo che la camera
+ * riconosce, prova i tipi che un angolo può avere (intero, float, double, coppia di numeri in
+ * un sotto-messaggio) e dopo ogni tentativo rilegge i getter. Non serve guardare la camera:
+ * se un getter cambia, quel corpo ha mosso qualcosa.
+ */
+@Composable
+private fun HuntCard(viewModel: MainViewModel) {
+    val hunt by viewModel.hunt.collectAsState()
+    var code by remember { mutableStateOf("241") }
+    var selector by remember { mutableStateOf("3") }
+    var sensors by remember { mutableStateOf("162,160,245") }
+
+    SectionCard(title = "Caccia al comando gimbal") {
+        Text(
+            text = "Tiene il campo 1 sul valore che la camera prova a eseguire, cerca il campo " +
+                "che manca e dopo ogni tentativo rilegge i getter. Un getter che cambia è la " +
+                "prova che quel corpo ha mosso qualcosa.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            text = "Attenzione: i corpi accettati vengono ESEGUITI. Tieni la camera libera di " +
+                "muoversi e guardala mentre gira.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberField(
+                label = "Codice",
+                value = code,
+                onValueChange = { code = it },
+                modifier = Modifier.weight(1f),
+            )
+            NumberField(
+                label = "Campo 1 =",
+                value = selector,
+                onValueChange = { selector = it },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        OutlinedTextField(
+            value = sensors,
+            onValueChange = { sensors = it },
+            label = { Text("Getter da rileggere") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = { viewModel.huntGimbal(code, selector, sensors) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (hunt.running) "Interrompi" else "Caccia il comando") }
+
+        if (hunt.total > 0) {
+            Text(
+                text = "${hunt.done} di ${hunt.total} corpi provati",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        hunt.interesting.forEach { step ->
+            HorizontalDivider()
+            Text(
+                text = step.label + if (step.rejected) " → rifiutato" else " → ACCETTATO",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (step.rejected) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+            )
+            step.sensorChanges.forEach { (sensor, change) ->
+                Text(
+                    text = "  $sensor: $change",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ShapeCard(viewModel: MainViewModel) {
     val results by viewModel.shape.collectAsState()

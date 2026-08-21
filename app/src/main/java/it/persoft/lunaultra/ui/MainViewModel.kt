@@ -60,6 +60,21 @@ data class MonitorState(
     val ranked: List<MonitorEntry> get() = entries.sortedByDescending { it.changes }
 }
 
+/**
+ * Avanzamento della caccia al comando del gimbal.
+ *
+ * Tiene solo i tentativi che hanno detto qualcosa: su settanta corpi provati, i rifiuti sono
+ * la norma e riempirebbero lo schermo nascondendo l'unico che conta.
+ */
+data class HuntUiState(
+    val running: Boolean = false,
+    val done: Int = 0,
+    val total: Int = 0,
+    val steps: List<CodeProbe.HuntStep> = emptyList(),
+) {
+    val interesting: List<CodeProbe.HuntStep> get() = steps.filter { it.interesting }
+}
+
 data class ProbeUiState(
     val running: Boolean = false,
     /** Gamma in corso di scansione: la UI abilita "Interrompi" solo su quella. */
@@ -101,6 +116,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _shape = MutableStateFlow<List<CodeProbe.ShapeResult>>(emptyList())
     val shape: StateFlow<List<CodeProbe.ShapeResult>> = _shape
+
+    private val _hunt = MutableStateFlow(HuntUiState())
+    val hunt: StateFlow<HuntUiState> = _hunt
 
     private val _shapeRunning = MutableStateFlow(false)
     val shapeRunning: StateFlow<Boolean> = _shapeRunning
@@ -485,6 +503,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _probe.value = _probe.value.copy(hits = hits)
             showMessage("Scansione conclusa: ${hits.size} risposte diverse da un codice inesistente")
+        }
+    }
+
+    /**
+     * Caccia al comando del gimbal in un colpo solo.
+     *
+     * Esiste perché la prova che serviva — tenere fisso il selettore e cercare il campo
+     * mancante — richiedeva di scrivere `0803` a mano in un campo esadecimale, e una prova che
+     * dipende da un passaggio del genere non viene fatta. Qui è un pulsante, e il verdetto non
+     * è più "guarda la camera" ma la rilettura dei getter dopo ogni tentativo.
+     */
+    fun huntGimbal(codeText: String, selectorText: String, sensorsText: String) {
+        if (_hunt.value.running) {
+            probeJob?.cancel()
+            _hunt.value = _hunt.value.copy(running = false)
+            return
+        }
+        val code = parseIntFlexible(codeText)
+        val selector = parseIntFlexible(selectorText) ?: 3
+        if (code == null) {
+            showMessage("Codice non valido")
+            return
+        }
+        val sensors = sensorsText.split(',', ' ', ';')
+            .mapNotNull { parseIntFlexible(it) }
+            .distinct()
+            .ifEmpty { CodeProbe.DEFAULT_SENSORS }
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti prima di cacciare")
+            return
+        }
+        probeJob = viewModelScope.launch {
+            _hunt.value = HuntUiState(running = true)
+            container.session.quiet = true
+            try {
+                val steps = container.probe.huntGimbal(
+                    code = code,
+                    selectorValue = selector,
+                    sensors = sensors,
+                    onProgress = { done, total ->
+                        _hunt.value = _hunt.value.copy(done = done, total = total)
+                    },
+                )
+                _hunt.value = _hunt.value.copy(steps = steps)
+            } finally {
+                container.session.quiet = false
+                _hunt.value = _hunt.value.copy(running = false)
+            }
+            val moved = _hunt.value.steps.count { it.moved }
+            showMessage(
+                if (moved > 0) "$moved corpi hanno cambiato un getter: guarda il log"
+                else "Caccia conclusa: nessun getter è cambiato"
+            )
         }
     }
 

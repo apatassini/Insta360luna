@@ -310,10 +310,20 @@ class CodeProbe(
         val reply: Reply,
     ) {
         /**
-         * La camera non ha rifiutato il corpo. Attenzione: significa che il comando è stato
-         * eseguito, non che la forma sia quella giusta.
+         * La camera non ha protestato: nessun messaggio di errore, quindi con ogni probabilità
+         * il comando è stato eseguito.
+         *
+         * Il criterio è "nessun errore di alcun tipo", non "non è UNKNOWN_MSG_PAYLOAD": una
+         * risposta `UNKNOWN_MSG_CODE` è pur sempre un rifiuto, e trattarla come accettazione
+         * faceva annunciare come eseguita una forma che la camera aveva scartato.
          */
-        val accepted: Boolean get() = (reply as? Reply.Error)?.error?.isBadPayload != true
+        val accepted: Boolean get() = reply !is Reply.Error
+
+        /** Rifiutato perché il corpo non va bene per questo messaggio. */
+        val badPayload: Boolean get() = (reply as? Reply.Error)?.error?.isBadPayload == true
+
+        /** Rifiutato con "codice sconosciuto", che su un messaggio esistente è un indizio. */
+        val unknownCode: Boolean get() = (reply as? Reply.Error)?.error?.isUnknownCommand == true
     }
 
     /**
@@ -355,7 +365,12 @@ class CodeProbe(
             val reply = probe(code, body, timeoutMs)
             val result = ShapeResult(label, Hex.encode(body, separator = ""), reply)
             results += result
-            log.info("  $label → ${if (result.accepted) "ACCETTATO" else "rifiutato"}: ${reply.describe}")
+            val verdict = when {
+                result.accepted -> "ACCETTATO"
+                result.unknownCode -> "rifiutato (codice sconosciuto)"
+                else -> "rifiutato (corpo non valido)"
+            }
+            log.info("  $label → $verdict: ${reply.describe}")
             delay(SHAPE_DELAY_MS)
         }
 
@@ -367,6 +382,67 @@ class CodeProbe(
                 "Forme accettate (la camera le ha eseguite): " +
                     accepted.joinToString { it.label } +
                     ". Se una di queste ha mosso il gimbal, hai il comando e il campo."
+            )
+        }
+        return results
+    }
+
+    /** Esito di un valore provato come selettore in un campo. */
+    data class SelectorResult(val value: Int, val reply: Reply) {
+        /** Nessun errore: quel valore significa qualcosa per la camera. */
+        val valid: Boolean get() = reply !is Reply.Error
+
+        /** L'errore dichiarato, se c'è, per distinguere "non esiste" da "argomenti sbagliati". */
+        val errorCode: Int? get() = (reply as? Reply.Error)?.error?.code
+    }
+
+    /**
+     * Prova una serie di valori in un campo di un comando, per capire se quel campo è un
+     * selettore di sotto-comando.
+     *
+     * Il sospetto nasce da un'osservazione: sul codice 241 il corpo `{1: 1}` cambia l'errore
+     * restituito rispetto a qualunque altro corpo. Un campo che cambia *il tipo* di rifiuto sta
+     * venendo interpretato, non ignorato — e il candidato più naturale è un selettore.
+     *
+     * Come [shape], **non è innocua**: un valore valido viene eseguito.
+     */
+    suspend fun sweepSelector(
+        code: Int,
+        field: Int = 1,
+        from: Int = 0,
+        to: Int = 63,
+        timeoutMs: Long = 1_500,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+    ): List<SelectorResult> {
+        log.warn(
+            "Provo i valori $from-$to nel campo $field del codice $code. Un valore valido viene " +
+                "ESEGUITO: guarda la camera."
+        )
+
+        val results = mutableListOf<SelectorResult>()
+        val total = to - from + 1
+        for ((index, value) in (from..to).withIndex()) {
+            if (!currentCoroutineContext().isActive) break
+            if (session.state.value != ConnectionState.CONNECTED) {
+                log.error("Sessione caduta durante la prova dei valori: mi fermo a $value")
+                break
+            }
+            val reply = probe(code, ProtoWriter().int32(field, value).toByteArray(), timeoutMs)
+            results += SelectorResult(value, reply)
+            // Ogni risposta viene registrata grezza: l'interpretazione può essere sbagliata,
+            // i byte no.
+            log.info("  campo $field = $value → ${reply.describe}")
+            onProgress(index + 1, total)
+            delay(SELECTOR_DELAY_MS)
+        }
+
+        val valid = results.filter { it.valid }
+        if (valid.isEmpty()) {
+            log.info("Nessun valore accettato: quel campo non è un selettore, o i valori giusti stanno oltre $to.")
+        } else {
+            log.info(
+                "Valori accettati dalla camera: " + valid.joinToString { it.value.toString() } +
+                    ". Se uno di questi ha mosso il gimbal, è quello."
             )
         }
         return results
@@ -405,5 +481,8 @@ class CodeProbe(
 
         /** Fra una forma e l'altra: il tempo di vedere se la camera si muove. */
         private const val SHAPE_DELAY_MS = 600L
+
+        /** Fra un valore e il successivo, per lo stesso motivo. */
+        private const val SELECTOR_DELAY_MS = 400L
     }
 }

@@ -34,6 +34,15 @@ data class NotificationSighting(
     val isNamed: Boolean get() = LunaProtocolCodes.nameOf(code) != null
 }
 
+/** Lettura ripetuta di un getter, per vedere quali numeri cambiano muovendo il gimbal. */
+data class MonitorState(
+    val running: Boolean = false,
+    val code: Int = 0,
+    val dump: String = "",
+    val reads: Int = 0,
+    val changes: Int = 0,
+)
+
 data class ProbeUiState(
     val running: Boolean = false,
     /** Gamma in corso di scansione: la UI abilita "Interrompi" solo su quella. */
@@ -67,6 +76,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _probe = MutableStateFlow(ProbeUiState())
     val probe: StateFlow<ProbeUiState> = _probe
 
+    private val _selector = MutableStateFlow<List<CodeProbe.SelectorResult>>(emptyList())
+    val selector: StateFlow<List<CodeProbe.SelectorResult>> = _selector
+
+    private val _monitor = MutableStateFlow(MonitorState())
+    val monitor: StateFlow<MonitorState> = _monitor
+
     private val _shape = MutableStateFlow<List<CodeProbe.ShapeResult>>(emptyList())
     val shape: StateFlow<List<CodeProbe.ShapeResult>> = _shape
 
@@ -81,6 +96,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var pollJob: Job? = null
     private var probeJob: Job? = null
+    private var monitorJob: Job? = null
 
     init {
         viewModelScope.launch { container.load() }
@@ -488,6 +504,89 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Prova i valori di un campo su un comando, per capire se è un selettore di sotto-comando.
+     * Come [probeShape], i valori validi vengono eseguiti dalla camera.
+     */
+    fun sweepSelector(codeText: String, fieldText: String, toText: String) {
+        if (_shapeRunning.value) {
+            probeJob?.cancel()
+            _shapeRunning.value = false
+            return
+        }
+        val code = parseIntFlexible(codeText)
+        val field = parseIntFlexible(fieldText) ?: 1
+        val to = parseIntFlexible(toText) ?: 63
+        if (code == null) {
+            showMessage("Codice non valido")
+            return
+        }
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti prima di sondare")
+            return
+        }
+        probeJob = viewModelScope.launch {
+            _shapeRunning.value = true
+            _selector.value = emptyList()
+            try {
+                _selector.value = container.probe.sweepSelector(code, field, 0, to)
+            } finally {
+                _shapeRunning.value = false
+            }
+            showMessage("Prova conclusa: guarda quali valori sono stati accettati")
+        }
+    }
+
+    /**
+     * Interroga ripetutamente un codice che risponde con dati, e mostra i campi decodificati.
+     *
+     * Serve a riconoscere il getter della posizione: muovendo il gimbal a mano si guarda quale
+     * numero cambia. Read-only, e su un codice che la scansione ha già mostrato innocuo.
+     */
+    fun toggleMonitor(codeText: String) {
+        if (_monitor.value.running) {
+            monitorJob?.cancel()
+            _monitor.value = _monitor.value.copy(running = false)
+            return
+        }
+        val code = parseIntFlexible(codeText)
+        if (code == null) {
+            showMessage("Codice non valido")
+            return
+        }
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti prima di leggere")
+            return
+        }
+        monitorJob = viewModelScope.launch {
+            _monitor.value = MonitorState(running = true, code = code)
+            container.session.quiet = true
+            try {
+                while (isActive) {
+                    val frame = container.session.requestRaw(code, ByteArray(0), 1_500).getOrNull()
+                    if (frame != null) {
+                        val dump = frame.describePayload()
+                        _monitor.value = _monitor.value.let { current ->
+                            current.copy(
+                                dump = dump,
+                                reads = current.reads + 1,
+                                changes = if (current.dump.isNotEmpty() && current.dump != dump) {
+                                    current.changes + 1
+                                } else {
+                                    current.changes
+                                },
+                            )
+                        }
+                    }
+                    delay(MONITOR_PERIOD_MS)
+                }
+            } finally {
+                container.session.quiet = false
+                _monitor.value = _monitor.value.copy(running = false)
+            }
+        }
+    }
+
     fun clearLog() = container.log.clear()
 
     fun exportLog(): String = container.log.exportText()
@@ -539,5 +638,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val STATUS_POLL_MS = 3_000L
+
+        /** Abbastanza fitto da vedere un movimento, abbastanza rado da non intasare il canale. */
+        const val MONITOR_PERIOD_MS = 700L
     }
 }

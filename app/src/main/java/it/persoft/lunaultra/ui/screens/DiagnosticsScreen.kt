@@ -155,6 +155,8 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
             }
         }
 
+        MonitorCard(viewModel)
+
         GimbalTuningCard(viewModel)
 
         SectionCard(title = "Invio manuale") {
@@ -370,8 +372,11 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
 @Composable
 private fun ShapeCard(viewModel: MainViewModel) {
     val results by viewModel.shape.collectAsState()
+    val selector by viewModel.selector.collectAsState()
     val running by viewModel.shapeRunning.collectAsState()
     var code by remember { mutableStateOf("241") }
+    var field by remember { mutableStateOf("1") }
+    var maxValue by remember { mutableStateOf("63") }
 
     SectionCard(title = "Forma del messaggio") {
         Text(
@@ -396,6 +401,45 @@ private fun ShapeCard(viewModel: MainViewModel) {
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (running) "Interrompi" else "Prova le forme") }
 
+        HorizontalDivider()
+        Text(
+            text = "Se un campo cambia il TIPO di rifiuto, la camera lo sta interpretando: " +
+                "probabilmente è un selettore di sotto-comando. Qui se ne provano i valori.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberField(
+                label = "Campo",
+                value = field,
+                onValueChange = { field = it },
+                modifier = Modifier.weight(1f),
+            )
+            NumberField(
+                label = "Fino a",
+                value = maxValue,
+                onValueChange = { maxValue = it },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Button(
+            onClick = { viewModel.sweepSelector(code, field, maxValue) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (running) "Interrompi" else "Prova i valori del campo") }
+
+        selector.filter { it.valid }.forEach { result ->
+            Text(
+                text = "valore ${result.value} → ACCETTATO: ${result.reply.describe}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (selector.isNotEmpty() && selector.none { it.valid }) {
+            Text(
+                text = "${selector.size} valori provati, nessuno accettato.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
         results.forEach { result ->
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
@@ -407,7 +451,11 @@ private fun ShapeCard(viewModel: MainViewModel) {
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    text = if (result.accepted) "ACCETTATO" else "rifiutato",
+                    text = when {
+                        result.accepted -> "ACCETTATO"
+                        result.unknownCode -> "rifiutato (codice)"
+                        else -> "rifiutato (corpo)"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (result.accepted) {
                         MaterialTheme.colorScheme.error
@@ -416,6 +464,47 @@ private fun ShapeCard(viewModel: MainViewModel) {
                     },
                 )
             }
+        }
+    }
+}
+
+/**
+ * Legge ripetutamente un getter e mostra i campi decodificati.
+ *
+ * È il modo per trovare la lettura della posizione: si avvia, si muove il gimbal a mano dallo
+ * schermo della camera, e si guarda quale numero cambia.
+ */
+@Composable
+private fun MonitorCard(viewModel: MainViewModel) {
+    val monitor by viewModel.monitor.collectAsState()
+    var code by remember { mutableStateOf("162") }
+
+    SectionCard(title = "Monitor di un getter") {
+        Text(
+            text = "Avvia, poi muovi il gimbal a mano dallo schermo della camera e guarda quale " +
+                "numero cambia. I codici 162, 160 e 245 contengono numeri che potrebbero essere " +
+                "angoli. Solo lettura.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        NumberField(
+            label = "Codice da leggere",
+            value = code,
+            onValueChange = { code = it },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = { viewModel.toggleMonitor(code) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (monitor.running) "Ferma" else "Leggi in continuo") }
+
+        if (monitor.reads > 0) {
+            LabeledValue("Letture", monitor.reads.toString())
+            LabeledValue("Cambiamenti", monitor.changes.toString())
+            Text(
+                text = monitor.dump,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
         }
     }
 }

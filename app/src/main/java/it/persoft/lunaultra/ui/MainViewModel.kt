@@ -36,6 +36,8 @@ data class NotificationSighting(
 
 data class ProbeUiState(
     val running: Boolean = false,
+    /** Gamma in corso di scansione: la UI abilita "Interrompi" solo su quella. */
+    val range: CodeProbe.Range? = null,
     val done: Int = 0,
     val total: Int = 0,
     val hits: List<CodeProbe.Hit> = emptyList(),
@@ -415,7 +417,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun scanRange(range: CodeProbe.Range) {
         if (_probe.value.running) {
             probeJob?.cancel()
-            _probe.value = _probe.value.copy(running = false)
+            _probe.value = _probe.value.copy(running = false, range = null)
             return
         }
         val calibration = _probe.value.calibration
@@ -424,15 +426,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         probeJob = viewModelScope.launch {
-            _probe.value = _probe.value.copy(running = true, done = 0, total = range.codes().size, hits = emptyList())
-            val hits = container.probe.scan(
+            _probe.value = _probe.value.copy(
+                running = true,
                 range = range,
-                calibration = calibration,
-                onProgress = { done, total, _ ->
-                    _probe.value = _probe.value.copy(done = done, total = total)
-                },
+                done = 0,
+                total = range.codes().size,
+                hits = emptyList(),
             )
-            _probe.value = _probe.value.copy(running = false, hits = hits)
+            val hits = try {
+                container.probe.scan(
+                    range = range,
+                    calibration = calibration,
+                    onProgress = { done, total, _ ->
+                        _probe.value = _probe.value.copy(done = done, total = total)
+                    },
+                )
+            } finally {
+                _probe.value = _probe.value.copy(running = false, range = null)
+            }
+            _probe.value = _probe.value.copy(hits = hits)
             showMessage("Scansione conclusa: ${hits.size} risposte diverse da un codice inesistente")
         }
     }

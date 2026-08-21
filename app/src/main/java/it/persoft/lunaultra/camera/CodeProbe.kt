@@ -4,6 +4,9 @@ import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.protocol.ProtoWriter
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -208,38 +211,90 @@ class CodeProbe(
     suspend fun scan(
         range: Range,
         calibration: Calibration,
-        timeoutMs: Long = 700,
-        gapMs: Long = 40,
+        timeoutMs: Long = 500,
+        parallel: Int = 4,
         onProgress: (done: Int, total: Int, hits: Int) -> Unit = { _, _, _ -> },
     ): List<Hit> {
-        require(calibration.usable) { "Scansione rifiutata: l'oracolo non è utilizzabile" }
+        require(calibration.usable) { "Scansione rifiutata: nessun segnale su cui basarsi" }
         val codes = range.codes()
         log.info("Scansione di ${codes.size} codici senza nome in ${range.label} (${range.from}-${range.to})")
 
+        // Le sonde viaggiano a gruppi: la correlazione è sul requestId, quindi più richieste
+        // possono stare in volo insieme. Su 4000 codici è la differenza fra un quarto d'ora e
+        // un paio di minuti, ed è ciò che rende la scansione una cosa che si sta a guardare.
+        val batch = parallel.coerceIn(1, 8)
+        var done = 0
         val hits = mutableListOf<Hit>()
-        for ((index, code) in codes.withIndex()) {
-            if (!currentCoroutineContext().isActive) break
-            val reply = probe(code, ByteArray(0), timeoutMs)
-            if (reply.signature != calibration.absent) {
-                hits += Hit(code, reply)
-                log.info("  $code (0x${code.toString(16)}) → ${reply.describe}")
+
+        // La sessione viene interrotta dal log dell'app, non dalla scansione: mentre sonda,
+        // ogni comando e ogni risposta finirebbero nel log a migliaia di righe.
+        session.quiet = true
+        try {
+            for (group in codes.chunked(batch)) {
+                if (!currentCoroutineContext().isActive) break
+
+                val replies = coroutineScope {
+                    group.map { code -> async { code to probeStable(code, timeoutMs) } }.awaitAll()
+                }
+
+                for ((code, reply) in replies) {
+                    if (reply.signature != calibration.absent) {
+                        hits += Hit(code, reply)
+                        log.info("  $code (0x${code.toString(16)}) → ${reply.describe}")
+                    }
+                }
+                done += group.size
+                onProgress(done, codes.size, hits.size)
+
+                // Alcuni codici fanno chiudere la sessione alla camera. Fermarsi e dire quali
+                // erano in volo vale più che riprovare: è un risultato, non un incidente.
+                if (session.state.value != ConnectionState.CONNECTED) {
+                    log.error(
+                        "La camera ha chiuso la sessione durante la scansione. Ultimi codici " +
+                            "provati: ${group.joinToString()}. Uno di questi non è innocuo: " +
+                            "riconnetti e riparti da ${group.last() + 1} per saltarli."
+                    )
+                    break
+                }
             }
-            onProgress(index + 1, codes.size, hits.size)
-            delay(gapMs)
+        } finally {
+            session.quiet = false
         }
 
         val takingArguments = hits.filter { it.existsAndTakesArguments }
         val getters = hits.filter { it.answersWithData }
-        log.info("${hits.size} codici su ${codes.size} hanno risposto diversamente da uno inesistente")
+        val silent = hits.count { it.reply is Reply.Silent }
+
+        log.info("$done codici provati, ${hits.size} hanno risposto diversamente da uno inesistente")
         if (getters.isNotEmpty()) {
-            log.info("Rispondono con dati a un corpo vuoto (esistono, sono getter): " +
-                getters.joinToString { "${it.code} (${(it.reply as Reply.Data).bytes}B)" })
+            log.info(
+                "Rispondono con dati a un corpo vuoto (esistono, sono getter): " +
+                    getters.joinToString { "${it.code} (${(it.reply as Reply.Data).bytes}B)" }
+            )
         }
         if (takingArguments.isNotEmpty()) {
-            log.info("Rifiutano il corpo vuoto (esistono e vogliono argomenti): " +
-                takingArguments.joinToString { it.code.toString() })
+            log.info(
+                "Rifiutano il corpo vuoto (esistono e vogliono argomenti): " +
+                    takingArguments.joinToString { it.code.toString() }
+            )
+        }
+        if (silent > 0) {
+            log.info("$silent non hanno risposto affatto, nemmeno al secondo tentativo: da guardare con sospetto, un timeout ripetuto non è una prova")
         }
         return hits
+    }
+
+    /**
+     * Sonda un codice, ripetendo una volta sola se non risponde.
+     *
+     * Su questa camera l'assenza di risposta è l'eccezione, non la regola: un solo timeout è
+     * più spesso un pacchetto perso che un codice speciale, e senza la conferma la lista dei
+     * risultati si riempie di rumore.
+     */
+    private suspend fun probeStable(code: Int, timeoutMs: Long): Reply {
+        val first = probe(code, ByteArray(0), timeoutMs)
+        if (first !is Reply.Silent) return first
+        return probe(code, ByteArray(0), timeoutMs)
     }
 
     companion object {

@@ -34,6 +34,10 @@ class TcpClient(
 
     private val writeMutex = Mutex()
 
+    /** Silenzia il log dei frame ricevuti: usato durante la scansione dei codici. */
+    @Volatile
+    var quiet: Boolean = false
+
     @Volatile
     private var socket: Socket? = null
 
@@ -96,7 +100,7 @@ class TcpClient(
                 val frames = assembler.drain { reason -> log.warn("Frame scartato: $reason") }
                 for (frame in frames) {
                     // I frame media arrivano a 30 al secondo: annegherebbero il log.
-                    if (frame.isCommandFrame) {
+                    if (frame.isCommandFrame && !quiet) {
                         log.rx(
                             "%s (%d) req=%d len=%dB".format(
                                 LunaProtocolCodes.describe(frame.code),

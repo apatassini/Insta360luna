@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -174,31 +176,46 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
                     "che va mandato per farlo analizzare.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Column(
-                modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+            // Il log arriva a migliaia di righe. Disegnarle tutte in una Column significa
+            // ricomporre l'intero elenco a ogni riga nuova, e durante una scansione la UI si
+            // pianta: la LazyColumn disegna solo ciò che si vede, e la finestra mostra le
+            // ultime righe. L'esportazione resta completa.
+            val visible = remember(log) { log.takeLast(LOG_WINDOW) }
+            if (log.size > LOG_WINDOW) {
+                Text(
+                    text = "Mostrate le ultime $LOG_WINDOW righe di ${log.size}. " +
+                        "L'esportazione le contiene tutte.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            LazyColumn(
+                modifier = Modifier.heightIn(max = 360.dp),
+                reverseLayout = true,
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                log.forEach { entry ->
+                items(visible.asReversed()) { entry ->
                     val color = when (entry.level) {
                         LogLevel.ERROR, LogLevel.WARN -> MaterialTheme.colorScheme.error
                         LogLevel.TX -> MaterialTheme.colorScheme.tertiary
                         LogLevel.RX -> MaterialTheme.colorScheme.primary
                         else -> MaterialTheme.colorScheme.onSurface
                     }
-                    Text(
-                        text = "${entry.time}  ${entry.level}  ${entry.message}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = color,
-                    )
-                    entry.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                    Column {
                         Text(
-                            text = detail,
+                            text = "${entry.time}  ${entry.level}  ${entry.message}",
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
-                            color = color.copy(alpha = 0.7f),
-                            modifier = Modifier.padding(start = 12.dp),
+                            color = color,
                         )
+                        entry.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                            Text(
+                                text = detail,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = color.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(start = 12.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -278,13 +295,17 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
 
         val usable = probe.calibration?.usable == true
         CodeProbe.Range.entries.forEach { range ->
+            // Durante una scansione solo la gamma in corso può essere interrotta: le altre
+            // restano disabilitate, altrimenti tre pulsanti "Interrompi" identici lasciano
+            // credere che ci siano tre scansioni in corso.
+            val isRunning = probe.running && probe.range == range
             OutlinedButton(
                 onClick = { viewModel.scanRange(range) },
-                enabled = usable || probe.running,
+                enabled = isRunning || (usable && !probe.running),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    if (probe.running) "Interrompi"
+                    if (isRunning) "Interrompi"
                     else "2. Scansiona ${range.label} (${range.from}–${range.to})"
                 )
             }
@@ -425,3 +446,6 @@ private fun GimbalTuningCard(viewModel: MainViewModel) {
         }
     }
 }
+
+/** Righe di log disegnate a schermo. L'esportazione non è limitata. */
+private const val LOG_WINDOW = 300

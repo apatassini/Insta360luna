@@ -71,6 +71,19 @@ class CameraSession(
     @Volatile
     private var userDisconnected: Boolean = false
 
+    /**
+     * Silenzia il log dei singoli comandi.
+     *
+     * Serve alla scansione: migliaia di codici, due righe di log ciascuno con dump e campi
+     * decodificati, riempirebbero il log di rumore e rallenterebbero la UI che lo disegna. I
+     * risultati della scansione restano loggati, perché quelli sono il dato.
+     */
+    var quiet: Boolean = false
+        set(value) {
+            field = value
+            client.quiet = value
+        }
+
     suspend fun connect(): Result<Unit> {
         val cfg = settings.value
         _lastError.value = null
@@ -150,15 +163,17 @@ class CameraSession(
                 pending.clear()
 
                 // Una caduta pochi istanti dopo la connessione non è un problema di rete: è la
-                // camera che rifiuta la seconda sessione di controllo.
-                val alive = System.currentTimeMillis() - connectedAtMs
-                if (alive < REFUSED_WINDOW_MS) {
+                // camera che rifiuta la seconda sessione di controllo. Senza una connessione
+                // alle spalle non c'è nessuna durata da calcolare.
+                val alive = if (connectedAtMs == 0L) Long.MAX_VALUE else System.currentTimeMillis() - connectedAtMs
+                if (connectedAtMs != 0L && alive < REFUSED_WINDOW_MS) {
                     _lastError.value = SINGLE_SESSION_MESSAGE
                     log.error(SINGLE_SESSION_MESSAGE)
-                } else {
+                } else if (connectedAtMs != 0L) {
                     _lastError.value = "La camera ha chiuso la connessione"
                     log.warn("Connessione caduta dopo ${alive / 1000}s")
                 }
+                connectedAtMs = 0
                 _state.value = ConnectionState.DISCONNECTED
             }
         }
@@ -241,11 +256,13 @@ class CameraSession(
             pending.remove(id)
             return Result.failure(sent.exceptionOrNull() ?: IllegalStateException("Invio fallito"))
         }
-        log.tx(
-            "%s (%d) req=%d len=%dB".format(LunaProtocolCodes.describe(code), code, id, body.size),
-            detail = if (body.isEmpty()) "(nessun payload)" else
-                "hex: ${Hex.encode(body, limit = 96)}\n${ProtoReader(body).describe()}",
-        )
+        if (!quiet) {
+            log.tx(
+                "%s (%d) req=%d len=%dB".format(LunaProtocolCodes.describe(code), code, id, body.size),
+                detail = if (body.isEmpty()) "(nessun payload)" else
+                    "hex: ${Hex.encode(body, limit = 96)}\n${ProtoReader(body).describe()}",
+            )
+        }
         val response = withTimeoutOrNull(timeoutMs) { waiter.await() }
         pending.remove(id)
         return if (response == null) {

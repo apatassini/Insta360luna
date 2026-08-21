@@ -10,26 +10,27 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.yield
 
 /**
  * Scanner dei codici di comando, per trovare i numeri che l'estrazione pubblica non nomina —
  * in pratica: il comando del gimbal.
  *
- * **Il metodo previsto non funziona su questo firmware.** L'idea era usare `Error.ErrorCode`,
- * che distingue `UNKNOWN_MSG_CODE` (comando inesistente) da `UNKNOWN_MSG_PAYLOAD` (comando
- * esistente, argomenti sbagliati): un corpo vuoto che riceve "argomenti sbagliati" avrebbe
- * detto che il comando c'è e non ha eseguito nulla. Misurato sulla Luna Ultra 1.0.288, la
- * camera non manda messaggi `Error` affatto: risponde **200 con corpo vuoto** sia a un codice
- * inesistente, sia a un payload spazzatura, sia a un comando reale con argomenti mancanti.
+ * Due segnali, misurati sulla Luna Ultra 1.0.288.
  *
- * Resta però un segnale, ed è quello che questa versione usa: un codice che risponde **con
- * dati** a un corpo vuoto esiste ed è un *getter* — restituisce qualcosa senza bisogno di
- * argomenti. `PHONE_COMMAND_GET_PTZ_OPTION` è esattamente uno di questi, e trovarlo dà anche
- * il vicinato dove cercare gli altri comandi PTZ: nei protocolli Insta360 i codici affini
- * stanno vicini.
+ * Il primo è `Error.ErrorCode`, che distingue `UNKNOWN_MSG_CODE` (comando inesistente) da
+ * `UNKNOWN_MSG_PAYLOAD` (comando esistente, argomenti sbagliati). Non funziona ovunque: sui
+ * codici di prova attorno a 3000 la camera risponde 200 con corpo vuoto in entrambi i casi.
+ * Ma nella zona 153-250 i messaggi `Error` arrivano davvero, e lì la distinzione vale — un
+ * comando che rifiuta il corpo vuoto esiste **e non ha eseguito nulla**.
+ *
+ * Il secondo vale ovunque: un codice che risponde **con dati** a un corpo vuoto esiste ed è un
+ * *getter*. Trovarlo dà anche il vicinato dove cercare i comandi affini, che nei protocolli
+ * Insta360 stanno vicini fra loro.
  *
  * [calibrate] misura come risponde un codice inesistente e verifica che almeno un segnale
- * distinguibile esista, invece di dare per scontato quale sia.
+ * distinguibile esista, invece di dare per scontato quale sia. [shape] è il passo successivo,
+ * e a differenza della scansione non è innocuo.
  */
 class CodeProbe(
     private val session: CameraSession,
@@ -177,10 +178,11 @@ class CodeProbe(
                     "c'è nessun segnale su cui basare la ricerca."
 
             junk.signature == absent && emptyOnReal.signature == absent ->
-                "Questa camera non manda messaggi Error: a un codice inesistente, a un payload " +
-                    "sbagliato e a un comando reale senza argomenti risponde sempre \"$absent\". " +
-                    "Resta un solo segnale utile: un codice che risponde CON DATI a un corpo " +
-                    "vuoto esiste ed è un getter — ed è così che si trova GET_PTZ_OPTION."
+                "Con questi codici di prova la camera risponde sempre \"$absent\", quindi qui " +
+                    "non distingue un comando assente da argomenti sbagliati. Non vuol dire che " +
+                    "non mandi mai messaggi Error: in altre zone dei codici lo fa, e la " +
+                    "scansione li mostra. Il segnale che cerca comunque è un codice che " +
+                    "risponde CON DATI a un corpo vuoto — esiste ed è un getter."
 
             else ->
                 "Un codice che risponde diversamente da \"$absent\" è un comando che questo " +
@@ -224,6 +226,7 @@ class CodeProbe(
         // un paio di minuti, ed è ciò che rende la scansione una cosa che si sta a guardare.
         val batch = parallel.coerceIn(1, 8)
         var done = 0
+        var silentStreak = 0
         val hits = mutableListOf<Hit>()
 
         // La sessione viene interrotta dal log dell'app, non dalla scansione: mentre sonda,
@@ -246,16 +249,32 @@ class CodeProbe(
                 done += group.size
                 onProgress(done, codes.size, hits.size)
 
-                // Alcuni codici fanno chiudere la sessione alla camera. Fermarsi e dire quali
-                // erano in volo vale più che riprovare: è un risultato, non un incidente.
-                if (session.state.value != ConnectionState.CONNECTED) {
+                // Il silenzio consecutivo è il segnale che la sessione è morta, e arriva prima
+                // di qualunque cambio di stato: mentre la scansione corre, la coroutine che
+                // osserva la connessione non viene eseguita, e il primo tentativo di fermarsi
+                // sullo stato si accorgeva della caduta solo a scansione finita — dopo aver
+                // registrato migliaia di finti risultati.
+                if (replies.all { it.second is Reply.Silent }) {
+                    silentStreak += group.size
+                } else {
+                    silentStreak = 0
+                }
+
+                if (silentStreak >= SILENCE_MEANS_DEAD || session.state.value != ConnectionState.CONNECTED) {
+                    // Il silenzio non è un risultato: i codici sondati dopo la caduta vanno tolti.
+                    hits.removeAll { it.reply is Reply.Silent && it.code >= group.first() - silentStreak }
                     log.error(
-                        "La camera ha chiuso la sessione durante la scansione. Ultimi codici " +
-                            "provati: ${group.joinToString()}. Uno di questi non è innocuo: " +
-                            "riconnetti e riparti da ${group.last() + 1} per saltarli."
+                        "La sessione è caduta durante la scansione: da ${group.first() - silentStreak} " +
+                            "in poi non risponde più niente. Uno dei codici lì attorno fa chiudere " +
+                            "la connessione alla camera. Riconnetti e riparti da ${group.last() + 1} " +
+                            "per saltarli."
                     )
                     break
                 }
+
+                // Lascia respirare le altre coroutine: senza, quella che osserva la connessione
+                // non gira mai finché la scansione è in corso.
+                yield()
             }
         } finally {
             session.quiet = false
@@ -284,6 +303,75 @@ class CodeProbe(
         return hits
     }
 
+    /** Esito di una singola forma di messaggio provata su un codice. */
+    data class ShapeResult(
+        val label: String,
+        val bodyHex: String,
+        val reply: Reply,
+    ) {
+        /**
+         * La camera non ha rifiutato il corpo. Attenzione: significa che il comando è stato
+         * eseguito, non che la forma sia quella giusta.
+         */
+        val accepted: Boolean get() = (reply as? Reply.Error)?.error?.isBadPayload != true
+    }
+
+    /**
+     * Prova le forme possibili del messaggio di un codice, un campo alla volta.
+     *
+     * A differenza della scansione, **questa non è un'operazione innocua**: ogni corpo che la
+     * camera non rifiuta è un comando che ha eseguito. Va usata guardando la camera, su un
+     * codice alla volta, e solo dopo che la scansione lo ha indicato come esistente.
+     *
+     * Il criterio è semplice: si parte dal corpo vuoto, che per un comando con argomenti viene
+     * rifiutato con `UNKNOWN_MSG_PAYLOAD`. Un corpo che *smette* di essere rifiutato ha
+     * indovinato un campo che quel messaggio possiede davvero.
+     */
+    suspend fun shape(code: Int, timeoutMs: Long = 3_000): List<ShapeResult> {
+        log.warn(
+            "Sonda della forma sul codice $code: da qui in avanti la camera può ESEGUIRE i " +
+                "comandi che accetta. Guarda la camera."
+        )
+
+        val probes = buildList {
+            add("corpo vuoto" to ByteArray(0))
+            for (field in 1..6) {
+                add("campo $field = 0" to ProtoWriter().int32(field, 0).toByteArray())
+                add("campo $field = 1" to ProtoWriter().int32(field, 1).toByteArray())
+                add("campo $field = messaggio vuoto" to ProtoWriter().bytes(field, ByteArray(0)).toByteArray())
+            }
+            // Una coppia asse+velocità è la forma più plausibile per un pan/tilt.
+            add("campo 1 = 1, campo 2 = 30" to ProtoWriter().int32(1, 1).int32(2, 30).toByteArray())
+            add("campo 1 = 1, campo 2 = -30" to ProtoWriter().int32(1, 1).sint32(2, -30).toByteArray())
+        }
+
+        val results = mutableListOf<ShapeResult>()
+        for ((label, body) in probes) {
+            if (!currentCoroutineContext().isActive) break
+            if (session.state.value != ConnectionState.CONNECTED) {
+                log.error("Sessione caduta durante la sonda della forma: mi fermo qui")
+                break
+            }
+            val reply = probe(code, body, timeoutMs)
+            val result = ShapeResult(label, Hex.encode(body, separator = ""), reply)
+            results += result
+            log.info("  $label → ${if (result.accepted) "ACCETTATO" else "rifiutato"}: ${reply.describe}")
+            delay(SHAPE_DELAY_MS)
+        }
+
+        val accepted = results.filter { it.accepted && it.label != "corpo vuoto" }
+        if (accepted.isEmpty()) {
+            log.info("Nessuna forma accettata: il messaggio ha campi diversi da quelli provati.")
+        } else {
+            log.info(
+                "Forme accettate (la camera le ha eseguite): " +
+                    accepted.joinToString { it.label } +
+                    ". Se una di queste ha mosso il gimbal, hai il comando e il campo."
+            )
+        }
+        return results
+    }
+
     /**
      * Sonda un codice, ripetendo una volta sola se non risponde.
      *
@@ -306,5 +394,16 @@ class CodeProbe(
         const val ABSENT_PROBE_B = 3001
 
         private const val STEP_DELAY_MS = 200L
+
+        /**
+         * Silenzi consecutivi oltre i quali la sessione si considera morta.
+         *
+         * Su una sessione viva il silenzio è raro e isolato; una sequenza lunga significa che
+         * non c'è più nessuno dall'altra parte.
+         */
+        private const val SILENCE_MEANS_DEAD = 16
+
+        /** Fra una forma e l'altra: il tempo di vedere se la camera si muove. */
+        private const val SHAPE_DELAY_MS = 600L
     }
 }

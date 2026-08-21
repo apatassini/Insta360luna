@@ -67,6 +67,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _probe = MutableStateFlow(ProbeUiState())
     val probe: StateFlow<ProbeUiState> = _probe
 
+    private val _shape = MutableStateFlow<List<CodeProbe.ShapeResult>>(emptyList())
+    val shape: StateFlow<List<CodeProbe.ShapeResult>> = _shape
+
+    private val _shapeRunning = MutableStateFlow(false)
+    val shapeRunning: StateFlow<Boolean> = _shapeRunning
+
     private val _sightings = MutableStateFlow<List<NotificationSighting>>(emptyList())
     val sightings: StateFlow<List<NotificationSighting>> = _sightings
 
@@ -446,6 +452,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _probe.value = _probe.value.copy(hits = hits)
             showMessage("Scansione conclusa: ${hits.size} risposte diverse da un codice inesistente")
+        }
+    }
+
+    /**
+     * Prova le forme del messaggio di un codice.
+     *
+     * Non è read-only: ogni corpo che la camera accetta viene eseguito. Per questo parte solo
+     * su richiesta esplicita, su un codice alla volta.
+     */
+    fun probeShape(codeText: String) {
+        if (_shapeRunning.value) {
+            probeJob?.cancel()
+            _shapeRunning.value = false
+            return
+        }
+        val code = parseIntFlexible(codeText)
+        if (code == null) {
+            showMessage("Codice non valido")
+            return
+        }
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti prima di sondare")
+            return
+        }
+        probeJob = viewModelScope.launch {
+            _shapeRunning.value = true
+            _shape.value = emptyList()
+            try {
+                _shape.value = container.probe.shape(code)
+            } finally {
+                _shapeRunning.value = false
+            }
+            showMessage("Sonda conclusa: guarda quali forme sono state accettate")
         }
     }
 

@@ -52,6 +52,22 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
 
+        // In cima, non in fondo: il log serve a essere mandato, e cercare il pulsante in fondo
+        // a una schermata lunga significa scorrere tutto ogni volta.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(
+                onClick = { viewModel.shareLog(context) },
+                modifier = Modifier.weight(1f),
+            ) { Text("Condividi log") }
+            OutlinedButton(
+                onClick = viewModel::clearLog,
+                modifier = Modifier.weight(1f),
+            ) { Text("Pulisci log") }
+        }
+
         SectionCard(title = "Connessione") {
             var host by remember(settings.host) { mutableStateOf(settings.host) }
             var port by remember(settings.port) { mutableStateOf(settings.port.toString()) }
@@ -82,6 +98,8 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
         GimbalCodeCard(viewModel)
 
         ProbeCard(viewModel, probe)
+
+        ShapeCard(viewModel)
 
         SectionCard(
             title = "Notifiche osservate",
@@ -161,15 +179,7 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
             ) { Text("Invia") }
         }
 
-        SectionCard(
-            title = "Log",
-            trailing = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { viewModel.shareLog(context) }) { Text("Condividi") }
-                    OutlinedButton(onClick = viewModel::clearLog) { Text("Pulisci") }
-                }
-            },
-        ) {
+        SectionCard(title = "Log") {
             Text(
                 text = "Ogni comando inviato e ogni risposta ricevuta, con i byte grezzi e i campi " +
                     "protobuf decodificati. \"Condividi\" lo salva su file e lo allega: è così " +
@@ -346,6 +356,65 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Sonda la forma del messaggio di un codice trovato dalla scansione.
+ *
+ * È l'unico punto dell'app che manda comandi che la camera può eseguire davvero, e per questo
+ * chiede un codice esplicito invece di girare da solo su una lista.
+ */
+@Composable
+private fun ShapeCard(viewModel: MainViewModel) {
+    val results by viewModel.shape.collectAsState()
+    val running by viewModel.shapeRunning.collectAsState()
+    var code by remember { mutableStateOf("241") }
+
+    SectionCard(title = "Forma del messaggio") {
+        Text(
+            text = "Prova un campo alla volta su un codice che la scansione ha trovato. Un corpo " +
+                "che smette di essere rifiutato ha indovinato un campo vero.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            text = "Attenzione: ogni forma accettata viene ESEGUITA dalla camera. Falla partire " +
+                "guardando la camera, e se il gimbal si muove hai trovato comando e campo.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        NumberField(
+            label = "Codice da sondare",
+            value = code,
+            onValueChange = { code = it },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = { viewModel.probeShape(code) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (running) "Interrompi" else "Prova le forme") }
+
+        results.forEach { result ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = result.label,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (result.accepted) "ACCETTATO" else "rifiutato",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (result.accepted) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
             }
         }
     }

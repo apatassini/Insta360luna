@@ -34,6 +34,20 @@ class GimbalController(
 
     private var jogJob: Job? = null
 
+    /**
+     * Direzione richiesta dal comando manuale, letta a ogni tick dal ciclo di invio.
+     *
+     * È volatile perché la scrive il thread della UI (il dito sulla levetta) e la legge la
+     * coroutine che parla con la camera. Tenerla fuori dal ciclo è ciò che permette di cambiare
+     * direzione senza interromperlo: una levetta analogica cambia valore a ogni frazione di
+     * secondo, e riavviare il ciclo ogni volta manderebbe alla camera raffiche di avvii.
+     */
+    @Volatile
+    private var jogPan = 0f
+
+    @Volatile
+    private var jogTilt = 0f
+
     private val _moving = MutableStateFlow(false)
     val moving: StateFlow<Boolean> = _moving
 
@@ -53,16 +67,33 @@ class GimbalController(
     }
 
     /** Movimento manuale continuo: direzioni in [-1, 1]. Va fermato con [stop]. */
-    fun startJog(panDirection: Float, tiltDirection: Float) {
+    fun startJog(panDirection: Float, tiltDirection: Float) = setJog(panDirection, tiltDirection)
+
+    /**
+     * Cambia la direzione del movimento manuale, avviando il ciclo di comandi se è fermo.
+     *
+     * Le direzioni sono in [-1, 1] su entrambi gli assi e valgono insieme: la levetta analogica
+     * manda una diagonale, la croce direzionale un asse solo. Va fermato con [stop].
+     */
+    fun setJog(panDirection: Float, tiltDirection: Float) {
+        jogPan = panDirection.coerceIn(-1f, 1f)
+        jogTilt = tiltDirection.coerceIn(-1f, 1f)
+        _moving.value = jogPan != 0f || jogTilt != 0f
+        if (jogJob?.isActive != true) startJogLoop()
+    }
+
+    private fun startJogLoop() {
         jogJob?.cancel()
-        _moving.value = true
-        val rateHz = settings.value.gimbal.commandRateHz.coerceIn(1, 50)
-        val periodMs = (1000L / rateHz).coerceAtLeast(20L)
         jogJob = scope.launch {
-            val speedFraction = settings.value.gimbal.manualSpeedPercent.coerceIn(1, 100) / 100f
             while (isActive) {
-                val panPercent = panDirection * speedFraction
-                val tiltPercent = tiltDirection * speedFraction
+                // Velocità e cadenza si rileggono a ogni giro: il cursore della velocità deve
+                // avere effetto mentre il gimbal si muove, non al movimento successivo.
+                val cfg = settings.value.gimbal
+                val rateHz = cfg.commandRateHz.coerceIn(1, 50)
+                val periodMs = (1000L / rateHz).coerceAtLeast(20L)
+                val speedFraction = cfg.manualSpeedPercent.coerceIn(1, 100) / 100f
+                val panPercent = jogPan * speedFraction
+                val tiltPercent = jogTilt * speedFraction
                 commands.gimbalVelocity(panPercent, tiltPercent)
                     .onFailure {
                         log.error("Movimento gimbal non riuscito: ${it.message}")
@@ -77,6 +108,8 @@ class GimbalController(
 
     /** Stop del movimento manuale e stop di emergenza. */
     suspend fun stop() {
+        jogPan = 0f
+        jogTilt = 0f
         jogJob?.cancel()
         jogJob = null
         _moving.value = false

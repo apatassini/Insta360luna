@@ -110,24 +110,63 @@ In alternativa, aprire la cartella con Android Studio (Ladybug o successivo).
 
 ## Come si usa
 
+L'app è un mirino: l'anteprima occupa tutto lo schermo e i comandi ci stanno sopra, come in
+un'app di ripresa. Un tocco sull'immagine nasconde i comandi e lascia solo l'inquadratura.
+
 1. Collegare il telefono alla rete Wi-Fi della Luna Ultra.
-2. Aprire l'app, scheda **Controllo**, premere **Connetti**
+2. Aprire l'app e premere **Connetti**, al centro dell'anteprima
    (l'app forza il routing dei socket sulla rete Wi-Fi anche se non offre Internet).
-   Batteria, modello e stato di registrazione compaiono subito: se li vedi, il protocollo gira.
-3. **Accendi** l'anteprima: da lì in poi vedi dove punti mentre memorizzi i punti.
-4. **La prima volta**: scheda **Diagnostica** → trovare il codice del comando gimbal
-   (vedi sotto). È l'unico passo di configurazione.
-5. Scheda **Sequenza**: scegliere **cosa vuoi fare** — video, timelapse della camera, o foto a
-   scatti per una panoramica.
-6. In **Controllo**, con la croce direzionale portare il gimbal sulla prima inquadratura e
-   premere **Memorizza punto**. Ripetere per gli altri (A, B, C…).
-7. In **Sequenza** impostare durata (totale o per tratto) e, in modalità foto, scatti per tratto
-   e attesa prima dello scatto.
-8. Tornare in **Controllo** e premere **AVVIA**.
-9. **STOP** interrompe tutto immediatamente: ferma il gimbal e la registrazione.
+   Batteria, spazio e stato compaiono subito nella riga in alto: se li vedi, il protocollo gira.
+3. **Accendi l'anteprima** con il primo tasto della colonna dei comandi rapidi, a destra.
+4. **La prima volta**: menu ⋮ → **Diagnostica** → trovare il codice del comando gimbal
+   (vedi sotto). È l'unico passo di configurazione, e finché manca i comandi di movimento
+   restano visibili ma inerti.
+5. Scegliere la **modalità** sulla ghiera in basso: foto, video e timelapse comandano la camera
+   e basta; sequenza, sequenza TL e panorama percorrono i punti memorizzati.
+6. Con la **levetta** (o la croce, che muove un asse alla volta) portare il gimbal sulla prima
+   inquadratura e premere il tasto con la **bandierina**. Ripetere per gli altri punti.
+7. Nel pannello **Sequenza** impostare durata e, in modalità panorama, scatti per tratto e
+   attesa prima dello scatto.
+8. Premere il **pulsante di scatto**: fa la cosa che dice la ghiera, e nelle modalità guidate
+   l'anello attorno mostra l'avanzamento.
+9. **STOP** — sul pulsante stesso o nella scheda dell'avanzamento — interrompe tutto
+   immediatamente: ferma il gimbal e la registrazione.
 
 I punti e le impostazioni sono salvati in JSON nella memoria privata dell'app e ricaricati
 all'avvio.
+
+---
+
+## L'interfaccia
+
+| Dove | Cosa |
+|---|---|
+| Riga in alto | connessione (si tocca per connettere), batteria, spazio libero, cronometro di registrazione, impostazioni e menu |
+| Colonna a destra | anteprima on/off, griglia dei terzi, adatta/riempi lo schermo, pannello del gimbal, nascondi i comandi |
+| Pannello in basso a sinistra | gimbal manuale: levetta analogica o croce direzionale, velocità, azzera posizione, memorizza punto, stop |
+| Barra in basso | ghiera delle modalità, memorizza punto, pulsante di scatto, pannello della sequenza |
+| Al centro | invito a connettersi, oppure il motivo per cui l'anteprima è ancora nera |
+
+Ruotando il telefono i comandi di ripresa passano sul lato destro e il pannello del gimbal si
+rimpicciolisce: in orizzontale l'altezza è il bene scarso.
+
+Tre pannelli si aprono sopra il mirino e si chiudono con Indietro: **Sequenza e punti**,
+**Impostazioni** (camera, anteprima, movimento manuale) e **Diagnostica**.
+
+### Le modalità della ghiera
+
+| Modalità | Cosa fa il pulsante di scatto |
+|---|---|
+| **Foto** | uno scatto singolo |
+| **Video** | avvia e ferma la registrazione |
+| **Timelapse** | avvia e ferma il timelapse interno della camera, a gimbal fermo |
+| **Sequenza** | percorre i punti memorizzati registrando video |
+| **Sequenza TL** | percorre i punti con il timelapse interno della camera |
+| **Panorama** | si ferma a ogni scatto lungo il percorso, per le foto da unire in post |
+
+Le tre modalità guidate hanno bisogno di almeno due punti: senza, il pulsante di scatto resta
+spento. Sceglierne una dalla ghiera equivale a sceglierla nel pannello della sequenza, e
+viceversa: è la stessa impostazione detta in due posti.
 
 ---
 
@@ -163,7 +202,7 @@ La scelta non cambia solo quale comando parte: cambia il significato della durat
 | **Timelapse camera** | Usa il timelapse interno (`START_TIMELAPSE`) | il tempo che la camera comprimerà da sé |
 | **Foto a scatti** | Si ferma a ogni punto, aspetta, scatta (`TAKE_PICTURE`) | il tempo di movimento **fra** uno scatto e il successivo |
 
-La modalità **foto** è quella per le panoramiche da unire in post produzione. Due dettagli che
+La modalità **panorama** è quella per le foto da unire in post produzione. Due dettagli che
 cambiano il risultato:
 
 - **l'attesa prima dello scatto** esiste perché il gimbal ha inerzia. Fotografare subito dopo un
@@ -235,8 +274,8 @@ Il movimento è **a velocità**: l'app invia comandi ripetuti a ~10 Hz e integra
 stimata (dead reckoning). Non usa la posizione assoluta perché `PHONE_COMMAND_SET_PTZ_OPTION`
 condivide lo stesso problema del comando di controllo — nome noto, numero no.
 
-Le velocità massime in °/s si tarano in Diagnostica: cronometra una rotazione completa e
-correggi. Da quelle dipende la corrispondenza fra la durata impostata e il movimento reale.
+Le velocità massime in °/s si tarano in Impostazioni → Movimento manuale (o in Diagnostica,
+insieme al resto della taratura fine): cronometra una rotazione completa e correggi. Da quelle dipende la corrispondenza fra la durata impostata e il movimento reale.
 
 L'interpolazione fra due waypoint segue le formule della specifica:
 
@@ -248,8 +287,8 @@ smooth:   smooth(t)   = t² * (3 - 2t)
 
 ### Timelapse interno o video normale?
 
-L'interruttore *Usa il timelapse interno* in Diagnostica sceglie fra `START_TIMELAPSE` e
-`START_CAPTURE`. Con il gimbal pilotato dall'app la registrazione video normale è di solito la
+La ghiera sceglie fra `START_TIMELAPSE` e `START_CAPTURE`: le modalità *timelapse* usano il
+primo, *video* e *sequenza* il secondo. Con il gimbal pilotato dall'app la registrazione video normale è di solito la
 scelta giusta: durata reale e durata della sequenza coincidono, e l'accelerazione la fai in
 montaggio. Il timelapse interno comprime i tempi e rende difficile far quadrare le due cose.
 
@@ -268,7 +307,12 @@ it.persoft.lunaultra
 ├─ gimbal/       GimbalController (jog manuale, dead reckoning, drive verso target)
 ├─ timelapse/    Waypoint, TimelapseSequence, Interpolation, TimelapseEngine
 ├─ data/         AppSettings, JsonFileStore (persistenza JSON)
-└─ ui/           MainActivity, MainViewModel, schermate Controllo / Sequenza / Diagnostica
+└─ ui/           MainActivity, MainViewModel, LunaApp (mirino + pannelli)
+   ├─ viewfinder/  ViewfinderScreen, ghiera delle modalità, pulsante di scatto, HUD,
+   │               pannello del gimbal, griglia, avanzamento della sequenza
+   ├─ components/  vetro dei comandi sovrapposti, levetta, croce, anteprima, campi
+   ├─ screens/     Sequenza, Impostazioni, Diagnostica
+   └─ theme/       palette scura, tipografia, icone
 ```
 
 Il core (tutto tranne `ui/` e `WifiNetworkBinder`) non dipende dall'SDK Android ed è testato

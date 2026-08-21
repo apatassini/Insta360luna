@@ -16,6 +16,7 @@ import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
+import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -105,6 +106,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
+    /** Modalità selezionata sulla ghiera: decide cosa fa il pulsante di scatto. */
+    private val _captureMode = MutableStateFlow(CaptureMode.VIDEO)
+    val captureMode: StateFlow<CaptureMode> = _captureMode
+
+    /**
+     * Istante in cui è partita la ripresa, per il cronometro dell'HUD. Zero = ferma.
+     *
+     * Serve perché la camera dice da quanto sta registrando solo quando la si interroga, ogni
+     * tre secondi: un cronometro che avanza a scatti di tre secondi si legge come un difetto.
+     */
+    private val _recordingSinceMs = MutableStateFlow(0L)
+    val recordingSinceMs: StateFlow<Long> = _recordingSinceMs
+
     private val _probe = MutableStateFlow(ProbeUiState())
     val probe: StateFlow<ProbeUiState> = _probe
 
@@ -128,6 +142,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val payloadsByCode = mutableMapOf<Int, MutableSet<String>>()
     private val countsByCode = mutableMapOf<Int, Int>()
+
+    /** Ultimo avviso sul codice gimbal ignoto: senza questo, la levetta ne stampa uno per tocco. */
+    private var lastGimbalWarningMs = 0L
 
     private var pollJob: Job? = null
     private var probeJob: Job? = null
@@ -160,6 +177,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.session.disconnect()
             container.wifiBinder.release()
             _status.value = CameraStatus()
+            _recordingSinceMs.value = 0L
         }
     }
 
@@ -182,7 +200,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         while (isActive) {
                             delay(STATUS_POLL_MS)
                             container.commands.fetchStatus()
-                                .onSuccess { _status.value = _status.value.mergedWith(it) }
+                                .onSuccess {
+                                    _status.value = _status.value.mergedWith(it)
+                                    syncRecordingClock()
+                                }
                         }
                     }
                 }
@@ -256,12 +277,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ---------------------------------------------------------------- gimbal
 
     fun jogStart(pan: Float, tilt: Float) {
-        if (!settings.value.gimbal.isControlCodeKnown) {
-            showMessage("Codice del comando gimbal non ancora noto: usa lo scanner in Diagnostica")
-            return
-        }
+        if (!gimbalReady()) return
         container.gimbal.startJog(pan, tilt)
     }
+
+    /**
+     * Movimento con i due assi insieme, per la levetta analogica.
+     *
+     * Arriva a ogni spostamento del dito: non riavvia il comando, ne cambia la direzione mentre
+     * gira. Riavviarlo a ogni frazione di grado significherebbe un ciclo di comandi nuovo
+     * sessanta volte al secondo, con la camera che vede raffiche di start invece di un movimento.
+     */
+    fun jogVector(pan: Float, tilt: Float) {
+        if (!gimbalReady()) return
+        container.gimbal.setJog(pan, tilt)
+    }
+
+    /**
+     * Il gimbal si muove solo se il numero del comando è noto.
+     *
+     * L'avviso è a intervalli perché la levetta chiamerebbe questa guardia a ogni tocco, e una
+     * fila di notifiche identiche copre l'anteprima proprio mentre si cerca di inquadrare.
+     */
+    private fun gimbalReady(): Boolean {
+        if (settings.value.gimbal.isControlCodeKnown) return true
+        val now = System.currentTimeMillis()
+        if (now - lastGimbalWarningMs > GIMBAL_WARNING_INTERVAL_MS) {
+            lastGimbalWarningMs = now
+            showMessage("Comando gimbal non ancora noto: trovalo dalla scheda Diagnostica")
+        }
+        return false
+    }
+
+    fun setManualSpeed(percent: Int) =
+        updateGimbal { it.copy(manualSpeedPercent = percent.coerceIn(1, 100)) }
 
     fun jogStop() {
         viewModelScope.launch { container.gimbal.stop() }
@@ -356,6 +405,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setShootingMode(mode: ShootingMode) =
         container.sequenceStore.update { it.copy(mode = mode) }
 
+    /**
+     * Scelta della modalità guidata dal pannello della sequenza.
+     *
+     * Aggiorna anche la ghiera del mirino: sono due modi di dire la stessa cosa, e vederli in
+     * disaccordo — pannello su «panorama», ghiera su «video» — è peggio che non averne uno.
+     */
+    fun selectSequenceMode(mode: ShootingMode) {
+        setShootingMode(mode)
+        _captureMode.value = CaptureMode.forSequence(mode)
+    }
+
     fun setShotsPerLeg(shots: Int) =
         container.sequenceStore.update { it.copy(shotsPerLeg = shots.coerceIn(2, 200)) }
 
@@ -383,19 +443,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val usesCameraTimelapse: Boolean
         get() = sequence.value.mode == ShootingMode.TIMELAPSE_CAMERA
 
-    fun startRecording() {
+    fun startRecording() = startCapture(usesCameraTimelapse)
+
+    fun stopRecording() = stopCapture(usesCameraTimelapse)
+
+    private fun startCapture(cameraTimelapse: Boolean) {
         viewModelScope.launch {
-            container.commands.startRecording(usesCameraTimelapse)
-                .onSuccess { showMessage("Registrazione avviata") }
+            container.commands.startRecording(cameraTimelapse)
+                .onSuccess {
+                    _recordingSinceMs.value = System.currentTimeMillis()
+                    _status.value = _status.value.mergedWith(CameraStatus(recording = true))
+                    showMessage(if (cameraTimelapse) "Timelapse avviato" else "Registrazione avviata")
+                }
                 .onFailure { showMessage("Start non riuscito: ${it.message}") }
         }
     }
 
-    fun stopRecording() {
+    private fun stopCapture(cameraTimelapse: Boolean) {
         viewModelScope.launch {
-            container.commands.stopRecording(usesCameraTimelapse)
-                .onSuccess { showMessage("Registrazione fermata") }
+            container.commands.stopRecording(cameraTimelapse)
+                .onSuccess {
+                    _recordingSinceMs.value = 0L
+                    _status.value = _status.value.mergedWith(CameraStatus(recording = false))
+                    showMessage("Ripresa fermata")
+                }
                 .onFailure { showMessage("Stop non riuscito: ${it.message}") }
+        }
+    }
+
+    /** La camera è la fonte di verità: se dice che è ferma, il cronometro si azzera. */
+    private fun syncRecordingClock() {
+        if (_status.value.recording == false) _recordingSinceMs.value = 0L
+    }
+
+    private val isRecording: Boolean
+        get() = _recordingSinceMs.value > 0L || _status.value.recording == true
+
+    // ---------------------------------------------------------------- ghiera e scatto
+
+    fun setCaptureMode(mode: CaptureMode) {
+        if (_captureMode.value == mode) return
+        _captureMode.value = mode
+        // Scegliere una modalità guidata dalla ghiera è lo stesso gesto che sceglierla nel
+        // pannello della sequenza: deve valere anche là, altrimenti si finisce con due verità.
+        mode.sequenceMode?.let(::setShootingMode)
+    }
+
+    /**
+     * Il pulsante di scatto. Cosa fa dipende dalla ghiera, come su qualunque camera: uno scatto,
+     * una registrazione da avviare o fermare, oppure la sequenza sui punti memorizzati.
+     */
+    fun onShutter() {
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti alla camera prima di scattare")
+            return
+        }
+        val mode = _captureMode.value
+        when {
+            mode.usesSequence -> if (runState.value.running) emergencyStop() else startRun()
+            mode == CaptureMode.FOTO -> takePicture()
+            isRecording -> stopCapture(mode.cameraTimelapse)
+            else -> startCapture(mode.cameraTimelapse)
         }
     }
 
@@ -740,6 +848,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val STATUS_POLL_MS = 3_000L
+
+        /** Ogni quanto ripetere l'avviso che il comando del gimbal non è ancora noto. */
+        const val GIMBAL_WARNING_INTERVAL_MS = 8_000L
 
         /**
          * Pausa fra una lettura e la successiva. Con più codici a rotazione questo è il passo

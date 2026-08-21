@@ -1,83 +1,72 @@
 package it.persoft.lunaultra.ui.components
 
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import it.persoft.lunaultra.preview.PreviewSource
 import it.persoft.lunaultra.preview.PreviewState
-import android.view.Surface
 
 /**
- * Anteprima dal vivo dell'inquadratura.
+ * L'anteprima dal vivo, a tutto schermo.
  *
- * Le due sorgenti hanno bisogno di due contenitori diversi: il MJPEG produce Bitmap da
- * disegnare, il flusso della sessione di controllo produce video che il decoder scrive
- * direttamente su una [Surface]. Non c'è modo di unificarli senza copiare ogni fotogramma,
- * quindi la vista sceglie in base alla sorgente attiva.
+ * Due sorgenti, due contenitori: il MJPEG produce Bitmap da disegnare, lo stream della sessione
+ * di controllo produce video che il decoder scrive su una [Surface]. Non si unificano senza
+ * copiare ogni fotogramma, quindi la vista sceglie in base alla sorgente attiva.
+ *
+ * Il riquadro dell'immagine viene calcolato a mano invece di usare `aspectRatio`: per riempire
+ * lo schermo l'immagine deve poter debordare e farsi tagliare, e un modificatore che rispetta i
+ * vincoli in arrivo non deborda mai — ripiega sull'adattamento, che è l'opposto di quel che serve.
  */
 @Composable
-fun PreviewView(
+fun PreviewSurface(
     state: PreviewState,
     onSurfaceChanged: (Surface?) -> Unit,
     modifier: Modifier = Modifier,
+    fillScreen: Boolean = false,
 ) {
     val frame = state.frame
-    Box(
+    val sourceRatio = when {
+        frame != null && frame.height > 0 -> frame.width.toFloat() / frame.height.toFloat()
+        else -> 16f / 9f
+    }
+
+    BoxWithConstraints(
         modifier = modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .background(Color.Black),
+            .fillMaxSize()
+            .background(Color.Black)
+            .clipToBounds(),
         contentAlignment = Alignment.Center,
     ) {
-        when {
-            state.usesSurface -> SurfacePreview(onSurfaceChanged)
+        val containerRatio = if (maxHeight.value > 0f) maxWidth / maxHeight else sourceRatio
+        // Riempire vuol dire tagliare il lato che avanza; adattare vuol dire lasciare le bande.
+        val widthDrivesSize = if (fillScreen) containerRatio < sourceRatio else containerRatio > sourceRatio
+        val boxWidth = if (widthDrivesSize) maxHeight * sourceRatio else maxWidth
+        val boxHeight = if (widthDrivesSize) maxHeight else maxWidth / sourceRatio
 
-            frame != null -> Image(
-                bitmap = frame.asImageBitmap(),
-                contentDescription = "Anteprima dal vivo",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
+        Box(modifier = Modifier.size(boxWidth, boxHeight), contentAlignment = Alignment.Center) {
+            when {
+                state.usesSurface -> SurfacePreview(onSurfaceChanged)
 
-        // Il messaggio resta sopra l'immagine: quando l'anteprima è nera, dice il perché.
-        if (frame == null && state.framesDecoded == 0L) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.padding(16.dp),
-            ) {
-                Text(
-                    text = state.message ?: if (state.active) "Anteprima in avvio…" else "Anteprima spenta",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White,
+                frame != null -> Image(
+                    bitmap = frame.asImageBitmap(),
+                    contentDescription = "Anteprima dal vivo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
                 )
-                if (state.active && state.source != PreviewSource.NESSUNA) {
-                    Text(
-                        text = "sorgente: ${state.source.name.lowercase()}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.7f),
-                    )
-                }
             }
         }
     }

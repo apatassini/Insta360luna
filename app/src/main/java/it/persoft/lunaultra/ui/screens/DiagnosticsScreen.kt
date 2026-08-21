@@ -95,10 +95,28 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
             )
         }
 
-        // In cima anche questa: è la prova che porta al comando del gimbal, e sepolta a metà
-        // schermata non veniva fatta.
+        // La sequenza che porta al comando del gimbal, in ordine. Le prove sono numerate e già
+        // compilate: non c'è niente da scrivere a mano.
+        SectionCard(title = "Trovare il comando del gimbal") {
+            Text(
+                text = "Il numero del comando che muove il gimbal non è pubblico: i due progetti " +
+                    "che esistono su questa camera sono fermi sullo stesso punto. Lo cerchiamo " +
+                    "qui, in due prove. Falle nell'ordine 1 → 2.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                text = "La posizione del gimbal non si legge chiedendola: la camera la spinge da " +
+                    "sola quando il gimbal si muove (di solito sul codice 8302). Per questo la " +
+                    "prova 1 è mettersi in ascolto, non interrogare.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        ListenCard(viewModel, sightings)
+
         HuntCard(viewModel)
 
+        // Strumenti manuali, sotto: servono solo se le due prove sopra non bastano.
         MonitorCard(viewModel)
 
         GimbalCodeCard(viewModel)
@@ -106,60 +124,6 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
         ProbeCard(viewModel, probe)
 
         ShapeCard(viewModel)
-
-        SectionCard(
-            title = "Notifiche osservate",
-            trailing = {
-                OutlinedButton(onClick = viewModel::clearSightings) { Text("Azzera") }
-            },
-        ) {
-            Text(
-                text = "Muovi il gimbal dallo schermo della camera e guarda quale codice si sveglia. " +
-                    "Un codice con molti payload diversi porta numeri che cambiano; uno che ripete " +
-                    "sempre gli stessi byte è un battito.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            if (sightings.isEmpty()) {
-                Text("Nessuna notifica ricevuta finora.", style = MaterialTheme.typography.bodyMedium)
-            } else {
-                sightings.forEach { sighting ->
-                    HorizontalDivider()
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "${sighting.code} · ${sighting.name}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (sighting.isNamed) {
-                                    MaterialTheme.colorScheme.onSurface
-                                } else {
-                                    MaterialTheme.colorScheme.primary
-                                },
-                            )
-                            Text(
-                                text = "${sighting.count} volte · ${sighting.distinctPayloads} payload distinti",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        if (!sighting.isNamed) {
-                            OutlinedButton(
-                                onClick = { viewModel.updateGimbal { it.copy(ptzNotificationCode = sighting.code) } },
-                            ) { Text("È il PTZ") }
-                        }
-                    }
-                    if (sighting.lastDump.isNotBlank()) {
-                        Text(
-                            text = sighting.lastDump,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                }
-            }
-        }
 
         GimbalTuningCard(viewModel)
 
@@ -381,23 +345,104 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
  * un sotto-messaggio) e dopo ogni tentativo rilegge i getter. Non serve guardare la camera:
  * se un getter cambia, quel corpo ha mosso qualcosa.
  */
+/**
+ * PROVA 1 — Ascolto delle notifiche spontanee (sicura, solo lettura).
+ *
+ * La posizione del gimbal non è un getter: la camera la spinge da sola mentre il gimbal si
+ * muove. Si azzera, si muove il gimbal a mano, e si guarda quale codice sale — quasi certamente
+ * l'8302. Serve anche a validare l'oracolo della prova 2: se sappiamo che l'8302 è il gimbal,
+ * "è arrivata una notifica 8302" diventa una prova vera che qualcosa si è mosso.
+ */
+@Composable
+private fun ListenCard(
+    viewModel: MainViewModel,
+    sightings: List<it.persoft.lunaultra.ui.NotificationSighting>,
+) {
+    SectionCard(
+        title = "1 · Ascolta il gimbal",
+        trailing = {
+            OutlinedButton(onClick = viewModel::clearSightings) { Text("Azzera") }
+        },
+    ) {
+        Text(
+            text = "Premi Azzera, poi muovi il gimbal a mano (o dallo schermo della camera) per " +
+                "una ventina di secondi: panoramica larga e su/giù. Guarda quale codice sale. " +
+                "Solo lettura, non muove niente.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            text = "Ci aspettiamo l'8302, o un codice vicino. Quello con tanti payload diversi " +
+                "porta numeri che cambiano — è la posizione; uno che ripete gli stessi byte è " +
+                "solo un battito. Se trovi il codice giusto, premi \"È il PTZ\".",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (sightings.isEmpty()) {
+            Text("Nessuna notifica ricevuta finora.", style = MaterialTheme.typography.bodyMedium)
+        } else {
+            sightings.forEach { sighting ->
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "${sighting.code} · ${sighting.name}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (sighting.isNamed) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                        )
+                        Text(
+                            text = "${sighting.count} volte · ${sighting.distinctPayloads} payload distinti",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (!sighting.isNamed) {
+                        OutlinedButton(
+                            onClick = { viewModel.updateGimbal { it.copy(ptzNotificationCode = sighting.code) } },
+                        ) { Text("È il PTZ") }
+                    }
+                }
+                if (sighting.lastDump.isNotBlank()) {
+                    Text(
+                        text = sighting.lastDump,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * PROVA 2 — La caccia al comando (esegue: guarda la camera).
+ *
+ * Tiene fisso il campo 1 = 3 (l'unico valore che il 241 prova a eseguire), cerca il campo che
+ * manca nei tipi che un angolo può avere, e dopo ogni tentativo guarda se è arrivata una
+ * notifica. Un getter riletto non basta — la posizione non si interroga — ma una notifica
+ * spontanea sì: se arriva subito dopo un corpo preciso, quel corpo ha mosso il gimbal.
+ */
 @Composable
 private fun HuntCard(viewModel: MainViewModel) {
     val hunt by viewModel.hunt.collectAsState()
     var code by remember { mutableStateOf("241") }
     var selector by remember { mutableStateOf("3") }
-    var sensors by remember { mutableStateOf("162,160,245") }
 
-    SectionCard(title = "Caccia al comando gimbal") {
+    SectionCard(title = "2 · Caccia il comando") {
         Text(
-            text = "Tiene il campo 1 sul valore che la camera prova a eseguire, cerca il campo " +
-                "che manca e dopo ogni tentativo rilegge i getter. Un getter che cambia è la " +
-                "prova che quel corpo ha mosso qualcosa.",
+            text = "Codice e campo sono già impostati sul lead migliore: 241 con campo 1 = 3, " +
+                "l'unico valore che la camera prova a eseguire. Premi e basta.",
             style = MaterialTheme.typography.bodySmall,
         )
         Text(
             text = "Attenzione: i corpi accettati vengono ESEGUITI. Tieni la camera libera di " +
-                "muoversi e guardala mentre gira.",
+                "muoversi e guardala. Dopo ogni tentativo controllo se arriva una notifica: se " +
+                "sì, quel corpo è il comando.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.error,
         )
@@ -415,15 +460,8 @@ private fun HuntCard(viewModel: MainViewModel) {
                 modifier = Modifier.weight(1f),
             )
         }
-        OutlinedTextField(
-            value = sensors,
-            onValueChange = { sensors = it },
-            label = { Text("Getter da rileggere") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
         Button(
-            onClick = { viewModel.huntGimbal(code, selector, sensors) },
+            onClick = { viewModel.huntGimbal(code, selector) },
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (hunt.running) "Interrompi" else "Caccia il comando") }
 
@@ -445,9 +483,9 @@ private fun HuntCard(viewModel: MainViewModel) {
                     MaterialTheme.colorScheme.error
                 },
             )
-            step.sensorChanges.forEach { (sensor, change) ->
+            step.notifications.forEach { (code, times) ->
                 Text(
-                    text = "  $sensor: $change",
+                    text = "  notifica $code ×$times",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.primary,

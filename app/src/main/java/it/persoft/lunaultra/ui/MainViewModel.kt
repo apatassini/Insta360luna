@@ -514,7 +514,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * dipende da un passaggio del genere non viene fatta. Qui è un pulsante, e il verdetto non
      * è più "guarda la camera" ma la rilettura dei getter dopo ogni tentativo.
      */
-    fun huntGimbal(codeText: String, selectorText: String, sensorsText: String) {
+    fun huntGimbal(codeText: String, selectorText: String) {
         if (_hunt.value.running) {
             probeJob?.cancel()
             _hunt.value = _hunt.value.copy(running = false)
@@ -526,35 +526,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             showMessage("Codice non valido")
             return
         }
-        val sensors = sensorsText.split(',', ' ', ';')
-            .mapNotNull { parseIntFlexible(it) }
-            .distinct()
-            .ifEmpty { CodeProbe.DEFAULT_SENSORS }
         if (connectionState.value != ConnectionState.CONNECTED) {
             showMessage("Connettiti prima di cacciare")
             return
         }
         probeJob = viewModelScope.launch {
             _hunt.value = HuntUiState(running = true)
-            container.session.quiet = true
+            // Le notifiche NON vanno silenziate: sono l'oracolo. La sonda sì, altrimenti il
+            // log si riempie di richieste e risposte e la notifica non si distingue.
             try {
                 val steps = container.probe.huntGimbal(
                     code = code,
                     selectorValue = selector,
-                    sensors = sensors,
+                    // Copia dei conteggi: la caccia confronta prima e dopo per sapere quali
+                    // notifiche sono arrivate durante ogni tentativo.
+                    notificationSnapshot = { countsByCode.toMap() },
                     onProgress = { done, total ->
                         _hunt.value = _hunt.value.copy(done = done, total = total)
                     },
                 )
                 _hunt.value = _hunt.value.copy(steps = steps)
             } finally {
-                container.session.quiet = false
                 _hunt.value = _hunt.value.copy(running = false)
             }
             val moved = _hunt.value.steps.count { it.moved }
             showMessage(
-                if (moved > 0) "$moved corpi hanno cambiato un getter: guarda il log"
-                else "Caccia conclusa: nessun getter è cambiato"
+                if (moved > 0) "$moved corpi hanno fatto arrivare una notifica: guarda il log"
+                else "Caccia conclusa: nessuna notifica, nessun movimento"
             )
         }
     }

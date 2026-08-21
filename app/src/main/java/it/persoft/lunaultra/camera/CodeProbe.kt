@@ -455,51 +455,55 @@ class CodeProbe(
         return results
     }
 
-    /** Un tentativo della caccia al gimbal, con quello che i sensori hanno fatto intorno. */
+    /** Un tentativo della caccia al gimbal, con le notifiche che sono arrivate dopo. */
     data class HuntStep(
         val label: String,
         val bodyHex: String,
         val reply: Reply,
-        /** Codice del getter → "prima → dopo", solo per quelli che sono cambiati. */
-        val sensorChanges: Map<Int, String>,
+        /** Codice della notifica spontanea → quante ne sono arrivate dopo questo corpo. */
+        val notifications: Map<Int, Int>,
     ) {
         val rejected: Boolean get() = reply is Reply.Error
 
-        /** Qualcosa si è mosso mentre provavo questo corpo. */
-        val moved: Boolean get() = sensorChanges.isNotEmpty()
+        /** Sono arrivate notifiche spontanee dopo questo corpo: qualcosa si è mosso. */
+        val moved: Boolean get() = notifications.isNotEmpty()
 
-        /** Da guardare: o la camera non ha protestato, o un getter ha cambiato valore. */
+        /** Da guardare: o la camera non ha protestato, o è arrivata una notifica. */
         val interesting: Boolean get() = !rejected || moved
     }
 
     /**
      * Caccia al comando del gimbal, in un colpo solo.
      *
-     * Mette insieme le tre cose che finora andavano fatte a mano, e che quindi non venivano
-     * fatte: tiene fisso il campo selettore sul valore che la camera **prova a eseguire**
-     * (sul 241 è `{1: 3}`, l'unico che risponde EXECUTE_ERROR invece di rifiutare il corpo),
-     * cerca il campo che manca provando anche i tipi che un angolo può avere davvero — float,
-     * double, sotto-messaggio con due numeri — e dopo ogni tentativo rilegge i getter.
+     * L'oracolo non è più "guarda la camera" né la rilettura dei getter — che sulla Luna Ultra
+     * non cambiano, la posizione non si interroga. La posizione **arriva da sola**: mentre il
+     * gimbal si muove la camera spinge frame non richiesti (il codice 8302 e il suo blocco).
+     * Quindi dopo ogni corpo provato si guarda se è arrivata una notifica: se sì, quel corpo
+     * ha mosso qualcosa.
      *
-     * Quest'ultima parte è la differenza che conta: "guarda la camera" non è un oracolo, e un
-     * movimento di un grado non si vede. Un getter che cambia valore subito dopo un corpo
-     * preciso sì.
+     * Tiene fisso il campo selettore sul valore che la camera **prova a eseguire** (sul 241 è
+     * `{1: 3}`, l'unico che risponde EXECUTE_ERROR invece di rifiutare il corpo) e cerca il
+     * campo che manca nei tipi che un angolo può avere davvero: intero, float, double,
+     * sotto-messaggio con due numeri, coppie di campi affiancati.
      *
-     * Come [shape], **non è innocua**: i corpi che la camera accetta li esegue.
+     * `notificationSnapshot` restituisce quante notifiche sono state viste finora per ogni
+     * codice: confrontando prima e dopo si sa quali sono arrivate nel frattempo.
+     *
+     * **Non è innocua**: i corpi che la camera accetta li esegue.
      */
     suspend fun huntGimbal(
         code: Int = 241,
         selectorField: Int = 1,
         selectorValue: Int = 3,
-        sensors: List<Int> = DEFAULT_SENSORS,
+        notificationSnapshot: () -> Map<Int, Int>,
         timeoutMs: Long = 1_500,
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
     ): List<HuntStep> {
         val prefix = ProtoWriter().int32(selectorField, selectorValue).toByteArray()
         log.warn(
             "Caccia al gimbal sul codice $code, con campo $selectorField = $selectorValue fisso. " +
-                "Rileggo ${sensors.joinToString()} dopo ogni tentativo: se uno cambia, quel corpo " +
-                "ha mosso qualcosa. La camera esegue ciò che accetta."
+                "Dopo ogni tentativo guardo se arriva una notifica spontanea: se sì, quel corpo " +
+                "ha mosso il gimbal. La camera esegue ciò che accetta, tienila libera di girare."
         )
 
         val probes = buildList {
@@ -540,11 +544,6 @@ class CodeProbe(
             }
         }
 
-        var previous = readSensors(sensors)
-        log.info(
-            "Sensori a riposo: " + previous.entries.joinToString { "${it.key}=${it.value}" }
-        )
-
         val steps = mutableListOf<HuntStep>()
         for ((index, probeSpec) in probes.withIndex()) {
             val (label, body) = probeSpec
@@ -554,23 +553,23 @@ class CodeProbe(
                 break
             }
 
+            val before = notificationSnapshot()
             val reply = probe(code, body, timeoutMs)
-            // Il tempo di muoversi prima di rileggere: un motore non arriva a destinazione
-            // nell'istante in cui la risposta torna indietro.
+            // Il tempo di muoversi e di far arrivare la notifica prima di guardare: un motore
+            // non parte e non risponde nell'istante in cui la risposta torna indietro.
             delay(HUNT_SETTLE_MS)
-            val after = readSensors(sensors)
-            val changes = after.filter { (sensor, value) -> previous[sensor] != null && previous[sensor] != value }
-                .mapValues { (sensor, value) -> "${previous[sensor]} → $value" }
-            previous = after
+            val after = notificationSnapshot()
+            val fired = after.filter { (c, n) -> n > (before[c] ?: 0) }
+                .mapValues { (c, n) -> n - (before[c] ?: 0) }
 
-            val step = HuntStep(label, Hex.encode(body, separator = ""), reply, changes)
+            val step = HuntStep(label, Hex.encode(body, separator = ""), reply, fired)
             steps += step
             if (step.interesting) {
                 val verdict = if (step.rejected) "rifiutato" else "ACCETTATO"
                 log.info(
                     "  $label → $verdict: ${reply.describe}" +
                         if (step.moved) {
-                            " — SI È MOSSO: " + changes.entries.joinToString { "${it.key} ${it.value}" }
+                            " — NOTIFICA: " + fired.entries.joinToString { "${it.key} ×${it.value}" }
                         } else {
                             ""
                         }
@@ -584,29 +583,19 @@ class CodeProbe(
         val accepted = steps.filter { !it.rejected && it.label.startsWith("camp") }
         when {
             moved.isNotEmpty() -> log.info(
-                "Corpi che hanno cambiato un getter: " + moved.joinToString { it.label } +
+                "Corpi che hanno fatto arrivare una notifica: " + moved.joinToString { it.label } +
                     ". È lì che sta il comando."
             )
             accepted.isNotEmpty() -> log.info(
-                "Corpi accettati ma senza movimento: " + accepted.joinToString { it.label } +
-                    ". Il campo esiste, il valore no."
+                "Corpi accettati ma senza notifica: " + accepted.joinToString { it.label } +
+                    ". Il campo esiste, ma non ha mosso niente."
             )
             else -> log.info(
-                "Niente: né corpi accettati né getter cambiati. Il messaggio del $code ha una " +
-                    "forma diversa da tutte quelle provate, oppure il gimbal non sta qui."
+                "Niente: né corpi accettati né notifiche. Il messaggio del $code ha una forma " +
+                    "diversa da tutte quelle provate, oppure il comando non è questo codice."
             )
         }
         return steps
-    }
-
-    /** Legge i getter di posizione, in silenzio: serve il valore, non il traffico nel log. */
-    private suspend fun readSensors(sensors: List<Int>): Map<Int, String> {
-        val out = LinkedHashMap<Int, String>()
-        for (sensor in sensors) {
-            val frame = session.requestRaw(sensor, ByteArray(0), SENSOR_TIMEOUT_MS).getOrNull() ?: continue
-            out[sensor] = Hex.encode(frame.payload, separator = "")
-        }
-        return out
     }
 
     /**
@@ -647,19 +636,12 @@ class CodeProbe(
         private const val SELECTOR_DELAY_MS = 400L
 
         /**
-         * I getter che rispondono con numeri e che possono contenere la posizione: 162 (due
-         * double, 0 a riposo), 160 (interi più un double), 245 (quattro float). Sono i tre
-         * trovati dalla scansione nella zona del gimbal.
+         * Quanto aspetto, dopo aver inviato un corpo, prima di guardare se è arrivata una
+         * notifica: il tempo che il motore parta e che il frame spontaneo torni indietro.
          */
-        val DEFAULT_SENSORS = listOf(162, 160, 245)
-
-        /** Quanto aspetto prima di rileggere i sensori: il tempo che un motore si muova. */
-        private const val HUNT_SETTLE_MS = 250L
+        private const val HUNT_SETTLE_MS = 400L
 
         /** Fra un tentativo e il successivo. */
-        private const val HUNT_DELAY_MS = 250L
-
-        /** I sensori si rileggono spesso: se uno non risponde subito si tira dritto. */
-        private const val SENSOR_TIMEOUT_MS = 800L
+        private const val HUNT_DELAY_MS = 200L
     }
 }

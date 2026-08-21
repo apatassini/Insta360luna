@@ -337,22 +337,29 @@ class CodeProbe(
      * rifiutato con `UNKNOWN_MSG_PAYLOAD`. Un corpo che *smette* di essere rifiutato ha
      * indovinato un campo che quel messaggio possiede davvero.
      */
-    suspend fun shape(code: Int, timeoutMs: Long = 3_000): List<ShapeResult> {
+    suspend fun shape(
+        code: Int,
+        prefix: ByteArray = ByteArray(0),
+        timeoutMs: Long = 3_000,
+    ): List<ShapeResult> {
         log.warn(
-            "Sonda della forma sul codice $code: da qui in avanti la camera può ESEGUIRE i " +
-                "comandi che accetta. Guarda la camera."
+            "Sonda della forma sul codice $code" +
+                (if (prefix.isEmpty()) "" else " con prefisso ${Hex.encode(prefix, separator = "")}") +
+                ": da qui in avanti la camera può ESEGUIRE i comandi che accetta. Guarda la camera."
         )
 
+        // Il prefisso serve a esplorare un messaggio a più campi: fissato il campo che si è
+        // capito (per esempio un selettore), si va a cercare il successivo senza perderlo.
         val probes = buildList {
-            add("corpo vuoto" to ByteArray(0))
+            if (prefix.isEmpty()) add("corpo vuoto" to ByteArray(0)) else add("solo prefisso" to prefix)
             for (field in 1..6) {
-                add("campo $field = 0" to ProtoWriter().int32(field, 0).toByteArray())
-                add("campo $field = 1" to ProtoWriter().int32(field, 1).toByteArray())
-                add("campo $field = messaggio vuoto" to ProtoWriter().bytes(field, ByteArray(0)).toByteArray())
+                if (prefix.isNotEmpty() && field == 1) continue
+                add("campo $field = 0" to prefix + ProtoWriter().int32(field, 0).toByteArray())
+                add("campo $field = 1" to prefix + ProtoWriter().int32(field, 1).toByteArray())
+                add("campo $field = 30" to prefix + ProtoWriter().int32(field, 30).toByteArray())
+                add("campo $field = -30 (zigzag)" to prefix + ProtoWriter().sint32(field, -30).toByteArray())
+                add("campo $field = messaggio vuoto" to prefix + ProtoWriter().bytes(field, ByteArray(0)).toByteArray())
             }
-            // Una coppia asse+velocità è la forma più plausibile per un pan/tilt.
-            add("campo 1 = 1, campo 2 = 30" to ProtoWriter().int32(1, 1).int32(2, 30).toByteArray())
-            add("campo 1 = 1, campo 2 = -30" to ProtoWriter().int32(1, 1).sint32(2, -30).toByteArray())
         }
 
         val results = mutableListOf<ShapeResult>()
@@ -374,7 +381,7 @@ class CodeProbe(
             delay(SHAPE_DELAY_MS)
         }
 
-        val accepted = results.filter { it.accepted && it.label != "corpo vuoto" }
+        val accepted = results.filter { it.accepted && it.label != "corpo vuoto" && it.label != "solo prefisso" }
         if (accepted.isEmpty()) {
             log.info("Nessuna forma accettata: il messaggio ha campi diversi da quelli provati.")
         } else {

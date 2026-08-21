@@ -377,6 +377,7 @@ private fun ShapeCard(viewModel: MainViewModel) {
     var code by remember { mutableStateOf("241") }
     var field by remember { mutableStateOf("1") }
     var maxValue by remember { mutableStateOf("63") }
+    var prefix by remember { mutableStateOf("") }
 
     SectionCard(title = "Forma del messaggio") {
         Text(
@@ -396,8 +397,20 @@ private fun ShapeCard(viewModel: MainViewModel) {
             onValueChange = { code = it },
             modifier = Modifier.fillMaxWidth(),
         )
+        OutlinedTextField(
+            value = prefix,
+            onValueChange = { prefix = it },
+            label = { Text("Prefisso esadecimale (opzionale)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            text = "Il prefisso resta davanti a ogni forma provata: serve a tenere fermo un " +
+                "campo già capito e cercare il successivo. Per il campo 1 = 3 scrivi 0803.",
+            style = MaterialTheme.typography.bodySmall,
+        )
         Button(
-            onClick = { viewModel.probeShape(code) },
+            onClick = { viewModel.probeShape(code, prefix) },
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (running) "Interrompi" else "Prova le forme") }
 
@@ -477,34 +490,54 @@ private fun ShapeCard(viewModel: MainViewModel) {
 @Composable
 private fun MonitorCard(viewModel: MainViewModel) {
     val monitor by viewModel.monitor.collectAsState()
-    var code by remember { mutableStateOf("162") }
+    var codes by remember { mutableStateOf("160,162,245,239,240") }
 
-    SectionCard(title = "Monitor di un getter") {
+    SectionCard(title = "Ascolto di più codici") {
         Text(
-            text = "Avvia, poi muovi il gimbal a mano dallo schermo della camera e guarda quale " +
-                "numero cambia. I codici 162, 160 e 245 contengono numeri che potrebbero essere " +
-                "angoli. Solo lettura.",
+            text = "Interroga a rotazione tutti i codici indicati e conta quante volte la " +
+                "risposta cambia. Avvia, poi muovi il gimbal a mano: quello che sta leggendo " +
+                "la posizione sale in cima da solo. Solo lettura.",
             style = MaterialTheme.typography.bodySmall,
         )
-        NumberField(
-            label = "Codice da leggere",
-            value = code,
-            onValueChange = { code = it },
+        OutlinedTextField(
+            value = codes,
+            onValueChange = { codes = it },
+            label = { Text("Codici separati da virgola") },
+            singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
         Button(
-            onClick = { viewModel.toggleMonitor(code) },
+            onClick = { viewModel.toggleMonitor(codes) },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text(if (monitor.running) "Ferma" else "Leggi in continuo") }
+        ) { Text(if (monitor.running) "Ferma l'ascolto" else "Ascolta") }
 
-        if (monitor.reads > 0) {
-            LabeledValue("Letture", monitor.reads.toString())
-            LabeledValue("Cambiamenti", monitor.changes.toString())
-            Text(
-                text = monitor.dump,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-            )
+        monitor.ranked.forEach { entry ->
+            HorizontalDivider()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "codice ${entry.code}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (entry.moves) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                )
+                Text(
+                    text = "${entry.changes} cambi · ${entry.distinct} valori · ${entry.reads} letture",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (entry.moves && entry.dump.isNotBlank()) {
+                Text(
+                    text = entry.dump,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
         }
     }
 }

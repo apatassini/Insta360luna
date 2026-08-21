@@ -34,14 +34,31 @@ data class NotificationSighting(
     val isNamed: Boolean get() = LunaProtocolCodes.nameOf(code) != null
 }
 
-/** Lettura ripetuta di un getter, per vedere quali numeri cambiano muovendo il gimbal. */
-data class MonitorState(
-    val running: Boolean = false,
-    val code: Int = 0,
-    val dump: String = "",
+/** Come si comporta un singolo codice sotto osservazione. */
+data class MonitorEntry(
+    val code: Int,
     val reads: Int = 0,
     val changes: Int = 0,
-)
+    val distinct: Int = 0,
+    val dump: String = "",
+) {
+    /** Quello che cambia mentre muovi il gimbal è quello che sta leggendo il gimbal. */
+    val moves: Boolean get() = changes > 0
+}
+
+/**
+ * Lettura ripetuta di più getter insieme.
+ *
+ * Osservarne uno alla volta costringe a indovinare da quale partire; a rotazione si guardano
+ * tutti mentre il gimbal si muove, e quello che cambia si fa riconoscere da solo.
+ */
+data class MonitorState(
+    val running: Boolean = false,
+    val entries: List<MonitorEntry> = emptyList(),
+) {
+    /** In cima quelli che cambiano di più: è lì che si guarda. */
+    val ranked: List<MonitorEntry> get() = entries.sortedByDescending { it.changes }
+}
 
 data class ProbeUiState(
     val running: Boolean = false,
@@ -477,7 +494,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Non è read-only: ogni corpo che la camera accetta viene eseguito. Per questo parte solo
      * su richiesta esplicita, su un codice alla volta.
      */
-    fun probeShape(codeText: String) {
+    fun probeShape(codeText: String, prefixHex: String = "") {
         if (_shapeRunning.value) {
             probeJob?.cancel()
             _shapeRunning.value = false
@@ -496,7 +513,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _shapeRunning.value = true
             _shape.value = emptyList()
             try {
-                _shape.value = container.probe.shape(code)
+                val prefix = if (prefixHex.isBlank()) ByteArray(0) else Hex.decodeOrNull(prefixHex)
+                if (prefix == null) {
+                    showMessage("Prefisso esadecimale non valido")
+                    return@launch
+                }
+                _shape.value = container.probe.shape(code, prefix)
             } finally {
                 _shapeRunning.value = false
             }
@@ -543,15 +565,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Serve a riconoscere il getter della posizione: muovendo il gimbal a mano si guarda quale
      * numero cambia. Read-only, e su un codice che la scansione ha già mostrato innocuo.
      */
-    fun toggleMonitor(codeText: String) {
+    fun toggleMonitor(codesText: String) {
         if (_monitor.value.running) {
             monitorJob?.cancel()
             _monitor.value = _monitor.value.copy(running = false)
             return
         }
-        val code = parseIntFlexible(codeText)
-        if (code == null) {
-            showMessage("Codice non valido")
+        val codes = codesText.split(',', ' ', ';')
+            .mapNotNull { parseIntFlexible(it) }
+            .distinct()
+        if (codes.isEmpty()) {
+            showMessage("Nessun codice valido: scrivili separati da virgola")
             return
         }
         if (connectionState.value != ConnectionState.CONNECTED) {
@@ -559,26 +583,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         monitorJob = viewModelScope.launch {
-            _monitor.value = MonitorState(running = true, code = code)
+            _monitor.value = MonitorState(running = true, entries = codes.map { MonitorEntry(it) })
             container.session.quiet = true
+            // I payload già visti per codice: contarli distingue un valore che oscilla fra due
+            // stati da uno che segue davvero un movimento.
+            val seen = codes.associateWith { mutableSetOf<String>() }
             try {
                 while (isActive) {
-                    val frame = container.session.requestRaw(code, ByteArray(0), 1_500).getOrNull()
-                    if (frame != null) {
+                    for (code in codes) {
+                        if (!isActive) break
+                        val frame = container.session.requestRaw(code, ByteArray(0), 1_200).getOrNull()
+                            ?: continue
                         val dump = frame.describePayload()
-                        _monitor.value = _monitor.value.let { current ->
-                            current.copy(
-                                dump = dump,
-                                reads = current.reads + 1,
-                                changes = if (current.dump.isNotEmpty() && current.dump != dump) {
-                                    current.changes + 1
-                                } else {
-                                    current.changes
-                                },
-                            )
-                        }
+                        seen[code]?.add(Hex.encode(frame.payload, separator = ""))
+                        _monitor.value = _monitor.value.copy(
+                            entries = _monitor.value.entries.map { entry ->
+                                if (entry.code != code) entry else entry.copy(
+                                    reads = entry.reads + 1,
+                                    changes = if (entry.dump.isNotEmpty() && entry.dump != dump) {
+                                        entry.changes + 1
+                                    } else {
+                                        entry.changes
+                                    },
+                                    distinct = seen[code]?.size ?: 0,
+                                    dump = dump,
+                                )
+                            }
+                        )
+                        delay(MONITOR_PERIOD_MS)
                     }
-                    delay(MONITOR_PERIOD_MS)
                 }
             } finally {
                 container.session.quiet = false
@@ -639,7 +672,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val STATUS_POLL_MS = 3_000L
 
-        /** Abbastanza fitto da vedere un movimento, abbastanza rado da non intasare il canale. */
-        const val MONITOR_PERIOD_MS = 700L
+        /**
+         * Pausa fra una lettura e la successiva. Con più codici a rotazione questo è il passo
+         * per codice, non per giro: abbastanza fitto da vedere un movimento del gimbal.
+         */
+        const val MONITOR_PERIOD_MS = 350L
     }
 }

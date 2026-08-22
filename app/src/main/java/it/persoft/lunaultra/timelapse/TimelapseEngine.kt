@@ -100,9 +100,13 @@ class TimelapseEngine(
             phase = RunPhase.PREPARING,
             mode = sequence.mode,
             legCount = sequence.legCount,
-            totalSeconds = if (sequence.mode == ShootingMode.FOTO) sequence.estimatedPhotoSeconds() else total,
+            totalSeconds = if (sequence.mode == ShootingMode.FOTO) {
+                sequence.estimatedPhotoSeconds()
+            } else {
+                sequence.estimatedRecordingSeconds()
+            },
             shotsPlanned = if (sequence.mode == ShootingMode.FOTO) sequence.totalShots() else 0,
-            message = "Preparazione",
+            message = "Ritorno al punto 1 · registrazione ferma",
         )
 
         try {
@@ -132,14 +136,20 @@ class TimelapseEngine(
         tickHz: Int,
     ) {
         if (sequence.mode == ShootingMode.TIMELAPSE_CAMERA && sequence.configureCameraTimelapse) {
-            commands.setTimelapseOptions(total.roundToInt(), sequence.intervalSeconds.roundToInt())
+            commands.setTimelapseOptions(
+                sequence.estimatedRecordingSeconds().roundToInt(),
+                sequence.intervalSeconds.roundToInt(),
+            )
                 .onFailure { log.warn("Parametri timelapse non accettati: ${it.message}") }
                 .onSuccess { log.info("Timelapse impostato: ${total.roundToInt()}s ogni ${sequence.intervalSeconds}s") }
         }
         if (sequence.controlRecording) {
+            _state.value = _state.value.copy(message = "Punto 1 raggiunto · avvio registrazione")
             commands.startRecording(sequence.mode == ShootingMode.TIMELAPSE_CAMERA)
-                .onFailure { log.warn("Avvio registrazione non riuscito: ${it.message}") }
-                .onSuccess { log.info("Registrazione avviata") }
+                .getOrElse { throw IllegalStateException("Avvio registrazione non riuscito: ${it.message}", it) }
+            log.info("Registrazione avviata sul punto ${sequence.waypoints.first().name}")
+            hold(sequence.startHoldSeconds, "Fermo iniziale sul punto ${sequence.waypoints.first().name}")
+            _state.value = _state.value.copy(elapsedSeconds = sequence.startHoldSeconds.coerceAtLeast(0f))
         }
 
         val periodMs = (1000L / tickHz.coerceIn(1, 50)).coerceAtLeast(20L)
@@ -168,7 +178,7 @@ class TimelapseEngine(
                     phase = RunPhase.RUNNING,
                     legIndex = legIndex,
                     legProgress = t,
-                    elapsedSeconds = elapsedTotal + legElapsed,
+                    elapsedSeconds = sequence.startHoldSeconds.coerceAtLeast(0f) + elapsedTotal + legElapsed,
                     targetPan = targetPan,
                     targetTilt = targetTilt,
                     message = "${from.name} → ${to.name}",
@@ -178,6 +188,12 @@ class TimelapseEngine(
             elapsedTotal += legSeconds
             // Allineamento esatto sul waypoint di arrivo, per evitare derive cumulative.
             gimbal.driveTo(to.pan, to.tilt, stepSeconds)
+        }
+
+        gimbal.stop()
+        if (sequence.controlRecording) {
+            hold(sequence.endHoldSeconds, "Fermo finale sul punto ${sequence.waypoints.last().name}")
+            _state.value = _state.value.copy(elapsedSeconds = sequence.estimatedRecordingSeconds())
         }
     }
 
@@ -254,11 +270,16 @@ class TimelapseEngine(
 
     /** Avvicinamento al primo waypoint prima di iniziare a registrare. */
     private suspend fun approach(pan: Float, tilt: Float) {
-        repeat(APPROACH_TICKS) {
-            gimbal.driveTo(pan, tilt, APPROACH_STEP_SECONDS)
-            delay((APPROACH_STEP_SECONDS * 1000).toLong())
-        }
-        gimbal.stop()
+        gimbal.moveToPosition(pan, tilt, minimumSeconds = MIN_APPROACH_SECONDS)
+            .getOrElse { throw IllegalStateException("Punto iniziale non raggiunto: ${it.message}", it) }
+        delay(PRE_RECORD_SETTLE_MS)
+    }
+
+    private suspend fun hold(seconds: Float, message: String) {
+        val millis = (seconds.coerceAtLeast(0f) * 1000f).toLong()
+        if (millis <= 0L) return
+        _state.value = _state.value.copy(phase = RunPhase.RUNNING, message = message)
+        delay(millis)
     }
 
     private suspend fun shutdown(aborted: Boolean, reason: String) {
@@ -280,8 +301,8 @@ class TimelapseEngine(
     }
 
     private companion object {
-        const val APPROACH_TICKS = 20
-        const val APPROACH_STEP_SECONDS = 0.1f
         const val MOVE_TICK_HZ = 10
+        const val MIN_APPROACH_SECONDS = 1f
+        const val PRE_RECORD_SETTLE_MS = 500L
     }
 }

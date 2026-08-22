@@ -48,7 +48,16 @@ data class Waypoint(
     val tilt: Float,
     /** Durata del tratto verso il waypoint successivo, in secondi. Ignorata per l'ultimo punto. */
     val durationToNextSeconds: Float = 30f,
-)
+    /** 1 = vecchia stima; 2 = assi corretti e integrazione sul tempo reale. */
+    val positionModelVersion: Int = LEGACY_POSITION_MODEL_VERSION,
+) {
+    val needsRecapture: Boolean get() = positionModelVersion < CURRENT_POSITION_MODEL_VERSION
+
+    companion object {
+        const val LEGACY_POSITION_MODEL_VERSION = 1
+        const val CURRENT_POSITION_MODEL_VERSION = 2
+    }
+}
 
 @Serializable
 data class TimelapseSequence(
@@ -63,6 +72,12 @@ data class TimelapseSequence(
     /** Se true invia a monte durata e intervallo alla camera con SET_TIMELAPSE_OPTIONS. */
     val configureCameraTimelapse: Boolean = true,
 
+    /** Secondi registrati e fermi sul primo punto, prima di iniziare il movimento. */
+    val startHoldSeconds: Float = 1f,
+
+    /** Secondi registrati e fermi sull'ultimo punto, prima di fermare la ripresa. */
+    val endHoldSeconds: Float = 1f,
+
     /** Scatti per tratto in modalità [ShootingMode.FOTO], estremi inclusi. */
     val shotsPerLeg: Int = 6,
 
@@ -76,6 +91,8 @@ data class TimelapseSequence(
 
     val isRunnable: Boolean get() = waypoints.size >= 2
 
+    val hasLegacyWaypoints: Boolean get() = waypoints.any(Waypoint::needsRecapture)
+
     /** Durata effettiva di ogni tratto, coerente con la modalità scelta. */
     fun legDurations(): List<Float> {
         if (legCount == 0) return emptyList()
@@ -88,6 +105,10 @@ data class TimelapseSequence(
     }
 
     fun effectiveTotalSeconds(): Float = legDurations().sum()
+
+    /** Durata della ripresa continua: pause sui bordi più il movimento impostato. */
+    fun estimatedRecordingSeconds(): Float =
+        effectiveTotalSeconds() + startHoldSeconds.coerceAtLeast(0f) + endHoldSeconds.coerceAtLeast(0f)
 
     /** Scatti effettivi per tratto: almeno due, altrimenti non è un percorso. */
     fun effectiveShotsPerLeg(): Int = shotsPerLeg.coerceAtLeast(2)

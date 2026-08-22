@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             LunaTheme {
                 val vm: MainViewModel = viewModel()
-                AskRuntimePermissions(onReady = { vm.autoUpdateAndConnect(::installUpdate) })
+                AskRuntimePermissions(onReady = { vm.checkForUpdate(::installUpdate) })
                 LunaApp(vm)
             }
         }

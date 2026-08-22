@@ -91,7 +91,7 @@ Comandi usati dall'app, tutti con numero noto:
 ### Gimbal Luna Ultra
 
 Il corpo del comando è `08 01 12 <len> <assi>`. L'app converte la levetta UI nel sistema della
-camera con `device_x = -verticale` e `device_y = orizzontale`, quindi codifica i due valori
+camera con `device_x = verticale` e `device_y = orizzontale`, quindi codifica i due valori
 `-100..100` come protobuf ZigZag. Il rilascio invia `08 01 12 00` quattro volte a 25 ms, così
 un singolo pacchetto perso non lascia il gimbal in movimento. Il pannello offre inoltre i tre
 livelli hardware della camera (lento, medio, veloce) tramite il comando fotografia 9 osservato
@@ -269,8 +269,10 @@ quindi **non** si installa sopra una build della CI: per provarla, disinstalla p
 
 ### Aggiornamenti automatici
 
-All'avvio, prima di collegarsi al Wi-Fi locale della camera, l'app interroga la release GitHub
-del branch. Se il commit è cambiato scarica automaticamente `app-debug.apk`, verifica il digest
+All'avvio l'app interroga la release GitHub prima di qualsiasi collegamento alla camera.
+Non tenta più di connettersi automaticamente alla Luna: concluso il controllo resta sul tasto
+**Connetti**, che viene premuto dall'utente. Se il commit è cambiato,
+scarica automaticamente `app-debug.apk`, verifica il digest
 SHA-256 pubblicato da GitHub e apre l'installer di Android. La prima volta va consentito a Luna
 Ultra di installare app da questa origine; Android richiede comunque la conferma finale per ogni
 installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
@@ -294,22 +296,22 @@ In alternativa, aprire la cartella con Android Studio (Ladybug o successivo).
 L'app è un mirino: l'anteprima occupa tutto lo schermo e i comandi ci stanno sopra, come in
 un'app di ripresa. Un tocco sull'immagine nasconde i comandi e lascia solo l'inquadratura.
 
-1. Accendere il Wi-Fi della Luna Ultra e aprire l'app: se la password è già stata associata,
-   l'app seleziona la rete e si connette da sola. Altrimenti inserirla una volta nelle
-   impostazioni, oppure fare una prima connessione manuale e premere **Connetti**.
-2. L'app forza il routing dei socket sulla rete Wi-Fi della camera anche se non offre Internet.
+1. Aprire l'app mentre il telefono ha Internet: viene controllata prima la disponibilità di un
+   aggiornamento. L'app non cambia rete da sola.
+2. Collegare manualmente il telefono al Wi-Fi della Luna Ultra e premere **Connetti**.
+3. L'app forza il routing dei socket sulla rete Wi-Fi della camera anche se non offre Internet.
    Batteria, spazio e stato compaiono subito nella riga in alto: se li vedi, il protocollo gira.
-3. **Accendi l'anteprima** con il primo tasto della colonna dei comandi rapidi, a destra.
-4. **La prima volta**: menu ⋮ → **Diagnostica** → trovare il codice del comando gimbal
+4. **Accendi l'anteprima** con il primo tasto della colonna dei comandi rapidi, a destra.
+5. **La prima volta**: menu ⋮ → **Diagnostica** → trovare il codice del comando gimbal
    (vedi sotto). È l'unico passo di configurazione, e finché manca i comandi di movimento
    restano visibili ma inerti.
-5. Scegliere la **modalità** sulla ghiera in basso: foto, video e timelapse comandano la camera
+6. Scegliere la **modalità** sulla ghiera in basso: foto, video e timelapse comandano la camera
    e basta; sequenza, sequenza TL e panorama percorrono i punti memorizzati.
-6. Con la **levetta** (o la croce, che muove un asse alla volta) portare il gimbal sulla prima
+7. Con la **levetta** (o la croce, che muove un asse alla volta) portare il gimbal sulla prima
    inquadratura e premere il tasto con la **bandierina**. Ripetere per gli altri punti.
-7. Nel pannello **Sequenza** impostare durata e, in modalità panorama, scatti per tratto e
+8. Nel pannello **Sequenza** impostare durata e, in modalità panorama, scatti per tratto e
    attesa prima dello scatto.
-8. Premere il **pulsante di scatto**: fa la cosa che dice la ghiera, e nelle modalità guidate
+9. Premere il **pulsante di scatto**: fa la cosa che dice la ghiera, e nelle modalità guidate
    l'anello attorno mostra l'avanzamento.
 9. **STOP** — sul pulsante stesso o nella scheda dell'avanzamento — interrompe tutto
    immediatamente: ferma il gimbal e la registrazione.

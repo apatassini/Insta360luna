@@ -102,7 +102,7 @@ fun SequenceScreen(viewModel: MainViewModel) {
                 value = when (sequence.mode) {
                     ShootingMode.FOTO -> sequence.totalShots().toString()
                     ShootingMode.TIMELAPSE_CAMERA -> sequence.estimatedShots().toString()
-                    ShootingMode.VIDEO -> "${sequence.effectiveTotalSeconds().roundToInt()} s"
+                    ShootingMode.VIDEO -> "${sequence.estimatedRecordingSeconds().roundToInt()} s"
                 },
                 label = when (sequence.mode) {
                     ShootingMode.VIDEO -> "video"
@@ -132,6 +132,13 @@ fun SequenceScreen(viewModel: MainViewModel) {
                     Hint(
                         "Nessun punto. Nel mirino porta il gimbal sull'inquadratura che vuoi e " +
                             "premi il tasto con la bandierina: il punto viene memorizzato lì.",
+                    )
+                }
+                if (sequence.hasLegacyWaypoints) {
+                    Hint(
+                        "I punti della versione precedente non sono abbastanza precisi dopo la " +
+                            "correzione degli assi. Portati su ciascuna inquadratura e premi ‘Qui’, " +
+                            "oppure svuota la lista e memorizzali di nuovo.",
                     )
                 }
                 sequence.waypoints.chunked(2).forEach { pair ->
@@ -227,35 +234,77 @@ fun SequenceScreen(viewModel: MainViewModel) {
             }
         }
 
-        SectionCard(title = "Tempi", icon = LunaIcons.MotionTimelapse, accent = Luna.Lapse) {
+        SectionCard(title = "Tempi del percorso", icon = LunaIcons.MotionTimelapse, accent = Luna.Lapse) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 ToggleRow(
-                    title = if (sequence.useTotalDuration) "Durata totale divisa fra i tratti"
-                    else "Durata impostata tratto per tratto",
-                    subtitle = "Con la durata totale ogni tratto dura uguale, qualunque sia la sua ampiezza",
+                    title = if (sequence.useTotalDuration) "Un solo tempo per tutto il percorso"
+                    else "Un tempo diverso per ogni tratto",
+                    subtitle = if (sequence.useTotalDuration) {
+                        "Con 2 punti è il tempo esatto da Punto 1 a Punto 2"
+                    } else {
+                        "Imposta i secondi da un punto al successivo dentro ogni riquadro"
+                    },
                     checked = sequence.useTotalDuration,
                     onCheckedChange = viewModel::setUseTotalDuration,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (sequence.useTotalDuration) {
                     NumberField(
-                        label = "Durata totale (s)",
+                        label = "Tempo di movimento · Punto 1 → ultimo punto (s)",
                         value = sequence.totalDurationSeconds.roundToInt().toString(),
                         onValueChange = { text -> text.toFloatOrNull()?.let(viewModel::setTotalDuration) },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
                     )
+                    if (sequence.legCount > 1) {
+                        Hint(
+                            "I ${sequence.effectiveTotalSeconds().roundToInt()} secondi vengono divisi " +
+                                "in ${sequence.legCount} tratti uguali.",
+                        )
+                    }
+                } else {
+                    Hint("I secondi di ogni tratto compaiono nei punti sopra: Punto 1 → 2, Punto 2 → 3, ecc.")
+                }
+
+                if (sequence.mode.movesContinuously && sequence.controlRecording) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        NumberField(
+                            label = "Fermo iniziale registrato (s)",
+                            value = sequence.startHoldSeconds.toString(),
+                            onValueChange = { text -> text.toFloatOrNull()?.let(viewModel::setStartHoldSeconds) },
+                            keyboardType = KeyboardType.Decimal,
+                            modifier = Modifier.weight(1f),
+                        )
+                        NumberField(
+                            label = "Fermo finale registrato (s)",
+                            value = sequence.endHoldSeconds.toString(),
+                            onValueChange = { text -> text.toFloatOrNull()?.let(viewModel::setEndHoldSeconds) },
+                            keyboardType = KeyboardType.Decimal,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+
+                if (sequence.mode == ShootingMode.TIMELAPSE_CAMERA) {
                     NumberField(
-                        label = "Intervallo (s)",
+                        label = "Intervallo fra gli scatti della camera (s)",
                         value = sequence.intervalSeconds.toString(),
                         onValueChange = { text -> text.toFloatOrNull()?.let(viewModel::setInterval) },
                         keyboardType = KeyboardType.Decimal,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
+
                 LabeledValue(
-                    label = "Durata effettiva",
+                    label = "Solo movimento",
                     value = "${sequence.effectiveTotalSeconds().roundToInt()} s",
                     valueColor = Luna.Lapse,
                 )
+                if (sequence.mode.movesContinuously && sequence.controlRecording) {
+                    LabeledValue(
+                        label = "Registrazione prevista",
+                        value = "${sequence.estimatedRecordingSeconds().roundToInt()} s",
+                        valueColor = wheel.color,
+                    )
+                }
                 when (sequence.mode) {
                     ShootingMode.TIMELAPSE_CAMERA -> {
                         LabeledValue("Scatti stimati dalla camera", sequence.estimatedShots().toString())
@@ -265,13 +314,27 @@ fun SequenceScreen(viewModel: MainViewModel) {
                         )
                     }
 
-                    ShootingMode.VIDEO -> Hint(
-                        "In modalità video l'intervallo non viene usato: la durata è tempo reale di ripresa.",
-                    )
+                    ShootingMode.VIDEO -> Unit
 
                     ShootingMode.FOTO -> Hint(
                         "In modalità foto questa durata è il tempo di movimento fra gli scatti, a cui " +
                             "si aggiungono attesa e scatto.",
+                    )
+                }
+            }
+        }
+
+        if (sequence.mode.movesContinuously && sequence.controlRecording && sequence.waypoints.size >= 2) {
+            SectionCard(title = "Cosa succede quando premi Registra", icon = LunaIcons.Video, accent = wheel.color) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Hint("1. La registrazione è ancora ferma e il gimbal torna al Punto 1.")
+                    Hint("2. Sul Punto 1 parte la registrazione e resta fermo ${sequence.startHoldSeconds} s.")
+                    Hint(
+                        "3. Si muove dal Punto 1 al Punto ${sequence.waypoints.size} in " +
+                            "${sequence.effectiveTotalSeconds().roundToInt()} s, rispettando l'ordine dei punti.",
+                    )
+                    Hint(
+                        "4. Sul punto finale resta fermo ${sequence.endHoldSeconds} s e poi ferma la registrazione.",
                     )
                 }
             }
@@ -391,7 +454,11 @@ private fun WaypointTile(
                 )
             }
             Text(
-                text = if (last) "arrivo" else "verso ${index + 2}",
+                text = when {
+                    index == 0 -> "partenza"
+                    last -> "arrivo"
+                    else -> "punto ${index + 1} → ${index + 2}"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = Luna.OnSurfaceDim,
                 maxLines = 1,
@@ -413,6 +480,15 @@ private fun WaypointTile(
             modifier = Modifier.align(Alignment.CenterHorizontally),
         )
 
+        if (waypoint.needsRecapture) {
+            Text(
+                text = "da rimemorizzare",
+                style = MaterialTheme.typography.labelSmall,
+                color = Luna.Rec,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
+        }
+
         OutlinedTextField(
             value = waypoint.name,
             onValueChange = onRename,
@@ -426,7 +502,7 @@ private fun WaypointTile(
             OutlinedTextField(
                 value = waypoint.durationToNextSeconds.roundToInt().toString(),
                 onValueChange = { text -> text.toFloatOrNull()?.let(onDuration) },
-                label = { Text("Secondi →") },
+                label = { Text("Tempo ${index + 1} → ${index + 2} (s)") },
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),

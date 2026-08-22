@@ -18,6 +18,12 @@ data class GimbalSettings(
     val ptzPanField: Int = 1,
     val ptzTiltField: Int = 2,
 
+    /**
+     * La notifica 8302 è reale, ma i suoi campi non sono ancora confermati come angoli.
+     * Tenerla disattivata impedisce a valori sperimentali di spostare i waypoint memorizzati.
+     */
+    val useExperimentalPtzPosition: Boolean = false,
+
     /** Fattore di scala fra gradi e unità del protocollo (1 = gradi, 10 = decimi di grado). */
     val angleScale: Float = 10f,
 

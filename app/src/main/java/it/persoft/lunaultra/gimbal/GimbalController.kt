@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.max
 import kotlin.math.sign
 
 /**
@@ -51,19 +53,27 @@ class GimbalController(
     private val _moving = MutableStateFlow(false)
     val moving: StateFlow<Boolean> = _moving
 
+    /** Ultimo vettore realmente consegnato alla camera, per integrare il tempo reale. */
+    private var appliedPanPercent = 0f
+    private var appliedTiltPercent = 0f
+    private var appliedSinceNanos = 0L
+
     /** Aggiorna la stima con un dato reale letto dalla camera. */
     fun onCameraPosition(state: PtzState) {
         _position.value = state
+        appliedSinceNanos = System.nanoTime()
     }
 
     /** Azzera/forza la posizione stimata (usato quando la camera non espone il PTZ). */
     fun setEstimated(pan: Float, tilt: Float) {
+        integrateAppliedUntilNow()
         _position.value = _position.value.copy(
             pan = pan,
             tilt = tilt,
             fromCamera = false,
             lastUpdateMs = System.currentTimeMillis(),
         )
+        appliedSinceNanos = System.nanoTime()
     }
 
     /** Movimento manuale continuo: direzioni in [-1, 1]. Va fermato con [stop]. */
@@ -94,13 +104,12 @@ class GimbalController(
                 val speedFraction = cfg.manualSpeedPercent.coerceIn(1, 100) / 100f
                 val panPercent = jogPan * speedFraction
                 val tiltPercent = jogTilt * speedFraction
-                commands.gimbalVelocity(panPercent, tiltPercent)
+                sendVelocity(panPercent, tiltPercent)
                     .onFailure {
                         log.error("Movimento gimbal non riuscito: ${it.message}")
                         _moving.value = false
                         return@launch
                     }
-                integrate(panPercent, tiltPercent, periodMs / 1000f)
                 delay(periodMs)
             }
         }
@@ -118,10 +127,16 @@ class GimbalController(
         jogJob?.cancel()
         jogJob = null
         _moving.value = false
+        integrateAppliedUntilNow()
         repeat(STOP_VECTOR_REPETITIONS) { index ->
             commands.gimbalStop().onFailure {
                 log.warn("Stop gimbal non inviato: ${it.message}")
                 return
+            }
+            if (index == 0) {
+                appliedPanPercent = 0f
+                appliedTiltPercent = 0f
+                appliedSinceNanos = System.nanoTime()
             }
             if (index < STOP_VECTOR_REPETITIONS - 1) delay(STOP_VECTOR_INTERVAL_MS)
         }
@@ -136,6 +151,7 @@ class GimbalController(
      * non c'è modo di inviarlo.
      */
     suspend fun driveTo(targetPan: Float, targetTilt: Float, stepSeconds: Float): Result<Unit> {
+        integrateAppliedUntilNow()
         val cfg = settings.value.gimbal
         val current = _position.value
         val dt = stepSeconds.coerceAtLeast(0.02f)
@@ -143,8 +159,61 @@ class GimbalController(
         val tiltSpeed = clampSpeed((targetTilt - current.tilt) / dt, cfg.maxTiltSpeedDegPerSec)
         val panPercent = if (cfg.maxPanSpeedDegPerSec > 0f) panSpeed / cfg.maxPanSpeedDegPerSec else 0f
         val tiltPercent = if (cfg.maxTiltSpeedDegPerSec > 0f) tiltSpeed / cfg.maxTiltSpeedDegPerSec else 0f
+        return sendVelocity(panPercent, tiltPercent)
+    }
+
+    /** Tempo minimo stimato per raggiungere un punto, considerando entrambi gli assi. */
+    fun estimatedTravelSeconds(targetPan: Float, targetTilt: Float): Float {
+        integrateAppliedUntilNow()
+        val cfg = settings.value.gimbal
+        val current = _position.value
+        val panSeconds = if (cfg.maxPanSpeedDegPerSec > 0f) {
+            abs(targetPan - current.pan) / cfg.maxPanSpeedDegPerSec
+        } else 0f
+        val tiltSeconds = if (cfg.maxTiltSpeedDegPerSec > 0f) {
+            abs(targetTilt - current.tilt) / cfg.maxTiltSpeedDegPerSec
+        } else 0f
+        return max(panSeconds, tiltSeconds)
+    }
+
+    /**
+     * Raggiunge una posizione senza il vecchio limite fisso di due/tre secondi.
+     *
+     * La durata cresce con la distanza: era il limite fisso a lasciare il punto iniziale
+     * spostato verso destra quando il ritorno dal punto 2 richiedeva più di circa 60°.
+     */
+    suspend fun moveToPosition(
+        targetPan: Float,
+        targetTilt: Float,
+        minimumSeconds: Float = 0f,
+        tickHz: Int = POSITION_TICK_HZ,
+    ): Result<Unit> {
+        stop()
+        val travel = max(minimumSeconds, estimatedTravelSeconds(targetPan, targetTilt))
+        val duration = travel * POSITION_TIME_MARGIN + POSITION_SETTLE_MARGIN_SECONDS
+        val rate = tickHz.coerceIn(1, 50)
+        val steps = ceil(duration * rate).toInt().coerceIn(1, MAX_POSITION_STEPS)
+        val stepSeconds = duration / steps
+        repeat(steps) {
+            val result = driveTo(targetPan, targetTilt, stepSeconds)
+            if (result.isFailure) {
+                stop()
+                return result
+            }
+            delay((stepSeconds * 1000f).toLong().coerceAtLeast(20L))
+        }
+        stop()
+        return Result.success(Unit)
+    }
+
+    private suspend fun sendVelocity(panPercent: Float, tiltPercent: Float): Result<Unit> {
+        integrateAppliedUntilNow()
         val result = commands.gimbalVelocity(panPercent, tiltPercent)
-        if (result.isSuccess) integrate(panPercent, tiltPercent, dt)
+        if (result.isSuccess) {
+            appliedPanPercent = panPercent
+            appliedTiltPercent = tiltPercent
+            appliedSinceNanos = System.nanoTime()
+        }
         return result
     }
 
@@ -170,8 +239,29 @@ class GimbalController(
         )
     }
 
+    /**
+     * Integra quanto il comando precedente è rimasto davvero attivo, non il periodo teorico.
+     * Latenza TCP e scheduler altrimenti si accumulavano e spostavano i waypoint.
+     */
+    private fun integrateAppliedUntilNow(nowNanos: Long = System.nanoTime()) {
+        val since = appliedSinceNanos
+        if (since == 0L) {
+            appliedSinceNanos = nowNanos
+            return
+        }
+        val elapsed = ((nowNanos - since) / 1_000_000_000.0).toFloat().coerceAtLeast(0f)
+        if (elapsed > 0f && (appliedPanPercent != 0f || appliedTiltPercent != 0f)) {
+            integrate(appliedPanPercent, appliedTiltPercent, elapsed)
+        }
+        appliedSinceNanos = nowNanos
+    }
+
     companion object {
         const val STOP_VECTOR_REPETITIONS = 4
         const val STOP_VECTOR_INTERVAL_MS = 25L
+        private const val POSITION_TICK_HZ = 10
+        private const val POSITION_TIME_MARGIN = 1.15f
+        private const val POSITION_SETTLE_MARGIN_SECONDS = 0.35f
+        private const val MAX_POSITION_STEPS = 3_600
     }
 }

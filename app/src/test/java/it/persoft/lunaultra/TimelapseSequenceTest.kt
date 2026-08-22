@@ -59,4 +59,31 @@ class TimelapseSequenceTest {
         assertTrue(sequence.legDurations().isEmpty())
         assertEquals(0f, sequence.effectiveTotalSeconds(), 1e-4f)
     }
+
+    @Test
+    fun `la durata video comprende fermo iniziale movimento e fermo finale`() {
+        val sequence = TimelapseSequence(
+            waypoints = waypoints(2),
+            totalDurationSeconds = 60f,
+            startHoldSeconds = 2f,
+            endHoldSeconds = 3f,
+        )
+
+        assertEquals(65f, sequence.estimatedRecordingSeconds(), 1e-4f)
+    }
+
+    @Test
+    fun `i punti della stima precedente vengono riconosciuti`() {
+        val old = Waypoint(id = "old", name = "Vecchio", pan = 0f, tilt = 0f)
+        val current = Waypoint(
+            id = "new",
+            name = "Nuovo",
+            pan = 10f,
+            tilt = 5f,
+            positionModelVersion = Waypoint.CURRENT_POSITION_MODEL_VERSION,
+        )
+
+        assertTrue(TimelapseSequence(waypoints = listOf(old, current)).hasLegacyWaypoints)
+        assertFalse(TimelapseSequence(waypoints = listOf(current, current.copy(id = "new2"))).hasLegacyWaypoints)
+    }
 }

@@ -234,14 +234,16 @@ object LunaMessages {
      * Vettore della levetta del gimbal, ricostruito dalle catture di Insta360Linker.
      *
      * L'interfaccia usa orizzontale/verticale in `-100..100`; la camera usa invece gli assi
-     * ruotati `device_x = -verticale`, `device_y = orizzontale`. Gli assi non nulli sono
+     * ruotati `device_x = verticale`, `device_y = orizzontale`. Il segno verticale è stato
+     * verificato sulla Luna reale: un valore positivo deve inclinare la camera verso l'alto.
+     * Gli assi non nulli sono
      * `sint32` ZigZag dentro il campo 2. Il vettore nullo produce esattamente
      * `08 01 12 00` ed è il comando di stop.
      */
     fun gimbalMove(horizontal: Int, vertical: Int): ByteArray {
         require(horizontal in -100..100) { "Asse orizzontale fuori intervallo: $horizontal" }
         require(vertical in -100..100) { "Asse verticale fuori intervallo: $vertical" }
-        val deviceX = -vertical
+        val deviceX = vertical
         val deviceY = horizontal
         return ProtoWriter()
             .int32(1, 1)

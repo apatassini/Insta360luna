@@ -223,7 +223,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectAttempts = 0
     private var reconnectJob: Job? = null
     private var connectionJob: Job? = null
-    private var autoConnectStarted = false
     private var updateCheckStarted = false
     private var photoCountdownJob: Job? = null
 
@@ -274,29 +273,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * controllare la release GitHub. Il download è automatico; Android mostra comunque la sua
      * conferma di installazione, che un'app normale non può aggirare.
      */
-    fun autoUpdateAndConnect(onReadyToInstall: (File) -> Unit) {
+    fun checkForUpdate(onReadyToInstall: (File) -> Unit) {
         if (updateCheckStarted) return
         updateCheckStarted = true
         viewModelScope.launch {
+            showMessage("Controllo aggiornamenti…")
             updateManager.downloadIfAvailable(BuildConfig.GIT_SHA)
                 .onSuccess { update ->
                     if (update != null) {
                         showMessage("Aggiornamento scaricato: conferma l'installazione")
                         onReadyToInstall(update.apk)
+                    } else {
+                        showMessage("App aggiornata · premi Connetti quando vuoi")
                     }
                 }
                 .onFailure {
                     container.log.warn("Controllo aggiornamenti non riuscito: ${it.message}")
+                    showMessage("Aggiornamento non verificabile · premi Connetti quando vuoi")
                 }
-            autoConnect()
         }
-    }
-
-    /** Tentativo unico all'apertura: se la Luna non c'è, l'app resta semplicemente pronta. */
-    fun autoConnect() {
-        if (autoConnectStarted) return
-        autoConnectStarted = true
-        beginConnect(showFailure = false)
     }
 
     fun connect() = beginConnect(showFailure = true)
@@ -465,7 +460,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 container.commands.statusFromNotification(frame)?.let {
                     _status.value = _status.value.mergedWith(it)
                 }
-                if (frame.code == settings.value.gimbal.ptzNotificationCode) {
+                if (
+                    settings.value.gimbal.useExperimentalPtzPosition &&
+                    frame.code == settings.value.gimbal.ptzNotificationCode
+                ) {
                     container.commands.parsePtz(frame)?.let { container.gimbal.onCameraPosition(it) }
                 }
                 container.commands.gimbalSpeedFromNotification(frame)?.let { level ->
@@ -572,28 +570,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun goToWaypoint(waypoint: Waypoint, seconds: Float = 3f) {
         viewModelScope.launch {
-            val start = ptz.value
-            val steps = (seconds * 10).toInt().coerceAtLeast(1)
-            repeat(steps) { i ->
-                val t = (i + 1f) / steps
-                val pan = start.pan + (waypoint.pan - start.pan) * t
-                val tilt = start.tilt + (waypoint.tilt - start.tilt) * t
-                container.gimbal.driveTo(pan, tilt, 0.1f)
-                delay(100)
-            }
-            container.gimbal.stop()
+            container.gimbal.moveToPosition(waypoint.pan, waypoint.tilt, minimumSeconds = seconds)
+                .onFailure { showMessage("Punto non raggiunto: ${it.message}") }
         }
     }
 
     // ---------------------------------------------------------------- waypoint
 
     fun captureWaypoint() {
-        val current = ptz.value
-        container.sequenceStore.update { seq ->
-            val name = nextWaypointName(seq.waypoints.size)
-            seq.copy(waypoints = seq.waypoints + Waypoint(name = name, pan = current.pan, tilt = current.tilt))
+        viewModelScope.launch {
+            // Acquisisce la posizione solo dopo il vettore zero: così il tempo fra l'ultimo
+            // comando e lo stop entra nella stima e non sposta il punto.
+            container.gimbal.stop()
+            val current = ptz.value
+            container.sequenceStore.update { seq ->
+                val name = nextWaypointName(seq.waypoints.size)
+                seq.copy(
+                    waypoints = seq.waypoints + Waypoint(
+                        name = name,
+                        pan = current.pan,
+                        tilt = current.tilt,
+                        positionModelVersion = Waypoint.CURRENT_POSITION_MODEL_VERSION,
+                    ),
+                )
+            }
+            showMessage("Punto memorizzato a %.1f° / %.1f°".format(current.pan, current.tilt))
         }
-        showMessage("Punto memorizzato a %.1f° / %.1f°".format(current.pan, current.tilt))
     }
 
     fun removeWaypoint(id: String) = container.sequenceStore.update { seq ->
@@ -619,13 +621,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateWaypointToCurrent(id: String) {
-        val current = ptz.value
-        container.sequenceStore.update { seq ->
-            seq.copy(
-                waypoints = seq.waypoints.map {
-                    if (it.id == id) it.copy(pan = current.pan, tilt = current.tilt) else it
-                }
-            )
+        viewModelScope.launch {
+            container.gimbal.stop()
+            val current = ptz.value
+            container.sequenceStore.update { seq ->
+                seq.copy(
+                    waypoints = seq.waypoints.map {
+                        if (it.id == id) {
+                            it.copy(
+                                pan = current.pan,
+                                tilt = current.tilt,
+                                positionModelVersion = Waypoint.CURRENT_POSITION_MODEL_VERSION,
+                            )
+                        } else it
+                    },
+                )
+            }
+            showMessage("Punto aggiornato a %.1f° / %.1f°".format(current.pan, current.tilt))
         }
     }
 
@@ -671,6 +683,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setSettleSeconds(seconds: Float) =
         container.sequenceStore.update { it.copy(settleSeconds = seconds.coerceIn(0f, 30f)) }
 
+    fun setStartHoldSeconds(seconds: Float) =
+        container.sequenceStore.update { it.copy(startHoldSeconds = seconds.coerceIn(0f, 30f)) }
+
+    fun setEndHoldSeconds(seconds: Float) =
+        container.sequenceStore.update { it.copy(endHoldSeconds = seconds.coerceIn(0f, 30f)) }
+
     /**
      * Avvia la sequenza, oppure spiega perché non può partire.
      *
@@ -685,6 +703,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (!seq.isRunnable) {
             showMessage("Servono almeno due punti: inquadra e premi il tasto con la bandierina")
+            return
+        }
+        if (seq.hasLegacyWaypoints) {
+            showMessage("Aggiorna i vecchi punti con ‘Qui’ oppure rimemorizzali: usano la stima precedente")
             return
         }
         viewModelScope.launch {

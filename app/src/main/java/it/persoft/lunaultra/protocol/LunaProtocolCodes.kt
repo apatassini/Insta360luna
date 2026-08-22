@@ -6,7 +6,8 @@ package it.persoft.lunaultra.protocol
  * Questi numeri NON sono inventati: provengono dall'estrazione dei `.proto` fatta dai progetti
  * di reverse engineering citati nel README e sono gli stessi usati da client funzionanti sulla
  * Luna Ultra. Ciò che manca è indicato esplicitamente: i comandi del gimbal esistono con un
- * nome ma il loro numero non è pubblico, e per quelli l'app usa lo scanner (vedi [CodeProbe]).
+ * nome. Il comando di movimento del gimbal è stato poi confermato sulla Luna Ultra tramite
+ * catture UCD2 riproducibili del progetto Insta360Linker.
  */
 object LunaProtocolCodes {
 
@@ -28,6 +29,8 @@ object LunaProtocolCodes {
     const val SET_TIMELAPSE_OPTIONS = 18
     const val START_TIMELAPSE = 22
     const val STOP_TIMELAPSE = 23
+    /** `PHONE_COMMAND_GIMBAL_CONTROL`, confermato su Luna Ultra. */
+    const val GIMBAL_CONTROL = 0x00E2
 
     /**
      * Codici che la camera mette al posto del comando nelle risposte.
@@ -49,6 +52,8 @@ object LunaProtocolCodes {
     const val NOTIFICATION_CAPTURE_STOPPED = 8201
     const val NOTIFICATION_CURRENT_CAPTURE_STATUS = 8208
     const val NOTIFICATION_TIMELAPSE_STATUS_UPDATE = 8210
+    /** Conferma del livello hardware del gimbal: field 2 = 1 (lento), 2 (medio), 3 (veloce). */
+    const val NOTIFICATION_GIMBAL_SPEED = 0x206A
 
     /**
      * `CAMERA_NOTIFICATION_PTZ_STATE`. Unico numero del blocco gimbal con un riscontro:
@@ -425,6 +430,8 @@ object LunaProtocolCodes {
         19 to "PHONE_COMMAND_GET_GYRO",
         22 to "PHONE_COMMAND_START_TIMELAPSE",
         23 to "PHONE_COMMAND_STOP_TIMELAPSE",
+        GIMBAL_CONTROL to "PHONE_COMMAND_GIMBAL_CONTROL",
+        NOTIFICATION_GIMBAL_SPEED to "CAMERA_NOTIFICATION_GIMBAL_SPEED",
         24 to "PHONE_COMMAND_ERASE_SD_CARD",
         25 to "PHONE_COMMAND_CALIBRATE_GYRO",
         26 to "PHONE_COMMAND_SCAN_BT_PERIPHERAL",

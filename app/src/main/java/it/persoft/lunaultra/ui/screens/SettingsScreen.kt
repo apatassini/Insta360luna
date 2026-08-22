@@ -206,13 +206,29 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
         SectionCard(title = "Movimento manuale", icon = LunaIcons.Joystick, accent = Luna.PathLapse) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SliderRow(
-                    label = "Velocità della levetta",
+                    label = "Intensità della levetta",
                     value = gimbal.manualSpeedPercent.toFloat(),
                     onValueChange = { viewModel.setManualSpeed(it.roundToInt()) },
                     valueRange = 1f..100f,
                     valueLabel = "${gimbal.manualSpeedPercent}%",
                     icon = LunaIcons.Speed,
                 )
+                Text("Velocità hardware del gimbal")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(1 to "Lenta", 2 to "Media", 3 to "Veloce").forEach { (level, label) ->
+                        FilterChip(
+                            selected = gimbal.hardwareSpeedLevel == level,
+                            onClick = { viewModel.setGimbalHardwareSpeed(level) },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.PathLapse.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.PathLapse,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint("Questi tre livelli vengono scritti nella camera; non sono una semplice scala grafica.")
                 ToggleRow(
                     title = "Inverti l'asse orizzontale",
                     subtitle = "Se il gimbal va a destra quando spingi a sinistra",
@@ -253,13 +269,9 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 )
                 LabeledValue(
                     label = "Comando gimbal",
-                    value = if (gimbal.isControlCodeKnown) gimbal.controlCode.toString() else "non ancora noto",
-                    valueColor = if (gimbal.isControlCodeKnown) Luna.Ok else Luna.Warn,
+                    value = "226 · 0x00E2 verificato",
+                    valueColor = Luna.Ok,
                 )
-                OutlinedButton(onClick = onOpenDiagnostics, modifier = Modifier.fillMaxWidth()) {
-                    Icon(LunaIcons.Diagnostics, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Text("  Cerca il comando in Diagnostica")
-                }
             }
         }
 

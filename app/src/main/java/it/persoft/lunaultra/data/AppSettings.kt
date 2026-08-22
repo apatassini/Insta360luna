@@ -6,24 +6,13 @@ import kotlinx.serialization.Serializable
 /**
  * Parametri del gimbal.
  *
- * A differenza del resto del protocollo, qui quasi tutto è ancora da confermare: il comando
- * `PHONE_COMMAND_GIMBAL_CONTROL` ha un nome documentato ma nessun numero pubblico, e la forma
- * del suo messaggio non è descritta da nessuna estrazione. Questi valori si correggono
- * dall'app, senza ricompilare, man mano che lo scanner e le prove sul campo li fissano.
+ * Il movimento usa il comando e il payload verificati dalle catture Luna Ultra di
+ * Insta360Linker. Restano configurabili soltanto le inversioni e i parametri di dead reckoning.
  */
 @Serializable
 data class GimbalSettings(
-    /**
-     * Numero di `PHONE_COMMAND_GIMBAL_CONTROL`. 0 = ancora ignoto: finché resta 0 l'app
-     * rifiuta di muovere il gimbal invece di sparare byte a un codice a caso.
-     */
-    val controlCode: Int = 0,
-
     /** Codice della notifica di stato PTZ; il predefinito è quello osservato in cattura. */
     val ptzNotificationCode: Int = LunaProtocolCodes.NOTIFICATION_PTZ_STATE_OBSERVED,
-
-    val panFieldNumber: Int = 1,
-    val tiltFieldNumber: Int = 2,
 
     /** Campi da cui leggere pan e tilt nella notifica PTZ, quando saranno identificati. */
     val ptzPanField: Int = 1,
@@ -37,16 +26,17 @@ data class GimbalSettings(
     val maxTiltSpeedDegPerSec: Float = 20f,
 
     val manualSpeedPercent: Int = 40,
-    val commandRateHz: Int = 10,
+    /** Insta360Linker usa un tick di 25 ms; 40 Hz mantiene lo stesso ritmo. */
+    val commandRateHz: Int = 40,
+    /** Velocità del gimbal memorizzata nella camera: 1 lenta, 2 media, 3 veloce. */
+    val hardwareSpeedLevel: Int = 3,
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
     val panMinDeg: Float = -170f,
     val panMaxDeg: Float = 170f,
     val tiltMinDeg: Float = -90f,
     val tiltMaxDeg: Float = 90f,
-) {
-    val isControlCodeKnown: Boolean get() = controlCode != 0
-}
+)
 
 /** Regolazioni fotografiche essenziali mostrate nel mirino. */
 @Serializable

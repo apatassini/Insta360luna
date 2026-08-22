@@ -172,7 +172,7 @@ fun ViewfinderScreen(
                 StatColumn(
                     freeSpace = status.freeSpaceBytes,
                     batteryPercent = status.batteryPercent,
-                    gimbalReady = settings.gimbal.isControlCodeKnown,
+                    gimbalReady = true,
                     recordingLabel = if (recording) formatClock(elapsedSeconds) else null,
                     modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp),
                 )
@@ -221,20 +221,20 @@ fun ViewfinderScreen(
                 if (dockVisible) {
                     GimbalDock(
                         enabled = connected,
-                        codeKnown = settings.gimbal.isControlCodeKnown,
                         moving = moving,
                         panDegrees = ptz.pan,
                         tiltDegrees = ptz.tilt,
                         positionFromCamera = ptz.fromCamera,
                         speedPercent = settings.gimbal.manualSpeedPercent,
+                        hardwareSpeedLevel = settings.gimbal.hardwareSpeedLevel,
                         onSpeedChange = viewModel::setManualSpeed,
+                        onHardwareSpeedChange = viewModel::setGimbalHardwareSpeed,
                         onVector = viewModel::jogVector,
                         onJog = viewModel::jogStart,
                         onRelease = viewModel::jogStop,
                         onStop = viewModel::jogStop,
                         onZero = viewModel::zeroPosition,
                         onCaptureWaypoint = viewModel::captureWaypoint,
-                        onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
                         onClose = { dockVisible = false },
                         compact = landscape,
                         modifier = Modifier

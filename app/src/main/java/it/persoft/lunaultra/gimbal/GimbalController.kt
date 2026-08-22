@@ -106,14 +106,25 @@ class GimbalController(
         }
     }
 
-    /** Stop del movimento manuale e stop di emergenza. */
+    /**
+     * Stop del movimento manuale e stop di emergenza.
+     *
+     * Insta360Linker mantiene quattro vettori nulli dopo il rilascio: ripeterli evita che un
+     * singolo pacchetto perso lasci il gimbal in movimento.
+     */
     suspend fun stop() {
         jogPan = 0f
         jogTilt = 0f
         jogJob?.cancel()
         jogJob = null
         _moving.value = false
-        commands.gimbalStop().onFailure { log.warn("Stop gimbal non confermato: ${it.message}") }
+        repeat(STOP_VECTOR_REPETITIONS) { index ->
+            commands.gimbalStop().onFailure {
+                log.warn("Stop gimbal non inviato: ${it.message}")
+                return
+            }
+            if (index < STOP_VECTOR_REPETITIONS - 1) delay(STOP_VECTOR_INTERVAL_MS)
+        }
     }
 
     /**
@@ -157,5 +168,10 @@ class GimbalController(
             fromCamera = false,
             lastUpdateMs = System.currentTimeMillis(),
         )
+    }
+
+    companion object {
+        const val STOP_VECTOR_REPETITIONS = 4
+        const val STOP_VECTOR_INTERVAL_MS = 25L
     }
 }

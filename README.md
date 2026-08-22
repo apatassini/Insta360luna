@@ -22,16 +22,12 @@ Resta però un buco, ed è esattamente quello che serve qui:
 | Framing UCD2, checksum, handshake, keep-alive, correlazione richiesta/risposta | **Noto e verificato sulla Luna Ultra** |
 | Stato camera, batteria, storage, avvio/stop registrazione, opzioni timelapse | **Numeri di comando e di campo noti** |
 | ISO, otturatore, EV, WB, Standard/i-Log/Dolby Vision, filtri Leica/cinema, risoluzioni/FPS | **Rimisurati sulla Luna Ultra reale** |
-| **Comando del gimbal (pan/tilt)** | **Nome noto, numero ignoto** — nessuna fonte pubblica lo riporta |
+| **Comando del gimbal (pan/tilt)** | **Verificato sulla Luna Ultra**: `0x00E2`, assi ZigZag e stop esplicito |
 | Lettura della posizione PTZ | Codice della notifica molto probabile (8302), contenuto non decodificato |
 
-`PHONE_COMMAND_GIMBAL_CONTROL` esiste con questo nome nell'app Insta360 2.30.0, insieme ad altri
-13 comandi PTZ. I loro **numeri** no: l'app Android è protetta da AppShield (bytecode cifrato a
-runtime), il firmware della camera è cifrato per intero e l'IPA iOS è protetta da FairPlay.
-Tutte e tre le strade statiche sono chiuse, ognuna per un motivo diverso.
-
-Per questo l'app **non inventa** il numero mancante. Finché non è noto rifiuta di muovere il
-gimbal, e la scheda **Diagnostica** contiene lo scanner che lo trova interrogando la camera.
+Il movimento è stato implementato sulla base delle catture e dell'adattatore Luna Ultra di
+[Insta360Linker](https://github.com/wuhaiqi0621/Insta360Linker), riproducendo il protocollo nella
+codebase Android senza copiare la sua interfaccia.
 
 ---
 
@@ -90,6 +86,16 @@ Comandi usati dall'app, tutti con numero noto:
 | 9 | `SET_PHOTOGRAPHY_OPTIONS` | proporzione della panoramica (sferica / 2:1) |
 | 13 | `GET_FILE_LIST` | elenco dei media sulla camera, a pagine |
 | 30 | `GET_MINI_THUMBNAIL` | miniatura di un file |
+| 226 / `0x00E2` | `GIMBAL_CONTROL` | vettore continuo pan/tilt e stop |
+
+### Gimbal Luna Ultra
+
+Il corpo del comando è `08 01 12 <len> <assi>`. L'app converte la levetta UI nel sistema della
+camera con `device_x = -verticale` e `device_y = orizzontale`, quindi codifica i due valori
+`-100..100` come protobuf ZigZag. Il rilascio invia `08 01 12 00` quattro volte a 25 ms, così
+un singolo pacchetto perso non lascia il gimbal in movimento. Il pannello offre inoltre i tre
+livelli hardware della camera (lento, medio, veloce) tramite il comando fotografia 9 osservato
+nelle catture; l'intensità software della levetta resta un controllo separato.
 
 ### Le modalità della camera: due trappole misurate
 

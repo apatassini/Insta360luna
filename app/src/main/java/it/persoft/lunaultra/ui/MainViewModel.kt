@@ -214,9 +214,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val payloadsByCode = mutableMapOf<Int, MutableSet<String>>()
     private val countsByCode = mutableMapOf<Int, Int>()
 
-    /** Ultimo avviso sul codice gimbal ignoto: senza questo, la levetta ne stampa uno per tocco. */
-    private var lastGimbalWarningMs = 0L
-
     /** L'utente vuole essere connesso: resta vero finché non preme «disconnetti». */
     private var wantConnected = false
     private var reconnectAttempts = 0
@@ -430,6 +427,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (frame.code == settings.value.gimbal.ptzNotificationCode) {
                     container.commands.parsePtz(frame)?.let { container.gimbal.onCameraPosition(it) }
                 }
+                container.commands.gimbalSpeedFromNotification(frame)?.let { level ->
+                    updateGimbal { it.copy(hardwareSpeedLevel = level) }
+                }
                 recordSighting(frame.code, frame.describePayload(), Hex.encode(frame.payload, limit = 32))
             }
         }
@@ -482,7 +482,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ---------------------------------------------------------------- gimbal
 
     fun jogStart(pan: Float, tilt: Float) {
-        if (!gimbalReady()) return
         container.gimbal.startJog(pan, tilt)
     }
 
@@ -494,28 +493,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * sessanta volte al secondo, con la camera che vede raffiche di start invece di un movimento.
      */
     fun jogVector(pan: Float, tilt: Float) {
-        if (!gimbalReady()) return
         container.gimbal.setJog(pan, tilt)
-    }
-
-    /**
-     * Il gimbal si muove solo se il numero del comando è noto.
-     *
-     * L'avviso è a intervalli perché la levetta chiamerebbe questa guardia a ogni tocco, e una
-     * fila di notifiche identiche copre l'anteprima proprio mentre si cerca di inquadrare.
-     */
-    private fun gimbalReady(): Boolean {
-        if (settings.value.gimbal.isControlCodeKnown) return true
-        val now = System.currentTimeMillis()
-        if (now - lastGimbalWarningMs > GIMBAL_WARNING_INTERVAL_MS) {
-            lastGimbalWarningMs = now
-            showMessage("Comando gimbal non ancora noto: trovalo dalla scheda Diagnostica")
-        }
-        return false
     }
 
     fun setManualSpeed(percent: Int) =
         updateGimbal { it.copy(manualSpeedPercent = percent.coerceIn(1, 100)) }
+
+    fun setGimbalHardwareSpeed(level: Int) {
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti alla camera per cambiare la velocità del gimbal")
+            return
+        }
+        viewModelScope.launch {
+            container.commands.setGimbalHardwareSpeed(level)
+                .onSuccess {
+                    updateGimbal { it.copy(hardwareSpeedLevel = level) }
+                    showMessage("Velocità gimbal: ${gimbalSpeedLabel(level)}")
+                }
+                .onFailure { showMessage("Velocità gimbal non applicata: ${it.message}") }
+        }
+    }
+
+    private fun gimbalSpeedLabel(level: Int): String = when (level) {
+        1 -> "lenta"
+        2 -> "media"
+        else -> "veloce"
+    }
 
     fun jogStop() {
         viewModelScope.launch { container.gimbal.stop() }
@@ -630,10 +633,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Avvia la sequenza, oppure spiega perché non può partire.
      *
-     * Le tre condizioni sono diverse fra loro e vanno dette per nome: senza camera non c'è
-     * niente da comandare, senza due punti non c'è un percorso, e senza il numero del comando
-     * gimbal il percorso non si può percorrere. Un pulsante che non fa niente e non dice niente
-     * è il modo peggiore di comunicare una qualunque delle tre.
+     * Le condizioni rimaste sono connessione e almeno due punti del percorso. Il comando gimbal
+     * non è più una configurazione sperimentale: `0x00E2` è fissato dal protocollo verificato.
      */
     fun startRun() {
         val seq = sequence.value
@@ -643,10 +644,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (!seq.isRunnable) {
             showMessage("Servono almeno due punti: inquadra e premi il tasto con la bandierina")
-            return
-        }
-        if (!settings.value.gimbal.isControlCodeKnown) {
-            showMessage("Comando gimbal non ancora noto: la sequenza non può muovere nulla. Cercalo in Diagnostica.")
             return
         }
         viewModelScope.launch {
@@ -946,8 +943,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateGimbal(transform: (GimbalSettings) -> GimbalSettings) =
         container.settingsStore.update { it.copy(gimbal = transform(it.gimbal)) }
-
-    fun setGimbalControlCode(code: Int) = updateGimbal { it.copy(controlCode = code) }
 
     fun setTimelapseMode(mode: Int) = container.settingsStore.update { it.copy(timelapseMode = mode) }
 
@@ -1483,7 +1478,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val header = listOf(
             "camera: ${settings.value.host}:${settings.value.port}",
             "stato: ${connectionState.value}",
-            "codice gimbal: ${settings.value.gimbal.controlCode.takeIf { it != 0 } ?: "ignoto"}",
+            "codice gimbal: ${LunaProtocolCodes.GIMBAL_CONTROL} (0x00E2)",
             "notifica PTZ: ${settings.value.gimbal.ptzNotificationCode}",
             "modello: ${status.value.model ?: "?"} firmware: ${status.value.firmware ?: "?"}",
             "modalità sequenza: ${sequence.value.mode.name}",
@@ -1523,10 +1518,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val STATUS_POLL_MS = 3_000L
 
-        /** Ogni quanto ripetere l'avviso che il comando del gimbal non è ancora noto. */
-        const val GIMBAL_WARNING_INTERVAL_MS = 8_000L
-
-        /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano fino a otto volte. */
         /** Quanto resta valido un elenco della libreria prima di rifare il giro. */
         const val GALLERY_FRESH_MS = 60_000L
         const val THUMBNAIL_CONCURRENCY = 4
@@ -1537,6 +1528,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val PHOTO_VIEW_MAX_SIZE = 2_048
         const val PANO_VIEW_MAX_SIZE = 4_096
 
+        /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano. */
         const val RECONNECT_BASE_MS = 2_000L
         const val MAX_RECONNECT_ATTEMPTS = 6
 

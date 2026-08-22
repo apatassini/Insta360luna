@@ -1,7 +1,6 @@
 package it.persoft.lunaultra.camera
 
 import it.persoft.lunaultra.data.AppSettings
-import it.persoft.lunaultra.data.GimbalSettings
 import it.persoft.lunaultra.data.PhotoSettings
 import it.persoft.lunaultra.data.LunaVideoProfiles
 import it.persoft.lunaultra.data.VideoSettings
@@ -33,18 +32,14 @@ private val CINEMATIC_FILTERS = setOf(
  * I comandi della camera, composti sui messaggi protobuf reali del namespace
  * `insta360.messages`.
  *
- * Tutto ciò che sta sopra il gimbal (stato, batteria, registrazione, timelapse) usa numeri di
- * comando e di campo noti. Il gimbal no: il suo comando ha un nome documentato
- * (`PHONE_COMMAND_GIMBAL_CONTROL`) ma nessun numero pubblico, quindi passa da
- * [GimbalSettings.controlCode], che si popola con lo scanner della schermata Diagnostica.
+ * Anche il gimbal usa ora il comando e il payload confermati dalle catture Luna Ultra del
+ * progetto Insta360Linker; non dipende più dallo scanner diagnostico.
  */
 class LunaCommands(
     private val session: CameraSession,
     private val settings: StateFlow<AppSettings>,
     private val log: EventLog,
 ) {
-
-    private val gimbal: GimbalSettings get() = settings.value.gimbal
 
     /** Nella risposta `GetOptionsResp` il messaggio `Options` sta nel campo 2. */
     private fun optionsReader(frame: Ucd2Frame): ProtoReader = ProtoReader(frame.payload)
@@ -410,26 +405,44 @@ class LunaCommands(
     /**
      * Movimento a velocità: [panPercent] e [tiltPercent] vanno da -1 a +1.
      *
-     * La forma del messaggio non è documentata. I numeri di campo sono quelli configurati in
-     * [GimbalSettings] e l'ipotesi di partenza (asse, direzione, velocità come varint piccoli)
-     * è quella suggerita dallo scanner: vanno confermati guardando la camera.
+     * Il vettore viene convertito in `-100..100`; [LunaMessages.gimbalMove] applica la rotazione
+     * degli assi verificata sul dispositivo e il protobuf ZigZag osservato nei PCAP.
      */
     suspend fun gimbalVelocity(panPercent: Float, tiltPercent: Float): Result<Unit> {
-        val cfg = gimbal
-        val code = cfg.controlCode
-        if (code == 0) return Result.failure(UnknownGimbalCodeException())
+        val cfg = settings.value.gimbal
         val pan = applySign(panPercent.coerceIn(-1f, 1f), cfg.invertPan)
         val tilt = applySign(tiltPercent.coerceIn(-1f, 1f), cfg.invertTilt)
-        val payload = LunaMessages.gimbalVelocity(
-            panField = cfg.panFieldNumber,
-            panValue = (pan * cfg.manualSpeedPercent).roundToInt(),
-            tiltField = cfg.tiltFieldNumber,
-            tiltValue = (tilt * cfg.manualSpeedPercent).roundToInt(),
+        val payload = LunaMessages.gimbalMove(
+            horizontal = (pan * 100f).roundToInt(),
+            vertical = (tilt * 100f).roundToInt(),
         )
-        return session.fire(code, payload)
+        return session.fire(LunaProtocolCodes.GIMBAL_CONTROL, payload)
     }
 
     suspend fun gimbalStop(): Result<Unit> = gimbalVelocity(0f, 0f)
+
+    /**
+     * Imposta la velocità fisica del gimbal e aggiorna il contesto usato dalla camera.
+     * Sono i due comandi consecutivi osservati da Insta360Linker; non è una semplice scala UI.
+     */
+    suspend fun setGimbalHardwareSpeed(level: Int): Result<Unit> {
+        if (level !in 1..3) return Result.failure(IllegalArgumentException("Livello gimbal non valido: $level"))
+        val set = session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setGimbalSpeed(level),
+        )
+        if (set.isFailure) return Result.failure(set.exceptionOrNull() ?: IllegalStateException("Velocità non applicata"))
+        return session.request(
+            LunaProtocolCodes.GET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.refreshGimbalSpeed(),
+        ).map { }
+    }
+
+    /** Livello confermato dalla notifica `0x206A`, se il frame è quello atteso. */
+    fun gimbalSpeedFromNotification(frame: Ucd2Frame): Int? {
+        if (frame.code != LunaProtocolCodes.NOTIFICATION_GIMBAL_SPEED) return null
+        return ProtoReader(frame.payload).intOrNull(2)?.takeIf { it in 1..3 }
+    }
 
     /**
      * Legge lo stato PTZ da una notifica.
@@ -454,10 +467,6 @@ class LunaCommands(
     }
 
     private fun applySign(value: Float, invert: Boolean): Float = if (invert) -value else value
-
-    class UnknownGimbalCodeException : IllegalStateException(
-        "Il codice di PHONE_COMMAND_GIMBAL_CONTROL non è noto: trovalo con lo scanner in Diagnostica"
-    )
 
     data class CaptureSnapshot(val state: Int, val seconds: Int?)
 

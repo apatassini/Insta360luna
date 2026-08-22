@@ -12,8 +12,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,32 +42,31 @@ import kotlin.math.roundToInt
  * a mano libera muovendo i due assi insieme, la croce a correggere un asse alla volta senza
  * toccare l'altro. Il cursore della velocità agisce mentre il gimbal si muove.
  *
- * Finché il numero del comando gimbal non è noto il pannello resta visibile ma inerte, e lo
- * dice: nasconderlo farebbe sembrare l'app incompleta invece che in attesa di un dato.
+ * Il livello hardware lento/medio/veloce è separato dall'intensità software della levetta.
  */
 @Composable
 fun GimbalDock(
     enabled: Boolean,
-    codeKnown: Boolean,
     moving: Boolean,
     panDegrees: Float,
     tiltDegrees: Float,
     positionFromCamera: Boolean,
     speedPercent: Int,
+    hardwareSpeedLevel: Int,
     onSpeedChange: (Int) -> Unit,
+    onHardwareSpeedChange: (Int) -> Unit,
     onVector: (Float, Float) -> Unit,
     onJog: (Float, Float) -> Unit,
     onRelease: () -> Unit,
     onStop: () -> Unit,
     onZero: () -> Unit,
     onCaptureWaypoint: () -> Unit,
-    onOpenDiagnostics: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
     var usePad by remember { mutableStateOf(false) }
-    val active = enabled && codeKnown
+    val active = enabled
 
     GlassPanel(
         // In orizzontale l'altezza è poca e il pannello va rimpicciolito, non troncato: una
@@ -88,7 +87,6 @@ fun GimbalDock(
                     .size(8.dp)
                     .background(
                         color = when {
-                            !codeKnown -> Luna.Warn
                             moving -> Luna.Accent
                             active -> Luna.Ok
                             else -> Luna.OnSurfaceDim
@@ -168,7 +166,7 @@ fun GimbalDock(
         }
 
         SliderRow(
-            label = "Velocità",
+            label = "Intensità levetta",
             value = speedPercent.toFloat(),
             onValueChange = { onSpeedChange(it.roundToInt()) },
             valueRange = 1f..100f,
@@ -176,6 +174,26 @@ fun GimbalDock(
             icon = LunaIcons.Speed,
             enabled = active,
         )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Camera",
+                style = MaterialTheme.typography.labelSmall,
+                color = Luna.OnSurfaceDim,
+            )
+            listOf(1 to "L", 2 to "M", 3 to "V").forEach { (level, label) ->
+                FilterChip(
+                    selected = hardwareSpeedLevel == level,
+                    onClick = { onHardwareSpeedChange(level) },
+                    enabled = active,
+                    label = { Text(label) },
+                )
+            }
+        }
 
         Text(
             text = "pan %.1f°  ·  tilt %.1f°%s".format(
@@ -187,29 +205,6 @@ fun GimbalDock(
             color = Luna.OnSurfaceDim,
         )
 
-        if (!codeKnown) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Luna.Warn.copy(alpha = 0.14f), RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenDiagnostics)
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    imageVector = LunaIcons.Warning,
-                    contentDescription = null,
-                    tint = Luna.Warn,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    text = "Comando gimbal non ancora noto: cercalo in Diagnostica",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Luna.Warn,
-                )
-            }
-        }
     }
 }
 

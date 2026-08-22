@@ -206,6 +206,37 @@ class GimbalController(
         return Result.success(Unit)
     }
 
+    /**
+     * Piccolo impulso a velocità controllata usato dal riallineamento fotografico.
+     *
+     * Non passa dalla velocità della levetta manuale: la correzione deve essere ripetibile e
+     * abbastanza lenta da poter essere misurata nel fotogramma successivo. Ogni impulso parte
+     * e termina con vettori nulli, evitando che una correzione resti attiva oltre il previsto.
+     */
+    suspend fun correctionPulse(
+        panPercent: Float,
+        tiltPercent: Float,
+        durationMs: Long,
+    ): Result<Unit> {
+        stop()
+        val duration = durationMs.coerceIn(60L, 600L)
+        val periodMs = (1000L / settings.value.gimbal.commandRateHz.coerceIn(1, 50)).coerceAtLeast(20L)
+        val startedAt = System.nanoTime()
+        do {
+            val sent = sendVelocity(
+                panPercent.coerceIn(-VISUAL_MAX_SPEED, VISUAL_MAX_SPEED),
+                tiltPercent.coerceIn(-VISUAL_MAX_SPEED, VISUAL_MAX_SPEED),
+            )
+            if (sent.isFailure) {
+                stop()
+                return sent
+            }
+            delay(periodMs)
+        } while ((System.nanoTime() - startedAt) / 1_000_000L < duration)
+        stop()
+        return Result.success(Unit)
+    }
+
     private suspend fun sendVelocity(panPercent: Float, tiltPercent: Float): Result<Unit> {
         integrateAppliedUntilNow()
         val result = commands.gimbalVelocity(panPercent, tiltPercent)
@@ -263,5 +294,6 @@ class GimbalController(
         private const val POSITION_TIME_MARGIN = 1.15f
         private const val POSITION_SETTLE_MARGIN_SECONDS = 0.35f
         private const val MAX_POSITION_STEPS = 3_600
+        private const val VISUAL_MAX_SPEED = 0.35f
     }
 }

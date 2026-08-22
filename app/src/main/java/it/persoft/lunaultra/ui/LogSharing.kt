@@ -1,7 +1,11 @@
 package it.persoft.lunaultra.ui
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Base64
 import androidx.core.content.FileProvider
 import it.persoft.lunaultra.net.LogEntry
@@ -46,6 +50,45 @@ object LogSharing {
                 }
             )
         }
+
+    /** Salva lo stesso HTML autosufficiente nella cartella Download del telefono. */
+    fun saveToDownloads(
+        context: Context,
+        entries: List<LogEntry>,
+        headerLines: List<String> = emptyList(),
+    ): Result<String> = runCatching {
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ITALY).format(Date())
+        val fileName = "luna-log-$stamp.html"
+        val bytes = renderHtml(stamp, entries, headerLines).toByteArray(Charsets.UTF_8)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, "text/html")
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: error("Android non ha creato il file in Download")
+            try {
+                resolver.openOutputStream(uri, "w")?.use { it.write(bytes) }
+                    ?: error("Impossibile aprire il file in Download")
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } catch (error: Throwable) {
+                resolver.delete(uri, null, null)
+                throw error
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val directory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                .apply { mkdirs() }
+            File(directory, fileName).writeBytes(bytes)
+        }
+        "Download/$fileName"
+    }
 
     /**
      * Un solo HTML autosufficiente: le miniature sono data URI, quindi non possono separarsi

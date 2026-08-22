@@ -1,6 +1,8 @@
 package it.persoft.lunaultra.timelapse
 
 import it.persoft.lunaultra.camera.LunaCommands
+import it.persoft.lunaultra.data.AppSettings
+import it.persoft.lunaultra.diagnostics.ImageVerification
 import it.persoft.lunaultra.diagnostics.PositionVerdict
 import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
 import it.persoft.lunaultra.gimbal.GimbalController
@@ -16,7 +18,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sign
 
 enum class RunPhase { IDLE, PREPARING, RUNNING, STOPPING, COMPLETED, ABORTED }
 
@@ -57,6 +63,7 @@ class TimelapseEngine(
     private val commands: LunaCommands,
     private val gimbal: GimbalController,
     private val preview: PreviewController,
+    private val settings: StateFlow<AppSettings>,
     private val log: EventLog,
     private val scope: CoroutineScope,
 ) {
@@ -131,7 +138,15 @@ class TimelapseEngine(
                 detail = targetDetail(first, gimbal.position.value) +
                     "\nProssima azione: avvio della registrazione.",
             )
-            logImageVerification(traceId, first, actualStartJpeg, "PUNTO 1 PRIMA DEL VIDEO")
+            val startAligned = visuallyAlign(
+                traceId = traceId,
+                target = first,
+                phase = "PUNTO 1 PRIMA DEL VIDEO",
+                initialJpeg = actualStartJpeg,
+            )
+            if (!startAligned) {
+                throw IllegalStateException("Punto 1 non allineato visivamente: registrazione non avviata")
+            }
 
             when (sequence.mode) {
                 ShootingMode.FOTO -> runPhotos(sequence)
@@ -183,11 +198,14 @@ class TimelapseEngine(
             val from = sequence.waypoints[legIndex]
             val to = sequence.waypoints[legIndex + 1]
             val legSeconds = durations[legIndex]
+            val correctionBudget = visualCorrectionBudget(legSeconds, to)
+            val motionSeconds = (legSeconds - correctionBudget).coerceAtLeast(MIN_VISUAL_MOTION_SECONDS)
             val atLegStart = gimbal.position.value
             log.info(
                 "RUN $traceId · TRATTO ${legIndex + 1}/${sequence.legCount}: ${from.name} → ${to.name}",
                 buildString {
                     appendLine("Durata movimento: %.3f s".format(legSeconds))
+                    appendLine("Movimento stimato: %.3f s · riserva allineamento: %.3f s".format(motionSeconds, correctionBudget))
                     appendLine("Partenza stimata: pan %.3f° · tilt %.3f°".format(atLegStart.pan, atLegStart.tilt))
                     appendLine("Arrivo configurato: pan %.3f° · tilt %.3f°".format(to.pan, to.tilt))
                     append("Vettore richiesto: Δpan %+.3f° · Δtilt %+.3f°".format(to.pan - atLegStart.pan, to.tilt - atLegStart.tilt))
@@ -195,13 +213,17 @@ class TimelapseEngine(
             )
 
             val startedAt = System.nanoTime()
+            val legDeadline = startedAt + (legSeconds * 1_000_000_000.0).toLong()
             var legElapsed = 0f
-            while (legElapsed < legSeconds) {
+            while (legElapsed < motionSeconds) {
                 if (!currentCoroutineContext().isActive) return
                 legElapsed = ((System.nanoTime() - startedAt) / 1_000_000_000.0).toFloat()
-                val t = (legElapsed / legSeconds).coerceIn(0f, 1f)
-                val targetPan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation)
-                val targetTilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation)
+                val t = (legElapsed / motionSeconds).coerceIn(0f, 1f)
+                // Dopo una correzione fotografica la stima può non coincidere più con le vecchie
+                // coordinate salvate: il tratto successivo parte dalla posizione realmente
+                // raggiunta, altrimenti il primo tick annullerebbe la correzione appena fatta.
+                val targetPan = Interpolation.position(atLegStart.pan, to.pan, t, sequence.interpolation)
+                val targetTilt = Interpolation.position(atLegStart.tilt, to.tilt, t, sequence.interpolation)
 
                 gimbal.driveTo(targetPan, targetTilt, stepSeconds)
                     .onFailure { log.warn("Comando gimbal fallito: ${it.message}") }
@@ -217,9 +239,29 @@ class TimelapseEngine(
                 )
                 delay(periodMs)
             }
-            elapsedTotal += legSeconds
             // Allineamento esatto sul waypoint di arrivo, per evitare derive cumulative.
             gimbal.driveTo(to.pan, to.tilt, stepSeconds)
+            gimbal.stop()
+
+            val estimatedArrivalJpeg = preview.logSnapshot(
+                message = "RUN $traceId · PUNTO ${legIndex + 2} RAGGIUNTO DALLA STIMA · ${to.name}",
+                detail = targetDetail(to, gimbal.position.value),
+            )
+            val aligned = visuallyAlign(
+                traceId = traceId,
+                target = to,
+                phase = "PUNTO ${legIndex + 2} DURANTE IL VIDEO",
+                initialJpeg = estimatedArrivalJpeg,
+                deadlineNanos = legDeadline,
+            )
+            if (!aligned) {
+                throw IllegalStateException("${to.name} non allineato visivamente entro il tempo impostato")
+            }
+
+            // Se la correzione finisce in anticipo, resta fermo fino alla durata esatta del tratto.
+            val remainingNanos = legDeadline - System.nanoTime()
+            if (remainingNanos > 0L) delay(remainingNanos / 1_000_000L)
+            elapsedTotal += legSeconds
         }
 
         gimbal.stop()
@@ -229,7 +271,7 @@ class TimelapseEngine(
             detail = targetDetail(last, gimbal.position.value) +
                 "\nIl gimbal è fermo; la registrazione verrà arrestata dopo il fermo finale.",
         )
-        logImageVerification(traceId, last, actualArrivalJpeg, "PUNTO FINALE DURANTE IL VIDEO")
+        logImageVerification(traceId, last, actualArrivalJpeg, "PUNTO FINALE CONFERMATO")
         if (sequence.controlRecording) {
             hold(sequence.endHoldSeconds, "Fermo finale sul punto ${sequence.waypoints.last().name}")
             _state.value = _state.value.copy(elapsedSeconds = sequence.estimatedRecordingSeconds())
@@ -357,12 +399,87 @@ class TimelapseEngine(
      * Confronto visuale indipendente dal dead reckoning: gli inlier sono punti che concordano
      * sullo stesso spostamento, come nella fase di allineamento di uno stitch panoramico.
      */
+    private suspend fun visuallyAlign(
+        traceId: String,
+        target: Waypoint,
+        phase: String,
+        initialJpeg: ByteArray?,
+        deadlineNanos: Long? = null,
+    ): Boolean {
+        var currentJpeg = initialJpeg
+        if (!settings.value.gimbal.visualWaypointCorrection) {
+            log.info("RUN $traceId · CORREZIONE VISIVA DISATTIVATA · $phase")
+            logImageVerification(traceId, target, currentJpeg, "$phase · SOLA VERIFICA")
+            return true
+        }
+
+        repeat(MAX_VISUAL_ATTEMPTS) { attempt ->
+            val verification = logImageVerification(
+                traceId = traceId,
+                target = target,
+                actualJpeg = currentJpeg,
+                phase = "$phase · TENTATIVO ${attempt + 1}",
+            ) ?: return false
+
+            if (verification.verdict == PositionVerdict.CORRECT) {
+                log.info(
+                    "RUN $traceId · ALLINEAMENTO VISIVO COMPLETATO · $phase",
+                    "Tentativi: ${attempt + 1} · errore residuo %.1f px".format(verification.displacementPixels),
+                )
+                return true
+            }
+
+            val usable = verification.inlierMatches >= MIN_CORRECTION_INLIERS &&
+                verification.confidence >= MIN_CORRECTION_CONFIDENCE &&
+                verification.displacementPixels > 0f
+            if (!usable) {
+                log.warn(
+                    "RUN $traceId · CORREZIONE VISIVA IMPOSSIBILE · $phase",
+                    "I punti di controllo non danno una direzione abbastanza affidabile.",
+                )
+                return false
+            }
+            if (attempt == MAX_VISUAL_ATTEMPTS - 1) return false
+
+            if (deadlineNanos != null) {
+                val remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L
+                if (remainingMs < MIN_CORRECTION_REMAINING_MS) {
+                    log.warn(
+                        "RUN $traceId · TEMPO DI CORREZIONE ESAURITO · $phase",
+                        "Restavano ${remainingMs.coerceAtLeast(0L)} ms del tratto.",
+                    )
+                    return false
+                }
+            }
+
+            // Se la camera guarda troppo a destra, i dettagli scorrono a sinistra: Δx e pan
+            // hanno quindi lo stesso segno correttivo. Per il tilt l'asse immagine è opposto.
+            val panPulse = correctionAxis(verification.shiftX)
+            val tiltPulse = correctionAxis(-verification.shiftY)
+            val pulseMs = correctionPulseMs(verification)
+            _state.value = _state.value.copy(
+                phase = RunPhase.RUNNING,
+                message = "Correzione visiva ${target.name} · ${attempt + 1}/$MAX_VISUAL_ATTEMPTS",
+            )
+            log.info(
+                "RUN $traceId · IMPULSO CORRETTIVO · $phase",
+                "pan %+.3f · tilt %+.3f · %d ms".format(panPulse, tiltPulse, pulseMs),
+            )
+            gimbal.correctionPulse(panPulse, tiltPulse, pulseMs)
+                .getOrElse { throw IllegalStateException("Impulso correttivo non inviato: ${it.message}", it) }
+            delay(VISUAL_SETTLE_MS)
+            currentJpeg = preview.captureThumbnailJpeg()
+        }
+        log.warn("RUN $traceId · ALLINEAMENTO VISIVO NON RIUSCITO · $phase")
+        return false
+    }
+
     private fun logImageVerification(
         traceId: String,
         target: Waypoint,
         actualJpeg: ByteArray?,
         phase: String,
-    ) {
+    ): ImageVerification? {
         val referenceJpeg = target.previewJpeg()
         val verification = WaypointImageVerifier.verify(referenceJpeg, actualJpeg)
         if (verification == null) {
@@ -370,7 +487,7 @@ class TimelapseEngine(
                 "RUN $traceId · VERIFICA VISIVA $phase NON DISPONIBILE",
                 "Manca la miniatura del waypoint o il frame reale. Rimemorizza il punto con l'anteprima attiva.",
             )
-            return
+            return null
         }
         val annotated = WaypointImageVerifier.annotatedCurrentJpeg(actualJpeg, verification)
         val level = when (verification.verdict) {
@@ -385,7 +502,27 @@ class TimelapseEngine(
                 "\nΔx positivo = immagine reale spostata a destra rispetto al waypoint salvato.",
             imageJpeg = annotated,
         )
+        return verification
     }
+
+    private fun visualCorrectionBudget(legSeconds: Float, target: Waypoint): Float {
+        if (!settings.value.gimbal.visualWaypointCorrection || target.previewJpegBase64 == null) return 0f
+        val desired = max(MIN_VISUAL_BUDGET_SECONDS, legSeconds * VISUAL_BUDGET_FRACTION)
+        return min(desired, MAX_VISUAL_BUDGET_SECONDS)
+            .coerceAtMost((legSeconds - MIN_VISUAL_MOTION_SECONDS).coerceAtLeast(0f))
+    }
+
+    private fun correctionAxis(errorPixels: Float): Float {
+        if (abs(errorPixels) <= CORRECTION_DEAD_ZONE_PX) return 0f
+        val magnitude = (abs(errorPixels) / CORRECTION_FULL_SCALE_PX)
+            .coerceIn(MIN_CORRECTION_SPEED, MAX_CORRECTION_SPEED)
+        return magnitude * sign(errorPixels)
+    }
+
+    private fun correctionPulseMs(verification: ImageVerification): Long =
+        (BASE_CORRECTION_PULSE_MS + verification.displacementPixels * CORRECTION_MS_PER_PIXEL)
+            .toLong()
+            .coerceIn(MIN_CORRECTION_PULSE_MS, MAX_CORRECTION_PULSE_MS)
 
     private suspend fun shutdown(aborted: Boolean, reason: String) {
         runCatching { gimbal.stop() }
@@ -409,5 +546,22 @@ class TimelapseEngine(
         const val MOVE_TICK_HZ = 10
         const val MIN_APPROACH_SECONDS = 1f
         const val PRE_RECORD_SETTLE_MS = 500L
+        const val MAX_VISUAL_ATTEMPTS = 5
+        const val MIN_CORRECTION_INLIERS = 5
+        const val MIN_CORRECTION_CONFIDENCE = 0.30f
+        const val MIN_CORRECTION_REMAINING_MS = 420L
+        const val VISUAL_SETTLE_MS = 260L
+        const val MIN_VISUAL_MOTION_SECONDS = 0.5f
+        const val MIN_VISUAL_BUDGET_SECONDS = 2f
+        const val MAX_VISUAL_BUDGET_SECONDS = 4f
+        const val VISUAL_BUDGET_FRACTION = 0.12f
+        const val CORRECTION_DEAD_ZONE_PX = 2.5f
+        const val CORRECTION_FULL_SCALE_PX = 46f
+        const val MIN_CORRECTION_SPEED = 0.08f
+        const val MAX_CORRECTION_SPEED = 0.32f
+        const val BASE_CORRECTION_PULSE_MS = 140f
+        const val CORRECTION_MS_PER_PIXEL = 4.5f
+        const val MIN_CORRECTION_PULSE_MS = 160L
+        const val MAX_CORRECTION_PULSE_MS = 330L
     }
 }

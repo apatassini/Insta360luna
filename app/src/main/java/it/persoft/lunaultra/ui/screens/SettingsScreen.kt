@@ -26,6 +26,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
@@ -55,10 +56,12 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
+    val context = LocalContext.current
     val settings by viewModel.settings.collectAsState()
     val connection by viewModel.connectionState.collectAsState()
     val status by viewModel.status.collectAsState()
     val preview by viewModel.preview.collectAsState()
+    val logEntries by viewModel.logEntries.collectAsState()
     val connected = connection == ConnectionState.CONNECTED
     val gimbal = settings.gimbal
     var wifiPasswordVisible by rememberSaveable { mutableStateOf(false) }
@@ -230,6 +233,15 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 }
                 Hint("Questi tre livelli vengono scritti nella camera; non sono una semplice scala grafica.")
                 ToggleRow(
+                    title = "Correzione visiva automatica",
+                    subtitle = "Allinea Punto 1 e arrivi confrontando i punti di controllo delle miniature",
+                    checked = gimbal.visualWaypointCorrection,
+                    onCheckedChange = { on ->
+                        viewModel.updateGimbal { it.copy(visualWaypointCorrection = on) }
+                    },
+                    icon = LunaIcons.Center,
+                )
+                ToggleRow(
                     title = "Inverti l'asse orizzontale",
                     subtitle = "Se il gimbal va a destra quando spingi a sinistra",
                     checked = gimbal.invertPan,
@@ -286,6 +298,24 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 Hint(
                     "È il valore di TimelapseMode inviato con i comandi di timelapse interno. " +
                         "Si cambia solo se la camera rifiuta l'avvio.",
+                )
+            }
+        }
+
+        SectionCard(title = "Log diagnostico", icon = LunaIcons.Diagnostics, accent = Luna.Accent) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                LabeledValue("Eventi presenti", logEntries.size.toString())
+                Button(
+                    onClick = { viewModel.saveLogToDownloads(context) },
+                    enabled = logEntries.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(LunaIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text("  Salva log nella cartella Download")
+                }
+                Hint(
+                    "Viene creato un HTML con testo, miniature e punti di controllo incorporati. " +
+                        "Il log dell'app viene azzerato soltanto dopo che il file è stato salvato correttamente.",
                 )
             }
         }

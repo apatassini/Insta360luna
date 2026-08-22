@@ -27,6 +27,7 @@ import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.update.UpdateManager
 import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -35,6 +36,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /** Una notifica spontanea osservata sul canale di controllo. */
@@ -1572,7 +1574,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * gimbal in uso: senza quel contesto le righe del log si leggono a metà.
      */
     fun shareLog(context: android.content.Context) {
-        val header = listOf(
+        LogSharing.share(context, container.log.entries.value, logHeader())
+            .onSuccess { showMessage("Log pronto per la condivisione") }
+            .onFailure { showMessage("Condivisione non riuscita: ${it.message}") }
+    }
+
+    /** Salva il log in Download; viene azzerato esclusivamente dopo una scrittura riuscita. */
+    fun saveLogToDownloads(context: android.content.Context) {
+        val entries = container.log.entries.value
+        if (entries.isEmpty()) {
+            showMessage("Il log è vuoto")
+            return
+        }
+        val header = logHeader()
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                LogSharing.saveToDownloads(context, entries, header)
+            }
+            result
+                .onSuccess { path ->
+                    container.log.clear()
+                    showMessage("Log salvato in $path · log azzerato")
+                }
+                .onFailure { showMessage("Salvataggio log non riuscito: ${it.message}") }
+        }
+    }
+
+    private fun logHeader(): List<String> =
+        listOf(
             "camera: ${settings.value.host}:${settings.value.port}",
             "stato: ${connectionState.value}",
             "codice gimbal: ${LunaProtocolCodes.GIMBAL_CONTROL} (0x00E2)",
@@ -1580,10 +1609,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "modello: ${status.value.model ?: "?"} firmware: ${status.value.firmware ?: "?"}",
             "modalità sequenza: ${sequence.value.mode.name}",
         )
-        LogSharing.share(context, container.log.entries.value, header)
-            .onSuccess { showMessage("Log pronto per la condivisione") }
-            .onFailure { showMessage("Condivisione non riuscita: ${it.message}") }
-    }
 
     fun showMessage(text: String) {
         _message.value = text

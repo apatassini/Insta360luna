@@ -36,6 +36,8 @@ data class GimbalSettings(
     val commandRateHz: Int = 40,
     /** Velocità del gimbal memorizzata nella camera: 1 lenta, 2 media, 3 veloce. */
     val hardwareSpeedLevel: Int = 3,
+    /** Usa le miniature dei waypoint per correggere visivamente partenza e arrivi. */
+    val visualWaypointCorrection: Boolean = true,
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
     val panMinDeg: Float = -170f,

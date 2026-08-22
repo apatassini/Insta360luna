@@ -10,6 +10,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -20,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
+import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
@@ -40,6 +44,7 @@ import kotlin.math.roundToInt
  * due mestieri diversi e mescolarli significa far scorrere venti righe tecniche a chi voleva
  * solo cambiare la velocità del movimento.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
     val settings by viewModel.settings.collectAsState()
@@ -127,6 +132,34 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 Hint(
                     "Si prova prima il MJPEG dell'endpoint OSC; se la camera non lo offre si passa " +
                         "allo stream della sessione di controllo, che è video compresso e passa dal decoder.",
+                )
+            }
+        }
+
+        SectionCard(title = "Panorama della camera", icon = LunaIcons.Panorama, accent = Luna.Pano) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(
+                        LunaProtocolCodes.PanoAspect.SPHERE_360 to "Sferica 360°",
+                        LunaProtocolCodes.PanoAspect.RATIO_2_1 to "Panorama 2:1",
+                    ).forEach { (aspect, label) ->
+                        FilterChip(
+                            selected = settings.panoAspect == aspect,
+                            onClick = { viewModel.setPanoAspect(aspect) },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "Sulla Luna Ultra la panoramica è una sola sotto-modalità della camera — " +
+                        "photo_sub_mode 8 per entrambe — e la scelta fra sferica e 2:1 viaggia su " +
+                        "un campo a parte, che è questo. Si può cambiare anche dal mirino, con la " +
+                        "pastiglia sopra il pulsante di scatto.",
                 )
             }
         }

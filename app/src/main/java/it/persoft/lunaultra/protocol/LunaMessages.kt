@@ -37,8 +37,43 @@ object LunaMessages {
             .int32(2, mode)
             .toByteArray()
 
-    /** `TakePicture { CaptureMode mode = 1 }` */
-    fun takePicture(mode: Int): ByteArray = ProtoWriter().int32(1, mode).toByteArray()
+    /**
+     * `TakePicture { Mode mode = 1; ...; bool isInstaPanoEnabled = 5 }`
+     *
+     * `Mode` è `TakePicture.Mode`, non `CaptureMode`: qui lo scatto normale è 0, mentre 1 è il
+     * bracketing di esposizione. Sono due enum diversi con nomi simili.
+     */
+    fun takePicture(mode: Int, instaPano: Boolean = false): ByteArray {
+        val writer = ProtoWriter().int32(1, mode)
+        // Il campo si manda solo quando serve: la panoramica la decide la sotto-modalità della
+        // camera, e ripetere `false` a ogni scatto è un modo di litigarci.
+        if (instaPano) writer.bool(5, true)
+        return writer.toByteArray()
+    }
+
+    /**
+     * `SetOptions { repeated OptionType option_types = 1; Options value = 2 }` con un solo
+     * campo dentro `Options`. È così che si cambia modalità: sotto-modalità foto o video.
+     */
+    fun setOption(optionType: Int, field: Int, value: Int): ByteArray =
+        ProtoWriter()
+            .int32(FIELD_OPTION_TYPES, optionType)
+            .message(FIELD_OPTIONS_VALUE) { int32(field, value) }
+            .toByteArray()
+
+    /**
+     * `SetPhotographyOptions { repeated PhotographyOptionType option_types = 1;
+     * PhotographyOptions value = 2; FunctionMode function_mode = 3 }`.
+     *
+     * Il `function_mode` non è decorativo: le impostazioni fotografiche sono memorizzate per
+     * modalità, e senza dirlo si scrive nella modalità sbagliata.
+     */
+    fun setPhotographyOption(optionType: Int, field: Int, value: Int, functionMode: Int): ByteArray =
+        ProtoWriter()
+            .int32(1, optionType)
+            .message(2) { int32(field, value) }
+            .int32(3, functionMode)
+            .toByteArray()
 
     /**
      * `StartLiveStream`, con i campi:

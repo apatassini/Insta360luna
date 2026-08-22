@@ -138,27 +138,77 @@ class LunaCommands(
         else -> null
     }
 
+    // ---- Modalità della camera ----
+
+    /**
+     * Porta la camera nella modalità richiesta.
+     *
+     * Serve perché il comando di scatto non dice cosa scattare: se la camera è rimasta in
+     * panoramica, `TAKE_PICTURE` fa una panoramica. Impostare la sotto-modalità prima è l'unico
+     * modo di sapere cosa si ottiene.
+     */
+    suspend fun applyMode(mode: CameraMode): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_OPTIONS,
+            LunaMessages.setOption(mode.optionType, mode.optionField, mode.subMode),
+        ).map { log.info("Modalità camera impostata: ${mode.label}") }
+
+    /**
+     * Sferica o 2:1. Sulla Luna Ultra la panoramica è una sola sotto-modalità e la scelta fra
+     * le due proporzioni viaggia su `PANO_ASPECT`, sotto il function mode della panoramica.
+     */
+    suspend fun setPanoAspect(aspect: Int): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setPhotographyOption(
+                optionType = LunaProtocolCodes.PhotographyOptionType.PANO_ASPECT,
+                field = LunaProtocolCodes.PhotographyOptionsField.PANO_ASPECT,
+                value = aspect,
+                functionMode = LunaProtocolCodes.FunctionMode.NORMAL_POWER_PANO_IMAGE,
+            ),
+        ).map { }
+
+    /** In che modalità è adesso la camera, letta dalle due sotto-modalità che riporta. */
+    suspend fun fetchCameraMode(): Result<CameraMode?> =
+        session.request(
+            LunaProtocolCodes.GET_OPTIONS,
+            LunaMessages.getOptions(OptionType.PHOTO_SUB_MODE, OptionType.VIDEO_SUB_MODE),
+        ).map { frame ->
+            val reader = optionsReader(frame)
+            CameraMode.fromSubModes(
+                photoSubMode = reader.intOrNull(OPTIONS, OptionsField.PHOTO_SUB_MODE),
+                videoSubMode = reader.intOrNull(OPTIONS, OptionsField.VIDEO_SUB_MODE),
+            )
+        }
+
     // ---- Registrazione ----
 
     /** `StartCapture { CaptureMode mode = 1 }` */
-    suspend fun startCapture(): Result<Unit> =
+    suspend fun startCapture(captureMode: Int = LunaProtocolCodes.CaptureMode.NORMAL): Result<Unit> =
         session.request(
             LunaProtocolCodes.START_CAPTURE,
-            LunaMessages.startCapture(LunaProtocolCodes.CaptureMode.NORMAL),
+            LunaMessages.startCapture(captureMode),
         ).map { }
 
     /** `StopCapture { ExtraMetadata extra_metadata = 1; CaptureMode mode = 2 }` */
-    suspend fun stopCapture(): Result<Unit> =
+    suspend fun stopCapture(captureMode: Int = LunaProtocolCodes.CaptureMode.NORMAL): Result<Unit> =
         session.request(
             LunaProtocolCodes.STOP_CAPTURE,
-            LunaMessages.stopCapture(LunaProtocolCodes.CaptureMode.NORMAL),
+            LunaMessages.stopCapture(captureMode),
         ).map { }
 
-    /** `TakePicture { CaptureMode mode = 1 }` — uno scatto singolo. */
-    suspend fun takePicture(): Result<Unit> =
+    /**
+     * Uno scatto. [instaPano] alza `isInstaPanoEnabled`, che chiede la panoramica per questo
+     * scatto anche senza cambiare la sotto-modalità della camera.
+     *
+     * Il modo è `TakePicture.Mode.NORMAL`, che vale **0**: il valore 1 di quell'enum è l'AEB,
+     * il bracketing di esposizione, ed è quello che partiva finché qui si passava per sbaglio
+     * la costante di `CaptureMode`.
+     */
+    suspend fun takePicture(instaPano: Boolean = false): Result<Unit> =
         session.request(
             LunaProtocolCodes.TAKE_PICTURE,
-            LunaMessages.takePicture(LunaProtocolCodes.CaptureMode.NORMAL),
+            LunaMessages.takePicture(LunaProtocolCodes.TakePictureMode.NORMAL, instaPano),
             timeoutMs = PHOTO_TIMEOUT_MS,
         ).map { }
 

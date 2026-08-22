@@ -36,7 +36,7 @@ fun ShutterButton(
     mode: CaptureMode,
     active: Boolean,
     progress: Float,
-    enabled: Boolean,
+    ready: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     diameter: Dp = 78.dp,
@@ -61,12 +61,13 @@ fun ShutterButton(
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
-                alpha = if (enabled) 1f else 0.4f
+                alpha = if (ready) 1f else 0.45f
             }
+            // Premibile anche quando non è pronto: un pulsante che non fa niente e non dice
+            // niente lascia l'utente a indovinare quale delle tre condizioni manca.
             .clickable(
                 interactionSource = interaction,
                 indication = null,
-                enabled = enabled,
                 onClick = onClick,
             )
             .semantics { contentDescription = description },

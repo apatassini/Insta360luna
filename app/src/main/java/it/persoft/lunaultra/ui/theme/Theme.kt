@@ -60,6 +60,7 @@ object Luna {
     val Path = Color(0xFF4FD1FF)
     val PathLapse = Color(0xFFB388FF)
     val Pano = Color(0xFF5CE6A5)
+    val Multi = Color(0xFFFF7BC0)
 }
 
 private val LunaColors = darkColorScheme(

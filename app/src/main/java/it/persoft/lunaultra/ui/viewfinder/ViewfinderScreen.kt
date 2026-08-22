@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
+import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.Panel
@@ -99,7 +100,7 @@ fun ViewfinderScreen(
     }
 
     val sequenceReady = sequence.isRunnable
-    val shutterEnabled = connected && (!captureMode.usesSequence || sequenceReady || run.running)
+    val shutterReady = connected && (!captureMode.usesSequence || sequenceReady || run.running)
     val shutterActive = if (captureMode.usesSequence) run.running else recording
     val shutterProgress = if (captureMode.usesSequence && run.running) run.overallProgress else 0f
 
@@ -180,15 +181,29 @@ fun ViewfinderScreen(
                     modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp),
                 )
 
-                infoPillText(captureMode, sequence.settleSeconds, sequence.intervalSeconds, sequence.effectiveTotalSeconds())
-                    ?.let { pill ->
-                        InfoPill(
-                            text = pill,
-                            color = captureMode.color,
-                            onClick = { onOpenPanel(Panel.SEQUENCE) },
-                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 70.dp),
-                        )
-                    }
+                // In panoramica la pastiglia è la scelta fra sferica e 2:1: è l'unica
+                // impostazione che cambia il risultato dello scatto, e si tocca lì.
+                if (captureMode.hasPanoAspect) {
+                    val spherical = settings.panoAspect == LunaProtocolCodes.PanoAspect.SPHERE_360
+                    InfoPill(
+                        text = if (spherical) "sferica 360°" else "panorama 2:1",
+                        icon = LunaIcons.Panorama,
+                        color = captureMode.color,
+                        onClick = viewModel::togglePanoAspect,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 70.dp),
+                    )
+                } else {
+                    infoPillText(captureMode, sequence.settleSeconds, sequence.intervalSeconds, sequence.effectiveTotalSeconds())
+                        ?.let { pill ->
+                            InfoPill(
+                                text = pill,
+                                icon = LunaIcons.MotionTimelapse,
+                                color = captureMode.color,
+                                onClick = { onOpenPanel(Panel.SEQUENCE) },
+                                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 70.dp),
+                            )
+                        }
+                }
 
                 if (dockVisible) {
                     GimbalDock(
@@ -285,7 +300,7 @@ fun ViewfinderScreen(
                     onSelect = viewModel::setCaptureMode,
                     active = shutterActive,
                     progress = shutterProgress,
-                    shutterEnabled = shutterEnabled,
+                    shutterReady = shutterReady,
                     onShutter = viewModel::onShutter,
                     waypointCount = sequence.waypoints.size,
                     onCaptureWaypoint = viewModel::captureWaypoint,
@@ -341,13 +356,14 @@ fun ViewfinderScreen(
 @Composable
 private fun InfoPill(
     text: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
     color: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     HudPill(
         text = text,
-        icon = LunaIcons.MotionTimelapse,
+        icon = icon,
         tint = color,
         onClick = onClick,
         modifier = modifier,
@@ -361,10 +377,10 @@ private fun infoPillText(
     intervalSeconds: Float,
     totalSeconds: Float,
 ): String? = when (mode) {
-    CaptureMode.PANORAMA -> "attesa ${trim(settleSeconds)} s"
+    CaptureMode.SEQUENZA_FOTO -> "attesa ${trim(settleSeconds)} s"
     CaptureMode.TIMELAPSE, CaptureMode.SEQUENZA_TL -> "intervallo ${trim(intervalSeconds)} s"
     CaptureMode.SEQUENZA_VIDEO -> "durata ${totalSeconds.roundToInt()} s"
-    CaptureMode.FOTO, CaptureMode.VIDEO -> null
+    CaptureMode.FOTO, CaptureMode.VIDEO, CaptureMode.PANORAMA -> null
 }
 
 private fun trim(value: Float): String =

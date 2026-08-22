@@ -85,6 +85,48 @@ Comandi usati dall'app, tutti con numero noto:
 | 15 | `GET_CURRENT_CAPTURE_STATUS` | sta registrando? da quanto? |
 | 17 / 18 | `GET` / `SET_TIMELAPSE_OPTIONS` | durata e intervallo |
 | 22 / 23 | `START` / `STOP_TIMELAPSE` | timelapse interno della camera |
+| 3 | `TAKE_PICTURE` | scatto singolo |
+| 9 | `SET_PHOTOGRAPHY_OPTIONS` | proporzione della panoramica (sferica / 2:1) |
+
+### Le modalità della camera: due trappole misurate
+
+**Il comando di scatto non dice cosa scattare.** A decidere è la sotto-modalità in cui si trova
+la camera: con `photo_sub_mode = 8` (`PHOTO_INSTA_PANO`) un `TAKE_PICTURE` produce una
+panoramica, con `photo_sub_mode = 0` (`PHOTO_SINGLE`) uno scatto normale — comando identico. Per
+questo l'app imposta la sotto-modalità con `SET_OPTIONS` prima di ogni scatto invece di darla
+per buona: la camera può essere stata cambiata dal suo schermo mentre l'app era aperta.
+
+**`TakePicture.Mode` non è `CaptureMode`.** Due enum con nomi simili e valori diversi: in
+`CaptureMode` il normale è 1, in `TakePicture.Mode` l'1 è l'**AEB**, il bracketing di
+esposizione, e il normale è 0. Passare la costante sbagliata non dà errore — la camera esegue un
+bracketing e basta.
+
+| Modalità | Come la si seleziona | Come si scatta |
+|---|---|---|
+| Foto | `SET_OPTIONS` `PHOTO_SUB_MODE(40)` = `PHOTO_SINGLE(0)` | `TAKE_PICTURE` con `Mode.NORMAL(0)` |
+| Panorama | `PHOTO_SUB_MODE(40)` = `PHOTO_INSTA_PANO(8)` | `TAKE_PICTURE`; sferica o 2:1 da `PANO_ASPECT` |
+| Video | `VIDEO_SUB_MODE(41)` = `VIDEO_NORMAL(0)` | `START` / `STOP_CAPTURE` con `Capture_MODE_NORMAL(1)` |
+| Timelapse | `VIDEO_SUB_MODE(41)` = `VIDEO_TIMELAPSE(2)` | `START` / `STOP_TIMELAPSE` |
+
+La panoramica è **una sola sotto-modalità** anche se le proporzioni sono due: la scelta viaggia
+su `PANO_ASPECT` (`PhotographyOptionType` 98) con `SET_PHOTOGRAPHY_OPTIONS`, che porta anche il
+`function_mode` a cui la modifica si riferisce — `FUNCTION_MODE_NORMAL_POWER_PANO_IMAGE(14)`.
+I valori sono `PANO_ASPECT_360 = 1` e `PANO_ASPECT_2_1 = 4`.
+
+La camera lascia l'altra sotto-modalità al suo valore sentinella (`*_NONE = 100`) invece di
+azzerarla: per sapere in che modalità è, il video vince quando è diverso da `VIDEO_NONE`.
+
+### Restare connessi
+
+Due cose diverse, tutte e due necessarie:
+
+- **un servizio in primo piano.** Da Android 12 un'app che finisce in background viene congelata
+  dopo pochi secondi: il keep-alive smette di battere e la camera chiude la sessione. È il
+  «si disconnette quando cambio app». Il servizio tiene il processo sveglio, con un wake lock e
+  un Wi-Fi lock, e mostra una notifica che dice cosa sta girando;
+- **il riaggancio automatico.** Se la sessione cade lo stesso, l'app riprova da sola a distanze
+  crescenti (2, 4, 8, 16 secondi…) finché non riesce o finché non si arrende dopo sei tentativi.
+  Smette solo quando sei tu a premere «disconnetti».
 
 ---
 
@@ -169,12 +211,17 @@ Tre pannelli si aprono sopra il mirino e si chiudono con Indietro: **Sequenza e 
 
 | Modalità | Cosa fa il pulsante di scatto |
 |---|---|
-| **Foto** | uno scatto singolo |
+| **Panorama** | la panoramica della camera: sferica 360° o 2:1, si sceglie con la pastiglia sopra lo scatto |
+| **Foto** | uno scatto singolo normale |
 | **Video** | avvia e ferma la registrazione |
 | **Timelapse** | avvia e ferma il timelapse interno della camera, a gimbal fermo |
 | **Sequenza** | percorre i punti memorizzati registrando video |
 | **Sequenza TL** | percorre i punti con il timelapse interno della camera |
-| **Panorama** | si ferma a ogni scatto lungo il percorso, per le foto da unire in post |
+| **Sequenza foto** | si ferma a ogni scatto lungo il percorso, per le foto da unire in post |
+
+Scegliere una modalità **mette davvero la camera in quella modalità**: la ghiera non è un
+promemoria di cosa farà l'app, è un comando che parte. All'aggancio succede il contrario — la
+ghiera adotta la modalità in cui la camera si trova già.
 
 Le tre modalità guidate hanno bisogno di almeno due punti: senza, il pulsante di scatto resta
 spento. Sceglierne una dalla ghiera equivale a sceglierla nel pannello della sequenza, e
@@ -349,6 +396,8 @@ Il protocollo non l'ho ricostruito io. Questa app sta sulle spalle di:
 * **[RigacciOrg/insta360-wifi-api](https://github.com/RigacciOrg/insta360-wifi-api)** (GPLv3)
   — l'estrazione dei `.proto`, l'enum `MessageCode` con i 164 codici noti e i numeri di campo di
   `Options`, `BatteryStatus`, `CameraCaptureStatus`, `TimelapseOptions`.
+  Da lì viene anche lo **schema del protocollo della Luna Ultra** con i numeri delle
+  sotto-modalità, di `PanoAspect` e dei `FunctionMode`: misurati su questa camera, non dedotti.
 * **[diamondfsd/luna-ai-cut](https://github.com/diamondfsd/luna-ai-cut)** — l'estrazione da cui
   parte il lavoro sulla Luna Ultra.
 * **[Cedric-Hsu/insta360-go3s-mac-import](https://github.com/Cedric-Hsu/insta360-go3s-mac-import)**

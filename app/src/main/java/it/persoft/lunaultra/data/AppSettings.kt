@@ -60,6 +60,13 @@ data class AppSettings(
     val gimbal: GimbalSettings = GimbalSettings(),
 
     /**
+     * Proporzione della panoramica della camera: sferica 360° oppure 2:1
+     * (`insta360.messages.PanoAspect`). Sulla Luna Ultra la panoramica è una sola
+     * sotto-modalità e questa è la scelta che la distingue.
+     */
+    val panoAspect: Int = LunaProtocolCodes.PanoAspect.SPHERE_360,
+
+    /**
      * Modalità timelapse usata dai comandi `*_TIMELAPSE`
      * (`insta360.messages.TimelapseMode`).
      */

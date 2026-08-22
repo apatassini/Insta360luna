@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import it.persoft.lunaultra.AppContainer
+import it.persoft.lunaultra.camera.CameraMode
 import it.persoft.lunaultra.camera.CameraStatus
 import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
@@ -12,6 +13,7 @@ import it.persoft.lunaultra.data.GimbalSettings
 import it.persoft.lunaultra.preview.PreviewState
 import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
+import it.persoft.lunaultra.service.LunaConnectionService
 import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
@@ -20,6 +22,7 @@ import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -146,6 +149,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Ultimo avviso sul codice gimbal ignoto: senza questo, la levetta ne stampa uno per tocco. */
     private var lastGimbalWarningMs = 0L
 
+    /** L'utente vuole essere connesso: resta vero finché non preme «disconnetti». */
+    private var wantConnected = false
+    private var reconnectAttempts = 0
+    private var reconnectJob: Job? = null
+
     private var pollJob: Job? = null
     private var probeJob: Job? = null
     private var monitorJob: Job? = null
@@ -154,11 +162,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { container.load() }
         observeNotifications()
         observeConnection()
+        observeForegroundService()
+    }
+
+    /**
+     * Tiene in piedi il servizio in primo piano finché la sessione è aperta.
+     *
+     * Senza, il processo viene congelato pochi secondi dopo che l'app finisce in background: il
+     * keep-alive smette di battere e la camera chiude. Il testo della notifica segue lo stato,
+     * così dalla tendina si vede se sta ancora girando qualcosa.
+     */
+    private fun observeForegroundService() {
+        viewModelScope.launch {
+            combine(connectionState, _recordingSinceMs, runState, _status) { connection, recordingSince, run, status ->
+                when {
+                    connection != ConnectionState.CONNECTED -> null
+                    run.running ->
+                        "Sequenza in corso — tratto ${run.legIndex + 1}/${run.legCount.coerceAtLeast(1)}"
+
+                    recordingSince > 0L || status.recording == true -> "Ripresa in corso"
+                    else -> "Connessa — la sessione resta aperta"
+                }
+            }.collect { text ->
+                val context = getApplication<Application>()
+                if (text == null) LunaConnectionService.stop(context)
+                else LunaConnectionService.start(context, text)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- connessione
 
     fun connect() {
+        wantConnected = true
+        reconnectAttempts = 0
         viewModelScope.launch {
             container.log.info("Acquisizione rete Wi-Fi…")
             container.wifiBinder.acquire()
@@ -167,11 +204,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onSuccess {
                     showMessage("Connesso a ${settings.value.host}")
                     refreshStatus()
+                    syncCameraMode()
                 }
         }
     }
 
     fun disconnect() {
+        wantConnected = false
+        reconnectJob?.cancel()
+        reconnectJob = null
         viewModelScope.launch {
             container.engine.stop("Disconnessione")
             container.session.disconnect()
@@ -195,19 +236,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             connectionState.collect { state ->
                 pollJob?.cancel()
-                if (state == ConnectionState.CONNECTED) {
-                    pollJob = viewModelScope.launch {
-                        while (isActive) {
-                            delay(STATUS_POLL_MS)
-                            container.commands.fetchStatus()
-                                .onSuccess {
-                                    _status.value = _status.value.mergedWith(it)
-                                    syncRecordingClock()
-                                }
+                when (state) {
+                    ConnectionState.CONNECTED -> {
+                        reconnectAttempts = 0
+                        pollJob = viewModelScope.launch {
+                            while (isActive) {
+                                delay(STATUS_POLL_MS)
+                                container.commands.fetchStatus()
+                                    .onSuccess {
+                                        _status.value = _status.value.mergedWith(it)
+                                        syncRecordingClock()
+                                    }
+                            }
                         }
                     }
+
+                    ConnectionState.DISCONNECTED, ConnectionState.ERROR -> scheduleReconnect()
+                    else -> Unit
                 }
             }
+        }
+    }
+
+    /**
+     * Riaggancia da sola una sessione caduta.
+     *
+     * Finché l'utente non preme «disconnetti», restare connessi è quello che vuole: una camera
+     * che sparisce perché il telefono ha cambiato rete per due secondi non è una scelta di
+     * nessuno. I tentativi sono a distanza crescente e finiti — insistere all'infinito su una
+     * camera spenta scalda soltanto la batteria.
+     */
+    private fun scheduleReconnect() {
+        if (!wantConnected) return
+        if (reconnectJob?.isActive == true) return
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            wantConnected = false
+            showMessage("Sessione caduta e riconnessione non riuscita: riprova a mano")
+            return
+        }
+        reconnectJob = viewModelScope.launch {
+            val attempt = ++reconnectAttempts
+            val wait = RECONNECT_BASE_MS * (1L shl (attempt - 1).coerceAtMost(3))
+            container.log.warn("Sessione caduta: riprovo fra ${wait / 1000}s (tentativo $attempt)")
+            delay(wait)
+            if (!wantConnected) return@launch
+            container.wifiBinder.acquire()
+            container.session.connect()
+                .onSuccess {
+                    showMessage("Riconnessa alla camera")
+                    refreshStatus()
+                    syncCameraMode()
+                }
+                .onFailure { container.log.warn("Riconnessione non riuscita: ${it.message}") }
         }
     }
 
@@ -422,17 +502,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setSettleSeconds(seconds: Float) =
         container.sequenceStore.update { it.copy(settleSeconds = seconds.coerceIn(0f, 30f)) }
 
+    /**
+     * Avvia la sequenza, oppure spiega perché non può partire.
+     *
+     * Le tre condizioni sono diverse fra loro e vanno dette per nome: senza camera non c'è
+     * niente da comandare, senza due punti non c'è un percorso, e senza il numero del comando
+     * gimbal il percorso non si può percorrere. Un pulsante che non fa niente e non dice niente
+     * è il modo peggiore di comunicare una qualunque delle tre.
+     */
     fun startRun() {
         val seq = sequence.value
-        if (!seq.isRunnable) {
-            showMessage("Servono almeno 2 punti memorizzati")
-            return
-        }
         if (connectionState.value != ConnectionState.CONNECTED) {
             showMessage("Connettiti alla camera prima di avviare")
             return
         }
-        container.engine.start(seq)
+        if (!seq.isRunnable) {
+            showMessage("Servono almeno due punti: inquadra e premi il tasto con la bandierina")
+            return
+        }
+        if (!settings.value.gimbal.isControlCodeKnown) {
+            showMessage("Comando gimbal non ancora noto: la sequenza non può muovere nulla. Cercalo in Diagnostica.")
+            return
+        }
+        viewModelScope.launch {
+            ensureCameraMode(_captureMode.value)
+            container.engine.start(seq)
+        }
     }
 
     fun emergencyStop() {
@@ -487,6 +582,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Scegliere una modalità guidata dalla ghiera è lo stesso gesto che sceglierla nel
         // pannello della sequenza: deve valere anche là, altrimenti si finisce con due verità.
         mode.sequenceMode?.let(::setShootingMode)
+        // E la camera ci va davvero: la ghiera non è un promemoria, è un comando.
+        viewModelScope.launch { ensureCameraMode(mode) }
     }
 
     /**
@@ -499,22 +596,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val mode = _captureMode.value
-        when {
-            mode.usesSequence -> if (runState.value.running) emergencyStop() else startRun()
-            mode == CaptureMode.FOTO -> takePicture()
-            isRecording -> stopCapture(mode.cameraTimelapse)
-            else -> startCapture(mode.cameraTimelapse)
+        if (mode.usesSequence) {
+            if (runState.value.running) emergencyStop() else startRun()
+            return
+        }
+        viewModelScope.launch {
+            ensureCameraMode(mode)
+            when {
+                mode.cameraMode.isPhoto -> shoot(mode)
+                isRecording -> stopCapture(mode.cameraTimelapse)
+                else -> startCapture(mode.cameraTimelapse)
+            }
         }
     }
 
-    /** Scatto singolo, utile per provare l'inquadratura prima di lanciare una panoramica. */
+    /** Scatto singolo nella modalità selezionata sulla ghiera. */
     fun takePicture() {
         viewModelScope.launch {
-            container.commands.takePicture()
-                .onSuccess { showMessage("Scatto eseguito") }
-                .onFailure { showMessage("Scatto non riuscito: ${it.message}") }
+            ensureCameraMode(_captureMode.value)
+            shoot(_captureMode.value)
         }
     }
+
+    private suspend fun shoot(mode: CaptureMode) {
+        val pano = mode.cameraMode == CameraMode.PANORAMA
+        container.commands.takePicture(instaPano = pano)
+            .onSuccess { showMessage(if (pano) "Panoramica in corso" else "Scatto eseguito") }
+            .onFailure { showMessage("Scatto non riuscito: ${it.message}") }
+    }
+
+    // ---------------------------------------------------------------- modalità della camera
+
+    /**
+     * Mette la camera nella modalità che la ghiera dice di essere.
+     *
+     * È il rimedio a un difetto misurato: il comando di scatto non dice cosa scattare, e con la
+     * camera rimasta in panoramica «foto» produceva una panoramica. La sotto-modalità si invia
+     * prima di ogni scatto perché la camera può essere stata cambiata dal suo schermo mentre
+     * l'app era aperta.
+     */
+    private suspend fun ensureCameraMode(mode: CaptureMode): Boolean {
+        if (connectionState.value != ConnectionState.CONNECTED) return false
+        val applied = container.commands.applyMode(mode.cameraMode)
+            .onFailure { showMessage("Modalità ${mode.cameraMode.label} non accettata: ${it.message}") }
+            .isSuccess
+        if (applied && mode.hasPanoAspect) {
+            container.commands.setPanoAspect(settings.value.panoAspect)
+                .onFailure { container.log.warn("Proporzione panoramica non accettata: ${it.message}") }
+        }
+        return applied
+    }
+
+    /** All'aggancio la ghiera adotta la modalità in cui la camera si trova già. */
+    private fun syncCameraMode() {
+        viewModelScope.launch {
+            container.commands.fetchCameraMode()
+                .onSuccess { cameraMode ->
+                    if (cameraMode == null) return@onSuccess
+                    if (_captureMode.value.cameraMode == cameraMode) return@onSuccess
+                    _captureMode.value = CaptureMode.forCamera(cameraMode)
+                }
+                .onFailure { container.log.warn("Modalità della camera non leggibile: ${it.message}") }
+        }
+    }
+
+    /** Sferica 360° o 2:1: la scelta della panoramica della camera. */
+    fun setPanoAspect(aspect: Int) {
+        container.settingsStore.update { it.copy(panoAspect = aspect) }
+        if (connectionState.value != ConnectionState.CONNECTED) return
+        viewModelScope.launch {
+            container.commands.setPanoAspect(aspect)
+                .onSuccess {
+                    showMessage(
+                        if (aspect == LunaProtocolCodes.PanoAspect.SPHERE_360) "Panoramica sferica 360°"
+                        else "Panoramica 2:1"
+                    )
+                }
+                .onFailure { showMessage("Proporzione non accettata: ${it.message}") }
+        }
+    }
+
+    fun togglePanoAspect() = setPanoAspect(
+        if (settings.value.panoAspect == LunaProtocolCodes.PanoAspect.SPHERE_360) {
+            LunaProtocolCodes.PanoAspect.RATIO_2_1
+        } else {
+            LunaProtocolCodes.PanoAspect.SPHERE_360
+        }
+    )
 
     // ---------------------------------------------------------------- impostazioni
 
@@ -851,6 +1019,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Ogni quanto ripetere l'avviso che il comando del gimbal non è ancora noto. */
         const val GIMBAL_WARNING_INTERVAL_MS = 8_000L
+
+        /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano fino a otto volte. */
+        const val RECONNECT_BASE_MS = 2_000L
+        const val MAX_RECONNECT_ATTEMPTS = 6
 
         /**
          * Pausa fra una lettura e la successiva. Con più codici a rotazione questo è il passo

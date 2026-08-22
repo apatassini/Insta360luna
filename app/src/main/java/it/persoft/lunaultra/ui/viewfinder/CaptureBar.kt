@@ -52,7 +52,7 @@ fun CaptureBar(
     onSelect: (CaptureMode) -> Unit,
     active: Boolean,
     progress: Float,
-    shutterEnabled: Boolean,
+    shutterReady: Boolean,
     onShutter: () -> Unit,
     waypointCount: Int,
     onCaptureWaypoint: () -> Unit,
@@ -117,7 +117,7 @@ fun CaptureBar(
                 mode = selected,
                 active = active,
                 progress = progress,
-                enabled = shutterEnabled,
+                ready = shutterReady,
                 onClick = onShutter,
                 diameter = 70.dp,
             )
@@ -157,7 +157,7 @@ fun CaptureBar(
                     mode = selected,
                     active = active,
                     progress = progress,
-                    enabled = shutterEnabled,
+                    ready = shutterReady,
                     onClick = onShutter,
                 )
                 Row(

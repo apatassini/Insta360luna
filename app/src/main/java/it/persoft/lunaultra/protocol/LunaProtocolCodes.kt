@@ -90,6 +90,7 @@ object LunaProtocolCodes {
         const val SERIAL_NUMBER = 15
         const val STORAGE_STATE = 20
         const val FIRMWARE_REVISION = 30
+        const val PHOTO_SUB_MODE = 40
         const val VIDEO_SUB_MODE = 41
         const val CAMERA_TYPE = 48
 
@@ -107,8 +108,84 @@ object LunaProtocolCodes {
         const val SERIAL_NUMBER = 15
         const val STORAGE_STATE = 20
         const val FIRMWARE_REVISION = 30
+        const val PHOTO_SUB_MODE = 40
         const val VIDEO_SUB_MODE = 41
         const val CAMERA_TYPE = 48
+    }
+
+    /**
+     * Valori di `insta360.messages.PhotoSubMode`: quale modalità fotografica ha la camera.
+     *
+     * È questa opzione a decidere cosa succede premendo lo scatto, non il comando: con
+     * [INSTA_PANO] impostato, `TAKE_PICTURE` produce una panoramica anche se il comando è
+     * identico a quello di uno scatto singolo.
+     */
+    object PhotoSubMode {
+        const val SINGLE = 0
+        const val INSTA_PANO = 8
+
+        /** Sentinella: la camera la riporta quando è in una modalità video. */
+        const val NONE = 100
+    }
+
+    /** Valori di `insta360.messages.VideoSubMode`. */
+    object VideoSubMode {
+        const val NORMAL = 0
+        const val TIMELAPSE = 2
+        const val SLOW_MOTION = 9
+        const val PURE = 11
+        const val NONE = 100
+    }
+
+    /**
+     * Valori di `insta360.messages.PanoAspect`: la panoramica sferica e quella 2:1.
+     *
+     * Sulla Luna Ultra la panoramica è una sola sotto-modalità — `photo_sub_mode` vale 8 per
+     * entrambe — e la scelta fra sferica e 2:1 viaggia su questo campo a parte.
+     */
+    object PanoAspect {
+        const val SPHERE_360 = 1
+        const val RATIO_2_1 = 4
+    }
+
+    /**
+     * Valori di `insta360.messages.FunctionMode`.
+     *
+     * Le opzioni fotografiche sono memorizzate per modalità: `SET_PHOTOGRAPHY_OPTIONS` porta
+     * anche il `function_mode` a cui la modifica si riferisce, altrimenti si scrive nel
+     * posto sbagliato.
+     */
+    object FunctionMode {
+        const val MOBILE_TIMELAPSE = 2
+        const val NORMAL_IMAGE = 6
+        const val NORMAL_VIDEO = 7
+        const val NORMAL_POWER_PANO_IMAGE = 14
+        const val SLOWMOTION_VIDEO = 21
+        const val PURE_VIDEO = 27
+    }
+
+    /** Valori di `insta360.messages.PhotographyOptionType` usati dall'app. */
+    object PhotographyOptionType {
+        const val PANO_ASPECT = 98
+    }
+
+    /** Numeri di campo di `insta360.messages.PhotographyOptions` usati dall'app. */
+    object PhotographyOptionsField {
+        const val PANO_ASPECT = 98
+    }
+
+    /**
+     * Valori di `insta360.messages.TakePicture.Mode`.
+     *
+     * Attenzione: **non** è `CaptureMode`. I due enum hanno nomi simili e valori diversi, e
+     * scambiarli significa chiedere un bracketing di esposizione al posto di uno scatto
+     * normale — che è esattamente cosa faceva questa app prima.
+     */
+    object TakePictureMode {
+        const val NORMAL = 0
+        const val AEB = 1
+        const val BURST = 3
+        const val AEB_NIGHT = 4
     }
 
     /** Numeri di campo di `insta360.messages.BatteryStatus`. */

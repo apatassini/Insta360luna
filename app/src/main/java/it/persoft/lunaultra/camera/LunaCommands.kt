@@ -453,7 +453,7 @@ class LunaCommands(
      * non sono confermati questa funzione restituisce ciò che riesce a leggere e nulla più.
      */
     fun parsePtz(frame: Ucd2Frame): PtzState? {
-        val cfg = gimbal
+        val cfg = settings.value.gimbal
         val reader = ProtoReader(frame.payload)
         val pan = reader.floatOrNull(cfg.ptzPanField) ?: return null
         val tilt = reader.floatOrNull(cfg.ptzTiltField) ?: 0f

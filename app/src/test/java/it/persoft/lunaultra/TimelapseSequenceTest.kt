@@ -3,6 +3,7 @@ package it.persoft.lunaultra
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -85,5 +86,18 @@ class TimelapseSequenceTest {
 
         assertTrue(TimelapseSequence(waypoints = listOf(old, current)).hasLegacyWaypoints)
         assertFalse(TimelapseSequence(waypoints = listOf(current, current.copy(id = "new2"))).hasLegacyWaypoints)
+    }
+
+    @Test
+    fun `la miniatura del waypoint sopravvive alla codifica base64`() {
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 1, 2, 3, 0xFF.toByte(), 0xD9.toByte())
+        val point = Waypoint(
+            name = "A",
+            pan = 1f,
+            tilt = 2f,
+            previewJpegBase64 = Waypoint.encodePreview(jpeg),
+        )
+
+        assertArrayEquals(jpeg, point.previewJpeg())
     }
 }

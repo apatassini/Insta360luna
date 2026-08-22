@@ -34,7 +34,6 @@ import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.Panel
-import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.components.HudPill
 import it.persoft.lunaultra.ui.components.PreviewSurface
 import it.persoft.lunaultra.ui.formatClock
@@ -80,7 +79,6 @@ fun ViewfinderScreen(
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var gridVisible by rememberSaveable { mutableStateOf(false) }
     var fillScreen by rememberSaveable { mutableStateOf(false) }
-    var dockVisible by rememberSaveable { mutableStateOf(true) }
     var modeSheetOpen by remember { mutableStateOf(false) }
     var photoSheetOpen by remember { mutableStateOf(false) }
     var videoSheetOpen by remember { mutableStateOf(false) }
@@ -177,23 +175,6 @@ fun ViewfinderScreen(
                     modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp),
                 )
 
-                HudIconButton(
-                    icon = LunaIcons.Center,
-                    contentDescription = "Considera questa posizione come 0° / 0°",
-                    onClick = viewModel::zeroPosition,
-                    size = 46.dp,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 12.dp),
-                )
-                HudIconButton(
-                    icon = LunaIcons.Joystick,
-                    contentDescription = "Comandi del gimbal",
-                    onClick = { dockVisible = !dockVisible },
-                    size = 46.dp,
-                    selected = dockVisible,
-                    activeColor = Luna.Path,
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp),
-                )
-
                 // In panoramica la pastiglia è la scelta fra sferica e 2:1: è l'unica
                 // impostazione che cambia il risultato dello scatto, e si tocca lì.
                 if (captureMode.hasPanoAspect) {
@@ -218,30 +199,26 @@ fun ViewfinderScreen(
                         }
                 }
 
-                if (dockVisible) {
-                    GimbalDock(
-                        enabled = connected,
-                        moving = moving,
-                        panDegrees = ptz.pan,
-                        tiltDegrees = ptz.tilt,
-                        positionFromCamera = ptz.fromCamera,
-                        speedPercent = settings.gimbal.manualSpeedPercent,
-                        hardwareSpeedLevel = settings.gimbal.hardwareSpeedLevel,
-                        onSpeedChange = viewModel::setManualSpeed,
-                        onHardwareSpeedChange = viewModel::setGimbalHardwareSpeed,
-                        onVector = viewModel::jogVector,
-                        onJog = viewModel::jogStart,
-                        onRelease = viewModel::jogStop,
-                        onStop = viewModel::jogStop,
-                        onZero = viewModel::zeroPosition,
-                        onCaptureWaypoint = viewModel::captureWaypoint,
-                        onClose = { dockVisible = false },
-                        compact = landscape,
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(start = 12.dp, bottom = 70.dp),
-                    )
-                }
+                GimbalDock(
+                    enabled = connected,
+                    moving = moving,
+                    panDegrees = ptz.pan,
+                    tiltDegrees = ptz.tilt,
+                    positionFromCamera = ptz.fromCamera,
+                    speedPercent = settings.gimbal.manualSpeedPercent,
+                    hardwareSpeedLevel = settings.gimbal.hardwareSpeedLevel,
+                    onSpeedChange = viewModel::setManualSpeed,
+                    onHardwareSpeedChange = viewModel::setGimbalHardwareSpeed,
+                    onVector = viewModel::jogVector,
+                    onRelease = viewModel::jogStop,
+                    onStop = viewModel::jogStop,
+                    onZero = viewModel::zeroPosition,
+                    onCaptureWaypoint = viewModel::captureWaypoint,
+                    compact = landscape,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 12.dp, bottom = 10.dp),
+                )
             }
 
             val note = previewNote(preview.active, preview.framesDecoded, preview.message)

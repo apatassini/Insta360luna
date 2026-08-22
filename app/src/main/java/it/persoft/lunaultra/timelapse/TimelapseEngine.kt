@@ -1,8 +1,12 @@
 package it.persoft.lunaultra.timelapse
 
 import it.persoft.lunaultra.camera.LunaCommands
+import it.persoft.lunaultra.diagnostics.PositionVerdict
+import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
 import it.persoft.lunaultra.gimbal.GimbalController
 import it.persoft.lunaultra.net.EventLog
+import it.persoft.lunaultra.net.LogLevel
+import it.persoft.lunaultra.preview.PreviewController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -52,6 +56,7 @@ data class RunState(
 class TimelapseEngine(
     private val commands: LunaCommands,
     private val gimbal: GimbalController,
+    private val preview: PreviewController,
     private val log: EventLog,
     private val scope: CoroutineScope,
 ) {
@@ -91,6 +96,7 @@ class TimelapseEngine(
     }
 
     private suspend fun run(sequence: TimelapseSequence, tickHz: Int) {
+        val traceId = System.currentTimeMillis().toString().takeLast(8)
         controlRecording = sequence.controlRecording
         runningMode = sequence.mode
         val durations = sequence.legDurations()
@@ -111,12 +117,25 @@ class TimelapseEngine(
 
         try {
             val first = sequence.waypoints.first()
+            logSequencePlan(traceId, sequence, durations)
+            val beforeReturn = gimbal.position.value
+            preview.logSnapshot(
+                message = "RUN $traceId · POSIZIONE PRIMA DEL RITORNO",
+                detail = targetDetail(first, beforeReturn) +
+                    "\nIl gimbal deve ora andare verso il Punto 1 con registrazione ferma.",
+            )
             log.info("Modalità ${sequence.mode.label}: vado al punto iniziale ${first.name}")
             approach(first.pan, first.tilt)
+            val actualStartJpeg = preview.logSnapshot(
+                message = "RUN $traceId · PUNTO 1 RAGGIUNTO · ${first.name}",
+                detail = targetDetail(first, gimbal.position.value) +
+                    "\nProssima azione: avvio della registrazione.",
+            )
+            logImageVerification(traceId, first, actualStartJpeg, "PUNTO 1 PRIMA DEL VIDEO")
 
             when (sequence.mode) {
                 ShootingMode.FOTO -> runPhotos(sequence)
-                else -> runContinuous(sequence, durations, total, tickHz)
+                else -> runContinuous(sequence, durations, total, tickHz, traceId)
             }
 
             shutdown(aborted = false, reason = "Sequenza completata")
@@ -134,6 +153,7 @@ class TimelapseEngine(
         durations: List<Float>,
         total: Float,
         tickHz: Int,
+        traceId: String,
     ) {
         if (sequence.mode == ShootingMode.TIMELAPSE_CAMERA && sequence.configureCameraTimelapse) {
             commands.setTimelapseOptions(
@@ -147,7 +167,10 @@ class TimelapseEngine(
             _state.value = _state.value.copy(message = "Punto 1 raggiunto · avvio registrazione")
             commands.startRecording(sequence.mode == ShootingMode.TIMELAPSE_CAMERA)
                 .getOrElse { throw IllegalStateException("Avvio registrazione non riuscito: ${it.message}", it) }
-            log.info("Registrazione avviata sul punto ${sequence.waypoints.first().name}")
+            log.info(
+                "RUN $traceId · REGISTRAZIONE AVVIATA SUL PUNTO 1",
+                targetDetail(sequence.waypoints.first(), gimbal.position.value),
+            )
             hold(sequence.startHoldSeconds, "Fermo iniziale sul punto ${sequence.waypoints.first().name}")
             _state.value = _state.value.copy(elapsedSeconds = sequence.startHoldSeconds.coerceAtLeast(0f))
         }
@@ -160,7 +183,16 @@ class TimelapseEngine(
             val from = sequence.waypoints[legIndex]
             val to = sequence.waypoints[legIndex + 1]
             val legSeconds = durations[legIndex]
-            log.info("Tratto ${legIndex + 1}/${sequence.legCount}: ${from.name} → ${to.name} in ${legSeconds.roundToInt()}s")
+            val atLegStart = gimbal.position.value
+            log.info(
+                "RUN $traceId · TRATTO ${legIndex + 1}/${sequence.legCount}: ${from.name} → ${to.name}",
+                buildString {
+                    appendLine("Durata movimento: %.3f s".format(legSeconds))
+                    appendLine("Partenza stimata: pan %.3f° · tilt %.3f°".format(atLegStart.pan, atLegStart.tilt))
+                    appendLine("Arrivo configurato: pan %.3f° · tilt %.3f°".format(to.pan, to.tilt))
+                    append("Vettore richiesto: Δpan %+.3f° · Δtilt %+.3f°".format(to.pan - atLegStart.pan, to.tilt - atLegStart.tilt))
+                },
+            )
 
             val startedAt = System.nanoTime()
             var legElapsed = 0f
@@ -191,6 +223,13 @@ class TimelapseEngine(
         }
 
         gimbal.stop()
+        val last = sequence.waypoints.last()
+        val actualArrivalJpeg = preview.logSnapshot(
+            message = "RUN $traceId · ARRIVO REALE · ${last.name}",
+            detail = targetDetail(last, gimbal.position.value) +
+                "\nIl gimbal è fermo; la registrazione verrà arrestata dopo il fermo finale.",
+        )
+        logImageVerification(traceId, last, actualArrivalJpeg, "PUNTO FINALE DURANTE IL VIDEO")
         if (sequence.controlRecording) {
             hold(sequence.endHoldSeconds, "Fermo finale sul punto ${sequence.waypoints.last().name}")
             _state.value = _state.value.copy(elapsedSeconds = sequence.estimatedRecordingSeconds())
@@ -280,6 +319,72 @@ class TimelapseEngine(
         if (millis <= 0L) return
         _state.value = _state.value.copy(phase = RunPhase.RUNNING, message = message)
         delay(millis)
+    }
+
+    /** Piano completo con le immagini originali: permette di verificare anche l'ordine 1→2. */
+    private fun logSequencePlan(traceId: String, sequence: TimelapseSequence, durations: List<Float>) {
+        log.info(
+            "RUN $traceId · PIANO SEQUENZA",
+            buildString {
+                appendLine("Modalità: ${sequence.mode.label}")
+                appendLine("Ordine: ${sequence.waypoints.joinToString(" → ") { it.name }}")
+                appendLine("Tratti: ${durations.joinToString { "%.3f s".format(it) }}")
+                append("Registrazione gestita dall'app: ${sequence.controlRecording}")
+            },
+        )
+        sequence.waypoints.forEachIndexed { index, point ->
+            log.info(
+                message = "RUN $traceId · PUNTO ${index + 1} CONFIGURATO · ${point.name}",
+                detail = buildString {
+                    appendLine("Pan salvato: %.3f°".format(point.pan))
+                    appendLine("Tilt salvato: %.3f°".format(point.tilt))
+                    append("Miniatura: ${if (point.previewJpegBase64 == null) "assente" else "acquisita quando il punto è stato memorizzato"}")
+                },
+                imageJpeg = point.previewJpeg(),
+            )
+        }
+    }
+
+    private fun targetDetail(target: Waypoint, actual: it.persoft.lunaultra.camera.PtzState): String =
+        buildString {
+            appendLine("Bersaglio: pan %.3f° · tilt %.3f°".format(target.pan, target.tilt))
+            appendLine("Stima attuale: pan %.3f° · tilt %.3f°".format(actual.pan, actual.tilt))
+            appendLine("Errore stimato: Δpan %+.3f° · Δtilt %+.3f°".format(target.pan - actual.pan, target.tilt - actual.tilt))
+            append("Posizione da camera: ${actual.fromCamera}")
+        }
+
+    /**
+     * Confronto visuale indipendente dal dead reckoning: gli inlier sono punti che concordano
+     * sullo stesso spostamento, come nella fase di allineamento di uno stitch panoramico.
+     */
+    private fun logImageVerification(
+        traceId: String,
+        target: Waypoint,
+        actualJpeg: ByteArray?,
+        phase: String,
+    ) {
+        val referenceJpeg = target.previewJpeg()
+        val verification = WaypointImageVerifier.verify(referenceJpeg, actualJpeg)
+        if (verification == null) {
+            log.warn(
+                "RUN $traceId · VERIFICA VISIVA $phase NON DISPONIBILE",
+                "Manca la miniatura del waypoint o il frame reale. Rimemorizza il punto con l'anteprima attiva.",
+            )
+            return
+        }
+        val annotated = WaypointImageVerifier.annotatedCurrentJpeg(actualJpeg, verification)
+        val level = when (verification.verdict) {
+            PositionVerdict.CORRECT -> LogLevel.INFO
+            else -> LogLevel.WARN
+        }
+        log.log(
+            level = level,
+            message = "RUN $traceId · CONTROLLO PUNTI $phase · ${verification.verdict.label}",
+            detail = verification.describe() +
+                "\nCerchi verdi: corrispondenze coerenti · cerchi rossi: scarti." +
+                "\nΔx positivo = immagine reale spostata a destra rispetto al waypoint salvato.",
+            imageJpeg = annotated,
+        )
     }
 
     private suspend fun shutdown(aborted: Boolean, reason: String) {

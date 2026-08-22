@@ -583,17 +583,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // comando e lo stop entra nella stima e non sposta il punto.
             container.gimbal.stop()
             val current = ptz.value
+            val jpeg = container.preview.captureThumbnailJpeg()
+            val pointIndex = sequence.value.waypoints.size
+            val name = nextWaypointName(pointIndex)
             container.sequenceStore.update { seq ->
-                val name = nextWaypointName(seq.waypoints.size)
                 seq.copy(
                     waypoints = seq.waypoints + Waypoint(
                         name = name,
                         pan = current.pan,
                         tilt = current.tilt,
                         positionModelVersion = Waypoint.CURRENT_POSITION_MODEL_VERSION,
+                        previewJpegBase64 = Waypoint.encodePreview(jpeg),
                     ),
                 )
             }
+            container.log.info(
+                message = "WAYPOINT ${pointIndex + 1} MEMORIZZATO · $name",
+                detail = buildString {
+                    appendLine("Ordine percorso: ${pointIndex + 1}")
+                    appendLine("Pan stimato: %.3f°".format(current.pan))
+                    appendLine("Tilt stimato: %.3f°".format(current.tilt))
+                    append("Posizione da camera: ${current.fromCamera}")
+                    if (jpeg == null) append("\nMiniatura: non disponibile (attiva l'anteprima prima di memorizzare)")
+                },
+                imageJpeg = jpeg,
+            )
             showMessage("Punto memorizzato a %.1f° / %.1f°".format(current.pan, current.tilt))
         }
     }
@@ -624,6 +638,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             container.gimbal.stop()
             val current = ptz.value
+            val jpeg = container.preview.captureThumbnailJpeg()
+            val previous = sequence.value.waypoints.firstOrNull { it.id == id }
+            val pointIndex = sequence.value.waypoints.indexOfFirst { it.id == id }
             container.sequenceStore.update { seq ->
                 seq.copy(
                     waypoints = seq.waypoints.map {
@@ -632,11 +649,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 pan = current.pan,
                                 tilt = current.tilt,
                                 positionModelVersion = Waypoint.CURRENT_POSITION_MODEL_VERSION,
+                                previewJpegBase64 = Waypoint.encodePreview(jpeg),
                             )
                         } else it
                     },
                 )
             }
+            container.log.info(
+                message = "WAYPOINT ${pointIndex + 1} AGGIORNATO · ${previous?.name ?: id}",
+                detail = buildString {
+                    previous?.let {
+                        appendLine("Prima: pan %.3f° · tilt %.3f°".format(it.pan, it.tilt))
+                    }
+                    appendLine("Adesso: pan %.3f° · tilt %.3f°".format(current.pan, current.tilt))
+                    append("Posizione da camera: ${current.fromCamera}")
+                    if (jpeg == null) append("\nMiniatura: non disponibile (attiva l'anteprima prima di aggiornare)")
+                },
+                imageJpeg = jpeg,
+            )
             showMessage("Punto aggiornato a %.1f° / %.1f°".format(current.pan, current.tilt))
         }
     }
@@ -707,6 +737,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (seq.hasLegacyWaypoints) {
             showMessage("Aggiorna i vecchi punti con ‘Qui’ oppure rimemorizzali: usano la stima precedente")
+            return
+        }
+        if (seq.waypoints.any { it.previewJpegBase64 == null }) {
+            showMessage("Aggiorna ogni punto con ‘Qui’: serve la foto di controllo per verificare partenza e arrivo")
             return
         }
         viewModelScope.launch {
@@ -1546,7 +1580,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "modello: ${status.value.model ?: "?"} firmware: ${status.value.firmware ?: "?"}",
             "modalità sequenza: ${sequence.value.mode.name}",
         )
-        LogSharing.share(context, container.log.exportText(), header)
+        LogSharing.share(context, container.log.entries.value, header)
             .onSuccess { showMessage("Log pronto per la condivisione") }
             .onFailure { showMessage("Condivisione non riuscita: ${it.message}") }
     }

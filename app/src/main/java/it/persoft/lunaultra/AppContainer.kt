@@ -53,7 +53,7 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val probe = CodeProbe(session, log)
     val preview = PreviewController(session, commands, settingsStore.state, wifiBinder, log, scope)
     val gimbal = GimbalController(commands, settingsStore.state, log, scope)
-    val engine = TimelapseEngine(commands, gimbal, log, scope)
+    val engine = TimelapseEngine(commands, gimbal, preview, log, scope)
     val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log)
 
     suspend fun load() {

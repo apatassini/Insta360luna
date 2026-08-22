@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.timelapse
 
 import kotlinx.serialization.Serializable
+import java.util.Base64
 import java.util.UUID
 
 @Serializable
@@ -50,12 +51,20 @@ data class Waypoint(
     val durationToNextSeconds: Float = 30f,
     /** 1 = vecchia stima; 2 = assi corretti e integrazione sul tempo reale. */
     val positionModelVersion: Int = LEGACY_POSITION_MODEL_VERSION,
+    /** Inquadratura 256×256 vista quando il punto è stato memorizzato, JPEG in Base64. */
+    val previewJpegBase64: String? = null,
 ) {
     val needsRecapture: Boolean get() = positionModelVersion < CURRENT_POSITION_MODEL_VERSION
+
+    fun previewJpeg(): ByteArray? = previewJpegBase64?.let { encoded ->
+        runCatching { Base64.getDecoder().decode(encoded) }.getOrNull()
+    }
 
     companion object {
         const val LEGACY_POSITION_MODEL_VERSION = 1
         const val CURRENT_POSITION_MODEL_VERSION = 2
+
+        fun encodePreview(jpeg: ByteArray?): String? = jpeg?.let(Base64.getEncoder()::encodeToString)
     }
 }
 

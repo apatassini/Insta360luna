@@ -1,5 +1,7 @@
 package it.persoft.lunaultra.ui.screens
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,6 +29,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -152,8 +156,9 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
         SectionCard(title = "Log") {
             Text(
                 text = "Ogni comando inviato e ogni risposta ricevuta, con i byte grezzi e i campi " +
-                    "protobuf decodificati. \"Condividi\" lo salva su file e lo allega: è così " +
-                    "che va mandato per farlo analizzare.",
+                    "protobuf decodificati. Per waypoint e sequenze include anche le miniature e " +
+                    "il confronto dei punti di controllo. \"Condividi\" crea un unico HTML con " +
+                    "le immagini incorporate: è il file da mandare per l'analisi.",
                 style = MaterialTheme.typography.bodySmall,
             )
             // Il log arriva a migliaia di righe. Disegnarle tutte in una Column significa
@@ -195,6 +200,21 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
                                 color = color.copy(alpha = 0.7f),
                                 modifier = Modifier.padding(start = 12.dp),
                             )
+                        }
+                        entry.imageJpeg?.let { bytes ->
+                            val bitmap = remember(bytes) {
+                                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            }
+                            bitmap?.let {
+                                Image(
+                                    bitmap = it.asImageBitmap(),
+                                    contentDescription = "Miniatura diagnostica: ${entry.message}",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier
+                                        .padding(start = 12.dp, top = 4.dp, bottom = 6.dp)
+                                        .size(144.dp),
+                                )
+                            }
                         }
                     }
                 }

@@ -1,5 +1,7 @@
 package it.persoft.lunaultra.ui.screens
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,12 +32,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -139,6 +144,12 @@ fun SequenceScreen(viewModel: MainViewModel) {
                         "I punti della versione precedente non sono abbastanza precisi dopo la " +
                             "correzione degli assi. Portati su ciascuna inquadratura e premi ‘Qui’, " +
                             "oppure svuota la lista e memorizzali di nuovo.",
+                    )
+                }
+                if (sequence.waypoints.any { it.previewJpegBase64 == null }) {
+                    Hint(
+                        "I punti senza miniatura non possono essere verificati con i punti di " +
+                            "controllo. Portati sulla loro inquadratura e premi ‘Qui’.",
                     )
                 }
                 sequence.waypoints.chunked(2).forEach { pair ->
@@ -466,12 +477,24 @@ private fun WaypointTile(
             )
         }
 
-        WaypointCompass(
-            pan = waypoint.pan,
-            tilt = waypoint.tilt,
-            color = color,
-            modifier = Modifier.align(Alignment.CenterHorizontally).size(84.dp),
-        )
+        val previewBitmap = remember(waypoint.previewJpegBase64) {
+            waypoint.previewJpeg()?.let { bytes -> BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+        }
+        if (previewBitmap != null) {
+            Image(
+                bitmap = previewBitmap.asImageBitmap(),
+                contentDescription = "Inquadratura salvata per ${waypoint.name}",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.align(Alignment.CenterHorizontally).size(84.dp),
+            )
+        } else {
+            WaypointCompass(
+                pan = waypoint.pan,
+                tilt = waypoint.tilt,
+                color = color,
+                modifier = Modifier.align(Alignment.CenterHorizontally).size(84.dp),
+            )
+        }
 
         Text(
             text = "%.1f°  /  %.1f°".format(waypoint.pan, waypoint.tilt),
@@ -483,6 +506,13 @@ private fun WaypointTile(
         if (waypoint.needsRecapture) {
             Text(
                 text = "da rimemorizzare",
+                style = MaterialTheme.typography.labelSmall,
+                color = Luna.Rec,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
+        } else if (waypoint.previewJpegBase64 == null) {
+            Text(
+                text = "senza foto di controllo",
                 style = MaterialTheme.typography.labelSmall,
                 color = Luna.Rec,
                 modifier = Modifier.align(Alignment.CenterHorizontally),

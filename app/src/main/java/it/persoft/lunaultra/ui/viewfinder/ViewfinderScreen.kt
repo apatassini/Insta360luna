@@ -280,7 +280,9 @@ fun ViewfinderScreen(
                     onExposureBias = viewModel::setPhotoExposureBias,
                     onWhiteBalance = viewModel::setPhotoWhiteBalance,
                     onClose = { photoSheetOpen = false },
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 12.dp, bottom = 12.dp),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
                 )
             }
 

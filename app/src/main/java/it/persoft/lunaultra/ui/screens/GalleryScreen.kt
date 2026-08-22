@@ -199,6 +199,7 @@ fun GalleryScreen(viewModel: MainViewModel) {
                             favorite = item.path in favorites,
                             progress = gallery.downloads[item.path],
                             loadThumbnail = { viewModel.thumbnail(item) },
+                            reloadKey = gallery.thumbnailsVersion,
                             onClick = {
                                 if (gallery.selectionMode) viewModel.toggleSelection(item)
                                 else viewModel.openViewer(item)
@@ -298,10 +299,11 @@ private fun MediaTile(
     favorite: Boolean,
     progress: Float?,
     loadThumbnail: suspend () -> Bitmap?,
+    reloadKey: Int,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
-    val thumbnail by produceState<Bitmap?>(initialValue = null, item.path) {
+    val thumbnail by produceState<Bitmap?>(initialValue = null, item.path, reloadKey) {
         value = runCatching { loadThumbnail() }.getOrNull()
     }
     val shape = RoundedCornerShape(10.dp)

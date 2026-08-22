@@ -141,7 +141,16 @@ Sull'elenco si applicano tre regole che l'occhio non vede ma che cambiano cosa c
 - un **DNG** ha accanto il JPG dello stesso scatto, che è ciò che il telefono sa disegnare.
 
 Le miniature costano: una foto della Luna Ultra pesa decine di megabyte e scaricarla per
-disegnare un quadratino da 112 punti sarebbe assurdo. L'app le prende, **in quest'ordine**:
+disegnare un quadratino da 112 punti sarebbe assurdo.
+
+La strada buona, quando c'è, è l'**API OSC**: `camera.listFiles` con `maxThumbSize` restituisce
+insieme all'elenco una miniatura in base64 per ogni file, quaranta per richiesta. È lo standard
+che Insta360 implementa sulle camere a 360° — la Luna Ultra non è nell'elenco ufficiale, quindi
+l'app ci prova una volta all'apertura della galleria e, se non risponde, non ci torna più. Le
+voci si legano ai file **per nome**, perché OSC riporta i percorsi come `/DCIM/...` mentre
+l'elenco della sessione di controllo li dà come `/storage_internal/DCIM/...`.
+
+Per quello che resta scoperto, in quest'ordine:
 
 1. l'**anteprima EXIF** dentro il file, leggendone solo i primi 512 KB e chiudendo la
    connessione. Non si chiede un intervallo di byte con `Range` — c'è chi risponde 416 e chi

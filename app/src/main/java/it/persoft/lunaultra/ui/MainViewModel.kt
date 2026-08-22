@@ -110,6 +110,11 @@ data class GalleryState(
     val queueTotal: Int = 0,
     val queueDone: Int = 0,
     val loadedAtMs: Long = 0L,
+    /**
+     * Cambia quando arrivano miniature nuove in blocco. Le caselle si ridisegnano solo se
+     * qualcosa nel loro stato cambia, e un file comparso in cache non è qualcosa che vedono.
+     */
+    val thumbnailsVersion: Int = 0,
 ) {
     val selectionMode: Boolean get() = selected.isNotEmpty()
     val photos: Int get() = items.count { !it.isVideo }
@@ -211,6 +216,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pollJob: Job? = null
     private var viewerJob: Job? = null
     private var prefetchJob: Job? = null
+    private var warmJob: Job? = null
     private var probeJob: Job? = null
     private var monitorJob: Job? = null
 
@@ -1048,6 +1054,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = if (items.isEmpty()) "Nessun file sulla camera" else null,
                         loadedAtMs = System.currentTimeMillis(),
                     )
+                    warmThumbnails(items)
                 }
                 .onFailure {
                     _gallery.value = _gallery.value.copy(
@@ -1055,6 +1062,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = "Elenco non riuscito: ${it.message}",
                     )
                 }
+        }
+    }
+
+    /**
+     * Chiede alla camera tutte le miniature in blocco, se sa darle.
+     *
+     * Gira dopo l'elenco e in parallelo alla griglia: le caselle intanto si arrangiano da sole,
+     * e quando il blocco arriva si ridisegnano con quello che è stato messo in cache.
+     */
+    private fun warmThumbnails(items: List<MediaItem>) {
+        warmJob?.cancel()
+        warmJob = viewModelScope.launch {
+            val stored = container.media.warmThumbnails(items)
+            if (stored > 0) {
+                _gallery.value = _gallery.value.copy(
+                    thumbnailsVersion = _gallery.value.thumbnailsVersion + 1,
+                )
+            }
         }
     }
 

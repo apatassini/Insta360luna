@@ -89,6 +89,10 @@ class MediaRepository(
     @Volatile
     private var exifReports = 0
 
+    /** OSC provato e non disponibile: si chiede una volta sola per sessione. */
+    @Volatile
+    private var oscUnavailable = false
+
     /**
      * I file di cui non si è riusciti a fare una miniatura.
      *
@@ -173,6 +177,54 @@ class MediaRepository(
             thumbsDir.mkdirs()
             FileOutputStream(thumbFile(item)).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
         }
+    }
+
+    /**
+     * Si fa dare dalla camera tutte le miniature in blocco, con l'API OSC.
+     *
+     * `camera.listFiles` restituisce, insieme all'elenco, una miniatura in base64 per ogni file:
+     * una richiesta porta a casa quaranta anteprime già pronte, invece di quaranta scaricamenti
+     * da venti megabyte l'uno. È la strada giusta quando c'è, e su una camera che non parla OSC
+     * fallisce alla prima richiesta e non viene più tentata.
+     *
+     * Le voci si legano ai nostri file **per nome**: OSC riporta i percorsi come `/DCIM/...`
+     * mentre l'elenco della sessione di controllo li dà come `/storage_internal/DCIM/...`, e
+     * confrontare i percorsi non troverebbe niente.
+     *
+     * Restituisce quante miniature ha messo in cache.
+     */
+    suspend fun warmThumbnails(items: List<MediaItem>): Int = withContext(Dispatchers.IO) {
+        if (oscUnavailable || items.isEmpty()) return@withContext 0
+        val byName = items.associateBy { it.name }
+        var stored = 0
+        var start = 0
+        while (start < items.size) {
+            val page = OscMedia.listFiles(
+                host = host,
+                binder = binder,
+                startPosition = start,
+                entryCount = OSC_PAGE_SIZE,
+                maxThumbSize = THUMBNAIL_SIZE,
+                log = log,
+            )
+            if (page == null) {
+                oscUnavailable = true
+                return@withContext stored
+            }
+            if (page.isEmpty()) break
+            for (entry in page) {
+                val item = byName[entry.name] ?: continue
+                val bytes = entry.thumbnail ?: continue
+                val bitmap = decodeBytes(bytes, THUMBNAIL_SIZE) ?: continue
+                saveThumbnail(item, bitmap)
+                memory.put(item.path, bitmap)
+                withoutThumbnail.remove(item.path)
+                stored++
+            }
+            start += page.size
+        }
+        if (stored > 0) log.info("Miniature ricevute dalla camera con OSC: $stored")
+        stored
     }
 
     private suspend fun fromCameraThumbnail(item: MediaItem): ByteArray? {
@@ -591,6 +643,9 @@ class MediaRepository(
 
         /** Quanti file scaricati tenere in cache locale. */
         const val CACHE_KEEP_FILES = 10
+
+        /** Quante voci per richiesta OSC: ognuna porta con sé la sua miniatura in base64. */
+        const val OSC_PAGE_SIZE = 40
         const val CONNECT_TIMEOUT_MS = 8_000
         const val READ_TIMEOUT_MS = 20_000
         const val GALLERY_FOLDER = "Luna Ultra"

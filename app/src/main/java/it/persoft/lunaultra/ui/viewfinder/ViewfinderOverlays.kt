@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -103,8 +104,9 @@ fun RunCard(
 /**
  * Invito a connettersi, al centro dell'anteprima nera.
  *
- * Senza camera collegata non c'è niente da inquadrare: mettere qui l'unico comando che ha senso
- * evita di far cercare il pulsante fra i comandi di ripresa, che in quel momento non fanno nulla.
+ * È una pastiglia e non un riquadro: senza camera non c'è niente da inquadrare, ma coprire
+ * mezzo schermo — e i comandi del gimbal che ci stanno sotto — per dire una cosa sola è troppo.
+ * L'indirizzo sta sotto in piccolo, perché serve solo quando qualcosa non va.
  */
 @Composable
 fun ConnectCta(
@@ -114,51 +116,47 @@ fun ConnectCta(
     modifier: Modifier = Modifier,
 ) {
     val busy = connection == ConnectionState.CONNECTING || connection == ConnectionState.HANDSHAKE
-    GlassPanel(modifier = modifier.width(280.dp), contentPadding = 18.dp, verticalSpacing = 12.dp) {
-        Box(
-            modifier = Modifier
-                .align(Alignment.CenterHorizontally)
-                .size(56.dp)
-                .background(Luna.Accent.copy(alpha = 0.14f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
+    val failed = connection == ConnectionState.ERROR
+    val shape = RoundedCornerShape(26.dp)
+
+    Row(
+        modifier = modifier
+            .background(Luna.Glass, shape)
+            .border(1.dp, if (failed) Luna.Warn.copy(alpha = 0.6f) else Luna.GlassBorder, shape)
+            .clickable(enabled = !busy, onClick = onConnect)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                strokeWidth = 2.dp,
+                color = Luna.Accent,
+            )
+        } else {
             Icon(
-                imageVector = if (connection == ConnectionState.ERROR) LunaIcons.Warning else LunaIcons.Disconnected,
+                imageVector = if (failed) LunaIcons.Warning else LunaIcons.Connected,
                 contentDescription = null,
-                tint = if (connection == ConnectionState.ERROR) Luna.Warn else Luna.Accent,
-                modifier = Modifier.size(26.dp),
+                tint = if (failed) Luna.Warn else Luna.Accent,
+                modifier = Modifier.size(20.dp),
             )
         }
-        Text(
-            text = if (busy) "Connessione in corso…" else "Camera non connessa",
-            style = MaterialTheme.typography.titleMedium,
-            color = Color.White,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text(
-            text = "Collega il telefono alla rete Wi-Fi della Luna Ultra, poi connetti.\nCamera: $host",
-            style = MaterialTheme.typography.bodySmall,
-            color = Luna.OnSurfaceDim,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Button(
-            onClick = onConnect,
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            if (busy) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
-                Text(text = "  Attendi…")
-            } else {
-                Icon(LunaIcons.Connected, contentDescription = null, modifier = Modifier.size(18.dp))
-                Text(text = "  Connetti")
-            }
+        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(
+                text = when {
+                    busy -> "Connessione…"
+                    failed -> "Riprova a connetterti"
+                    else -> "Connetti alla camera"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = Color.White,
+            )
+            Text(
+                text = host,
+                style = MaterialTheme.typography.labelSmall,
+                color = Luna.OnSurfaceDim,
+            )
         }
     }
 }

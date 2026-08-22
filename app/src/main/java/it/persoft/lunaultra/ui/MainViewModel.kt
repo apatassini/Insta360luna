@@ -10,6 +10,7 @@ import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
+import it.persoft.lunaultra.data.PhotoSettings
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.preview.PreviewState
@@ -157,6 +158,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _captureMode = MutableStateFlow(CaptureMode.VIDEO)
     val captureMode: StateFlow<CaptureMode> = _captureMode
 
+    private val _wifiConnecting = MutableStateFlow(false)
+    val wifiConnecting: StateFlow<Boolean> = _wifiConnecting
+
+    private val _photoCountdownSeconds = MutableStateFlow(0)
+    val photoCountdownSeconds: StateFlow<Int> = _photoCountdownSeconds
+
     /**
      * Istante in cui è partita la ripresa, per il cronometro dell'HUD. Zero = ferma.
      *
@@ -212,6 +219,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var wantConnected = false
     private var reconnectAttempts = 0
     private var reconnectJob: Job? = null
+    private var connectionJob: Job? = null
+    private var autoConnectStarted = false
+    private var photoCountdownJob: Job? = null
 
     private var pollJob: Job? = null
     private var viewerJob: Job? = null
@@ -255,16 +265,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---------------------------------------------------------------- connessione
 
-    fun connect() {
+    /** Tentativo unico all'apertura: se la Luna non c'è, l'app resta semplicemente pronta. */
+    fun autoConnect() {
+        if (autoConnectStarted) return
+        autoConnectStarted = true
+        beginConnect(showFailure = false)
+    }
+
+    fun connect() = beginConnect(showFailure = true)
+
+    private fun beginConnect(showFailure: Boolean) {
+        if (connectionState.value == ConnectionState.CONNECTED) return
+        if (connectionJob?.isActive == true) return
         wantConnected = true
         reconnectAttempts = 0
-        viewModelScope.launch {
-            container.log.info("Acquisizione rete Wi-Fi…")
-            container.wifiBinder.acquire()
+        connectionJob = viewModelScope.launch {
+            _wifiConnecting.value = true
+            container.log.info("Ricerca della rete Luna Ultra…")
+            val network = container.wifiBinder.acquire()
+            _wifiConnecting.value = false
+            if (network == null) {
+                wantConnected = false
+                if (showFailure) showMessage("Rete Wi-Fi Luna Ultra non trovata")
+                return@launch
+            }
             container.session.connect()
-                .onFailure { showMessage("Connessione fallita: ${it.message}") }
+                .onFailure {
+                    if (showFailure) showMessage("Connessione fallita: ${it.message}")
+                    else container.log.warn("Connessione automatica non riuscita: ${it.message}")
+                }
                 .onSuccess {
-                    showMessage("Connesso a ${settings.value.host}")
+                    if (showFailure) showMessage("Luna Ultra connessa")
                     refreshStatus()
                     syncCameraMode()
                 }
@@ -275,6 +306,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         wantConnected = false
         reconnectJob?.cancel()
         reconnectJob = null
+        connectionJob?.cancel()
+        connectionJob = null
+        photoCountdownJob?.cancel()
+        photoCountdownJob = null
+        _photoCountdownSeconds.value = 0
+        _wifiConnecting.value = false
         viewModelScope.launch {
             container.engine.stop("Disconnessione")
             container.session.disconnect()
@@ -653,6 +690,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * una registrazione da avviare o fermare, oppure la sequenza sui punti memorizzati.
      */
     fun onShutter() {
+        if (photoCountdownJob?.isActive == true) {
+            photoCountdownJob?.cancel()
+            photoCountdownJob = null
+            _photoCountdownSeconds.value = 0
+            showMessage("Timer annullato")
+            return
+        }
         if (connectionState.value != ConnectionState.CONNECTED) {
             showMessage("Connettiti alla camera prima di scattare")
             return
@@ -660,6 +704,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val mode = _captureMode.value
         if (mode.usesSequence) {
             if (runState.value.running) emergencyStop() else startRun()
+            return
+        }
+        val timerSeconds = settings.value.photo.timerSeconds
+        if (mode.cameraMode.isPhoto && timerSeconds > 0) {
+            photoCountdownJob = viewModelScope.launch {
+                for (second in timerSeconds downTo 1) {
+                    _photoCountdownSeconds.value = second
+                    delay(1_000)
+                }
+                _photoCountdownSeconds.value = 0
+                ensureCameraMode(mode)
+                shoot(mode)
+                photoCountdownJob = null
+            }
             return
         }
         viewModelScope.launch {
@@ -706,6 +764,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.commands.setPanoAspect(settings.value.panoAspect)
                 .onFailure { container.log.warn("Proporzione panoramica non accettata: ${it.message}") }
         }
+        if (applied && mode.cameraMode.isPhoto) {
+            container.commands.applyPhotoSettings(settings.value.photo, mode.cameraMode)
+                .onFailure { container.log.warn("Regolazioni foto non accettate: ${it.message}") }
+        }
         return applied
     }
 
@@ -751,6 +813,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setHost(host: String) = container.settingsStore.update { it.copy(host = host.trim()) }
 
     fun setPort(port: Int) = container.settingsStore.update { it.copy(port = port) }
+
+    fun setPhotoTimer(seconds: Int) = updatePhotoSettings { it.copy(timerSeconds = seconds.coerceIn(0, 20)) }
+
+    fun setPhotoProMode(enabled: Boolean) = updatePhotoSettings { it.copy(proMode = enabled) }
+
+    fun setPhotoRawCapture(type: Int) = updatePhotoSettings {
+        it.copy(rawCaptureType = type.coerceIn(LunaProtocolCodes.RawCaptureType.OFF, LunaProtocolCodes.RawCaptureType.DNG))
+    }
+
+    fun setPhotoBrightness(value: Int) = updatePhotoSettings { it.copy(brightness = value.coerceIn(-2, 2)) }
+
+    fun setPhotoExposureBias(thirds: Int) =
+        updatePhotoSettings { it.copy(exposureBiasThirds = thirds.coerceIn(-6, 6)) }
+
+    fun setPhotoWhiteBalance(kelvin: Int) = updatePhotoSettings {
+        it.copy(whiteBalanceKelvin = if (kelvin == 0) 0 else kelvin.coerceIn(2_000, 10_000))
+    }
+
+    private fun updatePhotoSettings(transform: (PhotoSettings) -> PhotoSettings) {
+        container.settingsStore.update { it.copy(photo = transform(it.photo)) }
+        val mode = _captureMode.value
+        if (connectionState.value != ConnectionState.CONNECTED || !mode.cameraMode.isPhoto) return
+        viewModelScope.launch {
+            container.commands.applyPhotoSettings(settings.value.photo, mode.cameraMode)
+                .onFailure { showMessage("Regolazione non accettata: ${it.message}") }
+        }
+    }
 
     fun updateGimbal(transform: (GimbalSettings) -> GimbalSettings) =
         container.settingsStore.update { it.copy(gimbal = transform(it.gimbal)) }

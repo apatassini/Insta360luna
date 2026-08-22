@@ -180,12 +180,33 @@ object LunaProtocolCodes {
 
     /** Valori di `insta360.messages.PhotographyOptionType` usati dall'app. */
     object PhotographyOptionType {
+        const val BRIGHTNESS = 2
+        const val EXPOSURE_BIAS = 7
+        const val WHITE_BALANCE = 13
+        const val RAW_CAPTURE_TYPE = 25
+        const val WHITE_BALANCE_VALUE = 39
         const val PANO_ASPECT = 98
     }
 
     /** Numeri di campo di `insta360.messages.PhotographyOptions` usati dall'app. */
     object PhotographyOptionsField {
+        const val BRIGHTNESS = 2
+        const val EXPOSURE_BIAS = 7
+        const val WHITE_BALANCE = 13
+        const val RAW_CAPTURE_TYPE = 25
+        const val WHITE_BALANCE_VALUE = 39
         const val PANO_ASPECT = 98
+    }
+
+    object WhiteBalance {
+        const val AUTO = 0
+        /** La camera usa il preset come flag e legge la temperatura reale dal campo 39. */
+        const val MANUAL_KELVIN = 3
+    }
+
+    object RawCaptureType {
+        const val OFF = 0
+        const val DNG = 1
     }
 
     /**

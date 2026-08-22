@@ -1,8 +1,10 @@
 package it.persoft.lunaultra
 
 import it.persoft.lunaultra.camera.CameraMode
+import it.persoft.lunaultra.data.PhotoSettings
 import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
+import it.persoft.lunaultra.protocol.ProtoField
 import it.persoft.lunaultra.protocol.ProtoReader
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -69,6 +71,54 @@ class CaptureModeTest {
         assertEquals(98, reader.intOrNull(1))
         assertEquals(LunaProtocolCodes.PanoAspect.RATIO_2_1, reader.intOrNull(2, 98))
         assertEquals(LunaProtocolCodes.FunctionMode.NORMAL_POWER_PANO_IMAGE, reader.intOrNull(3))
+    }
+
+    @Test
+    fun `le regolazioni pro viaggiano insieme e rispettano i campi con segno`() {
+        val body = LunaMessages.setPhotoControls(
+            PhotoSettings(
+                proMode = true,
+                rawCaptureType = LunaProtocolCodes.RawCaptureType.DNG,
+                brightness = -2,
+                exposureBiasThirds = 3,
+                whiteBalanceKelvin = 6_500,
+            ),
+            LunaProtocolCodes.FunctionMode.NORMAL_IMAGE,
+        )
+        val reader = ProtoReader(body)
+        val optionTypes = reader.fields()
+            .filterIsInstance<ProtoField.VarInt>()
+            .filter { it.number == 1 }
+            .map { it.asInt }
+
+        assertEquals(listOf(2, 7, 13, 25, 39), optionTypes)
+        assertEquals(-2, (reader.find(2, 2) as ProtoField.VarInt).asSInt)
+        assertEquals(3, (reader.find(2, 7) as ProtoField.VarInt).asSInt)
+        assertEquals(LunaProtocolCodes.WhiteBalance.MANUAL_KELVIN, reader.intOrNull(2, 13))
+        assertEquals(LunaProtocolCodes.RawCaptureType.DNG, reader.intOrNull(2, 25))
+        assertEquals(6_500, reader.intOrNull(2, 39))
+        assertEquals(LunaProtocolCodes.FunctionMode.NORMAL_IMAGE, reader.intOrNull(3))
+    }
+
+    @Test
+    fun `auto azzera immagine e bilanciamento ma conserva il formato raw`() {
+        val body = LunaMessages.setPhotoControls(
+            PhotoSettings(
+                proMode = false,
+                rawCaptureType = LunaProtocolCodes.RawCaptureType.DNG,
+                brightness = 2,
+                exposureBiasThirds = -6,
+                whiteBalanceKelvin = 7_500,
+            ),
+            LunaProtocolCodes.FunctionMode.NORMAL_IMAGE,
+        )
+        val reader = ProtoReader(body)
+
+        assertEquals(0, (reader.find(2, 2) as ProtoField.VarInt).asSInt)
+        assertEquals(0, (reader.find(2, 7) as ProtoField.VarInt).asSInt)
+        assertEquals(LunaProtocolCodes.WhiteBalance.AUTO, reader.intOrNull(2, 13))
+        assertEquals(0, reader.intOrNull(2, 39))
+        assertEquals(LunaProtocolCodes.RawCaptureType.DNG, reader.intOrNull(2, 25))
     }
 
     /**

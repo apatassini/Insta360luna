@@ -108,7 +108,11 @@ fun CaptureBar(
                 )
                 HudIconButton(
                     icon = LunaIcons.Tune,
-                    contentDescription = "Sequenza e tempi",
+                    contentDescription = if (selected.cameraMode.isPhoto && !selected.usesSequence) {
+                        "Timer e regolazioni foto"
+                    } else {
+                        "Sequenza e tempi"
+                    },
                     onClick = onOpenSequence,
                     size = 42.dp,
                 )
@@ -166,7 +170,11 @@ fun CaptureBar(
                 ) {
                     HudIconButton(
                         icon = LunaIcons.Tune,
-                        contentDescription = "Sequenza e tempi",
+                        contentDescription = if (selected.cameraMode.isPhoto && !selected.usesSequence) {
+                            "Timer e regolazioni foto"
+                        } else {
+                            "Sequenza e tempi"
+                        },
                         onClick = onOpenSequence,
                         size = 44.dp,
                     )

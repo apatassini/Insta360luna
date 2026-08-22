@@ -1,5 +1,7 @@
 package it.persoft.lunaultra.protocol
 
+import it.persoft.lunaultra.data.PhotoSettings
+
 /**
  * Composizione dei corpi protobuf dei comandi.
  *
@@ -74,6 +76,37 @@ object LunaMessages {
             .message(2) { int32(field, value) }
             .int32(3, functionMode)
             .toByteArray()
+
+    /**
+     * Le regolazioni del pannello Foto in una sola richiesta. Riduce il ritardo prima dello
+     * scatto e impedisce che modalità e singole opzioni si applichino in ordine parziale.
+     */
+    fun setPhotoControls(value: PhotoSettings, functionMode: Int): ByteArray {
+        val manual = value.proMode
+        val kelvin = if (manual) value.whiteBalanceKelvin else 0
+        return ProtoWriter()
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.BRIGHTNESS)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.EXPOSURE_BIAS)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.WHITE_BALANCE)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.RAW_CAPTURE_TYPE)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.WHITE_BALANCE_VALUE)
+            .message(2) {
+                sint32(LunaProtocolCodes.PhotographyOptionsField.BRIGHTNESS, if (manual) value.brightness else 0)
+                sint32(
+                    LunaProtocolCodes.PhotographyOptionsField.EXPOSURE_BIAS,
+                    if (manual) value.exposureBiasThirds else 0,
+                )
+                int32(
+                    LunaProtocolCodes.PhotographyOptionsField.WHITE_BALANCE,
+                    if (kelvin == 0) LunaProtocolCodes.WhiteBalance.AUTO
+                    else LunaProtocolCodes.WhiteBalance.MANUAL_KELVIN,
+                )
+                int32(LunaProtocolCodes.PhotographyOptionsField.RAW_CAPTURE_TYPE, value.rawCaptureType)
+                int32(LunaProtocolCodes.PhotographyOptionsField.WHITE_BALANCE_VALUE, kelvin)
+            }
+            .int32(3, functionMode)
+            .toByteArray()
+    }
 
     /**
      * `StartLiveStream`, con i campi:

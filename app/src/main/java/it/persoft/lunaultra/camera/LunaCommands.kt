@@ -2,6 +2,7 @@ package it.persoft.lunaultra.camera
 
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
+import it.persoft.lunaultra.data.PhotoSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
@@ -168,6 +169,13 @@ class LunaCommands(
                 value = aspect,
                 functionMode = LunaProtocolCodes.FunctionMode.NORMAL_POWER_PANO_IMAGE,
             ),
+        ).map { }
+
+    /** Timer escluso: quello è gestito localmente per mostrare un conto alla rovescia preciso. */
+    suspend fun applyPhotoSettings(value: PhotoSettings, mode: CameraMode): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setPhotoControls(value, mode.functionMode),
         ).map { }
 
     /** In che modalità è adesso la camera, letta dalle due sotto-modalità che riporta. */

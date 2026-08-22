@@ -75,12 +75,19 @@ fun ViewfinderScreen(
     val moving by viewModel.gimbalMoving.collectAsState()
     val captureMode by viewModel.captureMode.collectAsState()
     val recordingSince by viewModel.recordingSinceMs.collectAsState()
+    val wifiConnecting by viewModel.wifiConnecting.collectAsState()
+    val photoCountdown by viewModel.photoCountdownSeconds.collectAsState()
 
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var gridVisible by rememberSaveable { mutableStateOf(false) }
     var fillScreen by rememberSaveable { mutableStateOf(false) }
     var dockVisible by rememberSaveable { mutableStateOf(true) }
     var modeSheetOpen by remember { mutableStateOf(false) }
+    var photoSheetOpen by remember { mutableStateOf(false) }
+
+    LaunchedEffect(captureMode) {
+        if (!captureMode.cameraMode.isPhoto || captureMode.usesSequence) photoSheetOpen = false
+    }
 
     val connected = connection == ConnectionState.CONNECTED
     val recording = recordingSince > 0L || status.recording == true
@@ -101,7 +108,7 @@ fun ViewfinderScreen(
 
     val sequenceReady = sequence.isRunnable
     val shutterReady = connected && (!captureMode.usesSequence || sequenceReady || run.running)
-    val shutterActive = if (captureMode.usesSequence) run.running else recording
+    val shutterActive = if (captureMode.usesSequence) run.running else recording || photoCountdown > 0
     val shutterProgress = if (captureMode.usesSequence && run.running) run.overallProgress else 0f
 
     BoxWithConstraints(modifier = modifier.fillMaxSize().background(Luna.Bg)) {
@@ -147,7 +154,11 @@ fun ViewfinderScreen(
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onTap = {
-                            if (modeSheetOpen) modeSheetOpen = false else chromeVisible = !chromeVisible
+                            when {
+                                modeSheetOpen -> modeSheetOpen = false
+                                photoSheetOpen -> photoSheetOpen = false
+                                else -> chromeVisible = !chromeVisible
+                            }
                         },
                     )
                 },
@@ -235,7 +246,7 @@ fun ViewfinderScreen(
             when {
                 !connected -> ConnectCta(
                     connection = connection,
-                    host = settings.host,
+                    searchingWifi = wifiConnecting,
                     onConnect = viewModel::connect,
                     modifier = Modifier.align(Alignment.Center),
                 )
@@ -252,6 +263,24 @@ fun ViewfinderScreen(
                     mode = captureMode,
                     onStop = viewModel::emergencyStop,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                )
+            }
+
+            if (photoCountdown > 0) {
+                PhotoCountdown(photoCountdown, modifier = Modifier.align(Alignment.Center))
+            }
+
+            if (photoSheetOpen && chromeVisible) {
+                PhotoControlsSheet(
+                    settings = settings.photo,
+                    onProMode = viewModel::setPhotoProMode,
+                    onTimer = viewModel::setPhotoTimer,
+                    onRawCapture = viewModel::setPhotoRawCapture,
+                    onBrightness = viewModel::setPhotoBrightness,
+                    onExposureBias = viewModel::setPhotoExposureBias,
+                    onWhiteBalance = viewModel::setPhotoWhiteBalance,
+                    onClose = { photoSheetOpen = false },
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 12.dp, bottom = 12.dp),
                 )
             }
 
@@ -305,7 +334,14 @@ fun ViewfinderScreen(
                     onShutter = viewModel::onShutter,
                     waypointCount = sequence.waypoints.size,
                     onCaptureWaypoint = viewModel::captureWaypoint,
-                    onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
+                    onOpenSequence = {
+                        if (captureMode.cameraMode.isPhoto && !captureMode.usesSequence) {
+                            photoSheetOpen = !photoSheetOpen
+                            modeSheetOpen = false
+                        } else {
+                            onOpenPanel(Panel.SEQUENCE)
+                        }
+                    },
                     onOpenGallery = { onOpenPanel(Panel.GALLERY) },
                     interpolationLabel = if (sequence.interpolation == InterpolationMode.SMOOTH) "SMTH" else "LIN",
                     onToggleInterpolation = {
@@ -314,7 +350,10 @@ fun ViewfinderScreen(
                             else InterpolationMode.SMOOTH
                         )
                     },
-                    onOpenModeSheet = { modeSheetOpen = !modeSheetOpen },
+                    onOpenModeSheet = {
+                        modeSheetOpen = !modeSheetOpen
+                        photoSheetOpen = false
+                    },
                     vertical = landscape,
                 )
             }

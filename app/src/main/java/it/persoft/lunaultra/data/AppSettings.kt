@@ -48,6 +48,23 @@ data class GimbalSettings(
     val isControlCodeKnown: Boolean get() = controlCode != 0
 }
 
+/** Regolazioni fotografiche essenziali mostrate nel mirino. */
+@Serializable
+data class PhotoSettings(
+    /** Ritardo gestito dall'app prima di inviare lo scatto. */
+    val timerSeconds: Int = 0,
+    /** Auto azzera le regolazioni manuali senza dimenticare le ultime scelte Pro. */
+    val proMode: Boolean = false,
+    /** `RAW_CAPTURE_TYPE_OFF` = JPG, `RAW_CAPTURE_TYPE_DNG` = JPG + DNG. */
+    val rawCaptureType: Int = LunaProtocolCodes.RawCaptureType.OFF,
+    /** Scala della camera: -2…+2. */
+    val brightness: Int = 0,
+    /** Compensazione in terzi di stop: -6…+6 corrisponde a -2…+2 EV. */
+    val exposureBiasThirds: Int = 0,
+    /** Zero = automatico, altrimenti temperatura in kelvin. */
+    val whiteBalanceKelvin: Int = 0,
+)
+
 @Serializable
 data class AppSettings(
     val host: String = "192.168.42.1",
@@ -65,6 +82,8 @@ data class AppSettings(
      * sotto-modalità e questa è la scelta che la distingue.
      */
     val panoAspect: Int = LunaProtocolCodes.PanoAspect.SPHERE_360,
+
+    val photo: PhotoSettings = PhotoSettings(),
 
     /**
      * Modalità timelapse usata dai comandi `*_TIMELAPSE`

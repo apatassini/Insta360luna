@@ -26,8 +26,8 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent {
             LunaTheme {
-                AskNotificationPermission()
                 val vm: MainViewModel = viewModel()
+                AskRuntimePermissions(onReady = vm::autoConnect)
                 LunaApp(vm)
             }
         }
@@ -40,13 +40,25 @@ class MainActivity : ComponentActivity() {
  * nella tendina che dice che c'è.
  */
 @Composable
-private fun AskNotificationPermission() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+private fun AskRuntimePermissions(onReady: () -> Unit) {
     val context = LocalContext.current
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        // Anche se le notifiche vengono negate, la connessione Wi-Fi può partire. Se invece
+        // manca il permesso Wi-Fi, il binder restituisce un errore leggibile e il tasto resta.
+        onReady()
+    }
     LaunchedEffect(Unit) {
-        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!granted) launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        val requested = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }
+        val missing = requested.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) onReady() else launcher.launch(missing.toTypedArray())
     }
 }

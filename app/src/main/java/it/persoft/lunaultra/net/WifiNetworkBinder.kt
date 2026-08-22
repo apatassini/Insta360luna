@@ -5,6 +5,11 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
+import android.net.wifi.WifiNetworkSpecifier
+import android.os.Build
+import android.os.PatternMatcher
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -23,30 +28,60 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
     private val appContext = context.applicationContext
     private val connectivityManager =
         appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    private val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
     @Volatile
     private var network: Network? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
 
-    /** Richiede la rete Wi-Fi e la mantiene registrata finché non si chiama [release]. */
-    suspend fun acquire(timeoutMs: Long = 8_000): Network? {
+    /**
+     * Cerca direttamente l'access point della Luna e lo mantiene registrato fino a [release].
+     *
+     * Non c'è un elenco di reti dell'app: il selettore accetta soltanto SSID che iniziano con
+     * "Luna Ultra". Android può chiedere una conferma di sistema la prima volta, ma le aperture
+     * successive riutilizzano l'autorizzazione già data.
+     */
+    suspend fun acquire(timeoutMs: Long = 15_000): Network? {
         network?.let { return it }
-        val request = NetworkRequest.Builder()
+
+        currentLunaNetwork()?.let {
+            network = it
+            log.info("Wi-Fi Luna già connesso: ${ssidOf(it) ?: LUNA_SSID_PREFIX}")
+            return it
+        }
+
+        val builder = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .build()
+            // L'access point della camera è locale e non dichiara Internet.
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setNetworkSpecifier(
+                WifiNetworkSpecifier.Builder()
+                    .setSsidPattern(PatternMatcher(LUNA_SSID_PREFIX, PatternMatcher.PATTERN_PREFIX))
+                    .build()
+            )
+        }
+        val request = builder.build()
 
         val result = try {
             withTimeoutOrNull(timeoutMs) {
-                suspendCancellableCoroutine { cont: CancellableContinuation<Network> ->
+                suspendCancellableCoroutine { cont: CancellableContinuation<Network?> ->
                     val cb = object : ConnectivityManager.NetworkCallback() {
                         override fun onAvailable(available: Network) {
                             network = available
+                            log.info("Wi-Fi Luna acquisito: ${ssidOf(available) ?: LUNA_SSID_PREFIX}")
                             if (cont.isActive) cont.resume(available)
                         }
 
                         override fun onLost(lost: Network) {
                             if (network == lost) network = null
                             log.warn("Rete Wi-Fi persa")
+                        }
+
+                        override fun onUnavailable() {
+                            log.warn("Rete $LUNA_SSID_PREFIX non disponibile")
+                            if (cont.isActive) cont.resume(null)
                         }
                     }
                     callback = cb
@@ -58,8 +93,37 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
             log.warn("Permesso mancante per richiedere la rete Wi-Fi: ${e.message}")
             null
         }
-        if (result == null) log.warn("Nessuna rete Wi-Fi disponibile entro ${timeoutMs} ms")
+        if (result == null) {
+            callback?.let { runCatching { connectivityManager.unregisterNetworkCallback(it) } }
+            callback = null
+            log.warn("Nessuna rete Wi-Fi disponibile entro ${timeoutMs} ms")
+        }
         return result
+    }
+
+    /** Una rete Luna già attiva non deve passare da nessuna finestra di scelta. */
+    private fun currentLunaNetwork(): Network? = runCatching {
+        connectivityManager.allNetworks.firstOrNull { candidate ->
+            val capabilities = connectivityManager.getNetworkCapabilities(candidate) ?: return@firstOrNull false
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                ssidOf(candidate)?.startsWith(LUNA_SSID_PREFIX, ignoreCase = true) == true
+        }
+    }.getOrNull()
+
+    @Suppress("DEPRECATION")
+    private fun ssidOf(candidate: Network): String? {
+        val fromCapabilities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            connectivityManager.getNetworkCapabilities(candidate)
+                ?.transportInfo
+                ?.let { it as? WifiInfo }
+                ?.ssid
+        } else {
+            null
+        }
+        val raw = fromCapabilities ?: wifiManager.connectionInfo?.ssid
+        return raw
+            ?.removeSurrounding("\"")
+            ?.takeUnless { it == WifiManager.UNKNOWN_SSID }
     }
 
     /** Associa il socket alla rete Wi-Fi. Restituisce true se il binding è riuscito. */
@@ -99,5 +163,9 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
         }
         callback = null
         network = null
+    }
+
+    companion object {
+        const val LUNA_SSID_PREFIX = "Luna Ultra"
     }
 }

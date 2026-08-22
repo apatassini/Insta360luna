@@ -55,7 +55,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             .verticalScroll(rememberScrollState())
             .padding(vertical = 8.dp),
     ) {
-        SectionCard(title = "Camera", icon = LunaIcons.Connected) {
+        SectionCard(title = "Camera", icon = LunaIcons.Connected, accent = Luna.Ok) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     NumberField(
@@ -106,7 +106,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Anteprima", icon = LunaIcons.Video) {
+        SectionCard(title = "Anteprima", icon = LunaIcons.Video, accent = Luna.Movie) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 LabeledValue("Sorgente", preview.source.name.lowercase())
                 LabeledValue("Fotogrammi decodificati", preview.framesDecoded.toString())
@@ -131,7 +131,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Movimento manuale", icon = LunaIcons.Joystick) {
+        SectionCard(title = "Movimento manuale", icon = LunaIcons.Joystick, accent = Luna.PathLapse) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SliderRow(
                     label = "Velocità della levetta",
@@ -191,7 +191,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Timelapse della camera", icon = LunaIcons.Timelapse) {
+        SectionCard(title = "Timelapse della camera", icon = LunaIcons.Timelapse, accent = Luna.Lapse) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 NumberField(
                     label = "Modalità timelapse",
@@ -206,7 +206,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Su questa app", icon = LunaIcons.Info) {
+        SectionCard(title = "Su questa app", icon = LunaIcons.Info, accent = Luna.Photo) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Hint(
                     "Controllo non ufficiale della Insta360 Luna Ultra, basato sul protocollo " +

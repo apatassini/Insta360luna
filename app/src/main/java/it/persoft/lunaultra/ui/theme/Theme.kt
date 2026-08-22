@@ -43,6 +43,23 @@ object Luna {
     /** Sfumatura che stacca l'anteprima dai comandi in alto e in basso. */
     val ScrimStrong = Color(0xCC000000)
     val ScrimNone = Color(0x00000000)
+
+    /** Fasce dei comandi sopra e sotto l'anteprima: piene, non trasparenti. */
+    val Band = Color(0xFF0A0D12)
+
+    /**
+     * I colori delle modalità.
+     *
+     * Ogni modalità ne ha uno e lo porta ovunque: la voce accesa nella ghiera, l'anello del
+     * pulsante di scatto, il distintivo in alto. Il colore è ciò che si riconosce con la coda
+     * dell'occhio mentre si guarda l'inquadratura — una scritta va letta, un colore no.
+     */
+    val Photo = Color(0xFFFFD54F)
+    val Movie = Color(0xFFFF5A5F)
+    val Lapse = Color(0xFFFFA033)
+    val Path = Color(0xFF4FD1FF)
+    val PathLapse = Color(0xFFB388FF)
+    val Pano = Color(0xFF5CE6A5)
 }
 
 private val LunaColors = darkColorScheme(

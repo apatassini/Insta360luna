@@ -139,18 +139,30 @@ all'avvio.
 
 ## L'interfaccia
 
+L'impaginazione è quella di una camera: una fascia piena in alto, l'immagine al centro, una
+fascia in basso con lo scatto e la ghiera. Le fasce sono opache e l'anteprima ci sta dentro
+invece che sotto — un tocco sull'immagine le toglie e l'anteprima si allarga a tutto schermo.
+
 | Dove | Cosa |
 |---|---|
-| Riga in alto | connessione (si tocca per connettere), batteria, spazio libero, cronometro di registrazione, impostazioni e menu |
-| Colonna a destra | anteprima on/off, griglia dei terzi, adatta/riempi lo schermo, pannello del gimbal, nascondi i comandi |
-| Pannello in basso a sinistra | gimbal manuale: levetta analogica o croce direzionale, velocità, azzera posizione, memorizza punto, stop |
-| Barra in basso | ghiera delle modalità, memorizza punto, pulsante di scatto, pannello della sequenza |
+| Fascia in alto | connessione (si tocca per connettere), distintivo della modalità, anteprima on/off, griglia, impostazioni, menu ⋮ |
+| Sull'immagine, in alto a sinistra | spazio libero, batteria, gimbal pronto o no, cronometro di registrazione |
+| Sull'immagine, in basso | azzera posizione, pastiglia del tempo che conta nella modalità, comandi del gimbal |
+| Fascia in basso | memorizza punto · **pulsante di scatto** · sequenza e tempi · interpolazione, e sotto la ghiera delle modalità |
 | Al centro | invito a connettersi, oppure il motivo per cui l'anteprima è ancora nera |
 
-Ruotando il telefono i comandi di ripresa passano sul lato destro e il pannello del gimbal si
+Ogni modalità ha un colore e lo porta ovunque: la voce accesa nella ghiera, il pieno del
+pulsante di scatto, il distintivo in alto. Il colore si riconosce con la coda dell'occhio mentre
+si guarda l'inquadratura; una scritta va letta.
+
+Il tasto ☰ accanto alla ghiera apre l'elenco completo delle modalità con la descrizione di
+ognuna e l'avviso se non è utilizzabile — una modalità guidata senza punti memorizzati non parte.
+
+Ruotando il telefono la fascia di scatto passa sul lato destro e il pannello del gimbal si
 rimpicciolisce: in orizzontale l'altezza è il bene scarso.
 
-Tre pannelli si aprono sopra il mirino e si chiudono con Indietro: **Sequenza e punti**,
+Tre pannelli si aprono sopra il mirino e si chiudono con Indietro: **Sequenza e punti**
+(riepilogo a numeri grandi, punti in griglia con la bussola di dove guardano),
 **Impostazioni** (camera, anteprima, movimento manuale) e **Diagnostica**.
 
 ### Le modalità della ghiera

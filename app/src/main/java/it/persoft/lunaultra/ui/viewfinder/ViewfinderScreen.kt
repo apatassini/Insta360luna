@@ -1,22 +1,19 @@
 package it.persoft.lunaultra.ui.viewfinder
 
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -28,33 +25,37 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
+import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.Panel
 import it.persoft.lunaultra.ui.components.HudIconButton
-import it.persoft.lunaultra.ui.components.GlassPanel
+import it.persoft.lunaultra.ui.components.HudPill
 import it.persoft.lunaultra.ui.components.PreviewSurface
 import it.persoft.lunaultra.ui.formatClock
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 /**
- * Il mirino: l'anteprima a tutto schermo con i comandi sopra.
+ * Il mirino.
  *
- * L'impianto è quello di un'app di ripresa, e non per somiglianza: mentre si inquadra si guarda
- * l'immagine, quindi tutto ciò che serve dev'essere sopra l'immagine e raggiungibile con il
- * pollice, non dietro una scheda. Un tocco sull'anteprima nasconde i comandi e lascia solo
- * l'inquadratura — tranne l'avanzamento di una sequenza in corso, che resta perché il suo STOP
- * deve restare.
+ * L'impaginazione è quella di una camera: una fascia piena in alto con lo stato e le
+ * regolazioni, l'immagine al centro, una fascia in basso con lo scatto e la ghiera delle
+ * modalità. Le fasce sono opache e l'immagine ci sta dentro invece che sotto — così l'anteprima
+ * si legge per quello che è, senza icone che le galleggiano addosso.
  *
- * In orizzontale i comandi di ripresa passano sul lato destro: è il lato in cui sta la mano che
- * regge il telefono quando lo si gira, e in orizzontale l'altezza è il bene scarso.
+ * Un tocco sull'immagine toglie le fasce e l'anteprima si allarga a tutto schermo: è lo stesso
+ * gesto che si fa per controllare l'inquadratura prima di far partire una sequenza.
+ *
+ * In orizzontale la fascia di scatto passa a destra, dove arriva il pollice della mano che
+ * regge il telefono.
  */
 @Composable
 fun ViewfinderScreen(
@@ -78,6 +79,7 @@ fun ViewfinderScreen(
     var gridVisible by rememberSaveable { mutableStateOf(false) }
     var fillScreen by rememberSaveable { mutableStateOf(false) }
     var dockVisible by rememberSaveable { mutableStateOf(true) }
+    var modeSheetOpen by remember { mutableStateOf(false) }
 
     val connected = connection == ConnectionState.CONNECTED
     val recording = recordingSince > 0L || status.recording == true
@@ -101,91 +103,117 @@ fun ViewfinderScreen(
     val shutterActive = if (captureMode.usesSequence) run.running else recording
     val shutterProgress = if (captureMode.usesSequence && run.running) run.overallProgress else 0f
 
-    BoxWithConstraints(modifier = modifier.fillMaxSize().background(Color.Black)) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize().background(Luna.Bg)) {
         val landscape = maxWidth > maxHeight
+        val layoutDirection = LocalLayoutDirection.current
+        val insets = WindowInsets.safeDrawing.asPaddingValues()
+        val topInset = insets.calculateTopPadding()
+        val bottomInset = insets.calculateBottomPadding()
+        val endInset = insets.calculateEndPadding(layoutDirection)
+
+        // Le fasce spingono dentro l'immagine invece di coprirla; quando spariscono, l'anteprima
+        // si riprende lo schermo con un'animazione sola.
+        val topPad by animateDpAsState(
+            targetValue = if (chromeVisible) topInset + TopBandHeight else 0.dp,
+            label = "topBand",
+        )
+        val bottomPad by animateDpAsState(
+            targetValue = if (chromeVisible && !landscape) bottomInset + BottomBandHeight else 0.dp,
+            label = "bottomBand",
+        )
+        val endPad by animateDpAsState(
+            targetValue = if (chromeVisible && landscape) endInset + SideBandWidth else 0.dp,
+            label = "sideBand",
+        )
+        val areaPadding = Modifier.padding(top = topPad, bottom = bottomPad, end = endPad)
 
         PreviewSurface(
             state = preview,
             onSurfaceChanged = viewModel::attachPreviewSurface,
             fillScreen = fillScreen,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().then(areaPadding),
         )
 
-        if (gridVisible) GridOverlay(modifier = Modifier.fillMaxSize())
+        if (gridVisible) {
+            GridOverlay(modifier = Modifier.fillMaxSize().then(areaPadding))
+        }
 
-        // Il tocco sull'anteprima mostra e nasconde i comandi: sta sotto ai comandi stessi,
-        // quindi premere un pulsante non li fa sparire.
+        // Il tocco sull'immagine mostra e nasconde le fasce: sta sotto ai comandi, quindi
+        // premere un pulsante non le fa sparire.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
-                    detectTapGestures(onTap = { chromeVisible = !chromeVisible })
+                    detectTapGestures(
+                        onTap = {
+                            if (modeSheetOpen) modeSheetOpen = false else chromeVisible = !chromeVisible
+                        },
+                    )
                 },
         )
 
-        if (chromeVisible) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(190.dp)
-                    .background(Brush.verticalGradient(listOf(Luna.ScrimStrong, Luna.ScrimNone))),
-            )
-            if (landscape) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxHeight()
-                        .width(190.dp)
-                        .background(Brush.horizontalGradient(listOf(Luna.ScrimNone, Luna.ScrimStrong))),
+        // Tutto ciò che sta sull'immagine vive dentro l'area libera fra le fasce.
+        Box(modifier = Modifier.fillMaxSize().then(areaPadding)) {
+            if (chromeVisible) {
+                StatColumn(
+                    freeSpace = status.freeSpaceBytes,
+                    batteryPercent = status.batteryPercent,
+                    gimbalReady = settings.gimbal.isControlCodeKnown,
+                    recordingLabel = if (recording) formatClock(elapsedSeconds) else null,
+                    modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp),
                 )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(240.dp)
-                        .background(Brush.verticalGradient(listOf(Luna.ScrimNone, Luna.ScrimStrong))),
-                )
-            }
-        }
 
-        val middle: @Composable BoxScope.() -> Unit = {
-            QuickBar(
-                previewActive = preview.active,
-                previewEnabled = connected,
-                onTogglePreview = viewModel::togglePreview,
-                gridVisible = gridVisible,
-                onToggleGrid = { gridVisible = !gridVisible },
-                fillScreen = fillScreen,
-                onToggleFill = { fillScreen = !fillScreen },
-                dockVisible = dockVisible,
-                onToggleDock = { dockVisible = !dockVisible },
-                onHideChrome = { chromeVisible = false },
-                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
-            )
-
-            if (dockVisible) {
-                GimbalDock(
-                    enabled = connected,
-                    codeKnown = settings.gimbal.isControlCodeKnown,
-                    moving = moving,
-                    panDegrees = ptz.pan,
-                    tiltDegrees = ptz.tilt,
-                    positionFromCamera = ptz.fromCamera,
-                    speedPercent = settings.gimbal.manualSpeedPercent,
-                    onSpeedChange = viewModel::setManualSpeed,
-                    onVector = viewModel::jogVector,
-                    onJog = viewModel::jogStart,
-                    onRelease = viewModel::jogStop,
-                    onStop = viewModel::jogStop,
-                    onZero = viewModel::zeroPosition,
-                    onCaptureWaypoint = viewModel::captureWaypoint,
-                    onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
-                    onClose = { dockVisible = false },
-                    compact = landscape,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 8.dp),
+                HudIconButton(
+                    icon = LunaIcons.Center,
+                    contentDescription = "Considera questa posizione come 0° / 0°",
+                    onClick = viewModel::zeroPosition,
+                    size = 46.dp,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 12.dp),
                 )
+                HudIconButton(
+                    icon = LunaIcons.Joystick,
+                    contentDescription = "Comandi del gimbal",
+                    onClick = { dockVisible = !dockVisible },
+                    size = 46.dp,
+                    selected = dockVisible,
+                    activeColor = Luna.Path,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp),
+                )
+
+                infoPillText(captureMode, sequence.settleSeconds, sequence.intervalSeconds, sequence.effectiveTotalSeconds())
+                    ?.let { pill ->
+                        InfoPill(
+                            text = pill,
+                            color = captureMode.color,
+                            onClick = { onOpenPanel(Panel.SEQUENCE) },
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 70.dp),
+                        )
+                    }
+
+                if (dockVisible) {
+                    GimbalDock(
+                        enabled = connected,
+                        codeKnown = settings.gimbal.isControlCodeKnown,
+                        moving = moving,
+                        panDegrees = ptz.pan,
+                        tiltDegrees = ptz.tilt,
+                        positionFromCamera = ptz.fromCamera,
+                        speedPercent = settings.gimbal.manualSpeedPercent,
+                        onSpeedChange = viewModel::setManualSpeed,
+                        onVector = viewModel::jogVector,
+                        onJog = viewModel::jogStart,
+                        onRelease = viewModel::jogStop,
+                        onStop = viewModel::jogStop,
+                        onZero = viewModel::zeroPosition,
+                        onCaptureWaypoint = viewModel::captureWaypoint,
+                        onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
+                        onClose = { dockVisible = false },
+                        compact = landscape,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 12.dp, bottom = 70.dp),
+                    )
+                }
             }
 
             val note = previewNote(preview.active, preview.framesDecoded, preview.message)
@@ -202,29 +230,55 @@ fun ViewfinderScreen(
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
+
+            if (run.running) {
+                RunCard(
+                    run = run,
+                    mode = captureMode,
+                    onStop = viewModel::emergencyStop,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                )
+            }
+
+            if (modeSheetOpen && chromeVisible) {
+                ModeSheet(
+                    selected = captureMode,
+                    sequenceReady = sequenceReady,
+                    onSelect = viewModel::setCaptureMode,
+                    onDismiss = { modeSheetOpen = false },
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                )
+            }
         }
 
-        AnimatedVisibility(
-            visible = chromeVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            val hud: @Composable () -> Unit = {
-                ViewfinderHud(
+        if (chromeVisible) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Luna.Band)
+                    .padding(top = topInset),
+            ) {
+                ViewfinderTopBar(
                     connection = connection,
-                    status = status,
-                    subtitle = viewfinderSubtitle(captureMode, sequence.waypoints.size, preview),
-                    recordingLabel = if (recording) formatClock(elapsedSeconds) else null,
+                    mode = captureMode,
+                    badgeDetail = badgeDetailFor(captureMode, sequence.waypoints.size, status),
+                    previewActive = preview.active,
+                    gridVisible = gridVisible,
+                    fillScreen = fillScreen,
                     onToggleConnection = { if (connected) viewModel.disconnect() else viewModel.connect() },
+                    onTogglePreview = viewModel::togglePreview,
+                    onToggleGrid = { gridVisible = !gridVisible },
+                    onToggleFill = { fillScreen = !fillScreen },
+                    onHideChrome = { chromeVisible = false },
                     onOpenSettings = { onOpenPanel(Panel.SETTINGS) },
                     onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
                     onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
                     onRefreshStatus = viewModel::refreshStatus,
                     onShareLog = { viewModel.shareLog(context) },
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
+
             val captureBar: @Composable () -> Unit = {
                 CaptureBar(
                     selected = captureMode,
@@ -236,96 +290,85 @@ fun ViewfinderScreen(
                     waypointCount = sequence.waypoints.size,
                     onCaptureWaypoint = viewModel::captureWaypoint,
                     onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
+                    interpolationLabel = if (sequence.interpolation == InterpolationMode.SMOOTH) "SMTH" else "LIN",
+                    onToggleInterpolation = {
+                        viewModel.setInterpolation(
+                            if (sequence.interpolation == InterpolationMode.SMOOTH) InterpolationMode.LINEAR
+                            else InterpolationMode.SMOOTH
+                        )
+                    },
+                    onOpenModeSheet = { modeSheetOpen = !modeSheetOpen },
                     vertical = landscape,
                 )
             }
 
             if (landscape) {
-                Row(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
-                    Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        hud()
-                        Box(modifier = Modifier.weight(1f).fillMaxWidth(), content = middle)
-                    }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .background(Luna.Band)
+                        .padding(top = topInset + TopBandHeight, end = endInset),
+                ) {
                     captureBar()
                 }
             } else {
-                Column(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
-                    hud()
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), content = middle)
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(Luna.Band)
+                        .padding(bottom = bottomInset),
+                ) {
                     captureBar()
                 }
             }
-        }
-
-        // L'avanzamento della sequenza sopravvive ai comandi nascosti: il suo STOP è l'unico
-        // comando che non si può dover cercare.
-        if (run.running) {
+        } else if (run.running) {
+            // A comandi nascosti resta l'unica cosa che non si può dover cercare: lo STOP.
             RunCard(
                 run = run,
                 mode = captureMode,
                 onStop = viewModel::emergencyStop,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .safeDrawingPadding()
-                    .padding(top = if (chromeVisible) 104.dp else 12.dp),
+                    .padding(top = topInset + 12.dp),
             )
         }
     }
 }
 
-/** La colonna dei comandi rapidi dell'anteprima, sul lato che resta libero. */
+/** Pastiglia informativa sopra la fascia di scatto: il numero che conta in questa modalità. */
 @Composable
-private fun QuickBar(
-    previewActive: Boolean,
-    previewEnabled: Boolean,
-    onTogglePreview: () -> Unit,
-    gridVisible: Boolean,
-    onToggleGrid: () -> Unit,
-    fillScreen: Boolean,
-    onToggleFill: () -> Unit,
-    dockVisible: Boolean,
-    onToggleDock: () -> Unit,
-    onHideChrome: () -> Unit,
+private fun InfoPill(
+    text: String,
+    color: Color,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    GlassPanel(modifier = modifier, contentPadding = 6.dp, verticalSpacing = 6.dp) {
-        HudIconButton(
-            icon = if (previewActive) LunaIcons.Video else LunaIcons.VideoOff,
-            contentDescription = if (previewActive) "Spegni l'anteprima" else "Accendi l'anteprima",
-            onClick = onTogglePreview,
-            selected = previewActive,
-            enabled = previewEnabled,
-            size = 40.dp,
-        )
-        HudIconButton(
-            icon = if (gridVisible) LunaIcons.Grid else LunaIcons.GridOff,
-            contentDescription = "Griglia dei terzi",
-            onClick = onToggleGrid,
-            selected = gridVisible,
-            size = 40.dp,
-        )
-        HudIconButton(
-            icon = if (fillScreen) LunaIcons.Fill else LunaIcons.Fit,
-            contentDescription = if (fillScreen) "Adatta l'immagine allo schermo" else "Riempi lo schermo",
-            onClick = onToggleFill,
-            selected = fillScreen,
-            size = 40.dp,
-        )
-        HudIconButton(
-            icon = LunaIcons.Joystick,
-            contentDescription = "Comandi del gimbal",
-            onClick = onToggleDock,
-            selected = dockVisible,
-            size = 40.dp,
-        )
-        HudIconButton(
-            icon = LunaIcons.Hide,
-            contentDescription = "Nascondi i comandi",
-            onClick = onHideChrome,
-            size = 40.dp,
-        )
-    }
+    HudPill(
+        text = text,
+        icon = LunaIcons.MotionTimelapse,
+        tint = color,
+        onClick = onClick,
+        modifier = modifier,
+    )
 }
+
+/** Cosa scrivere nella pastiglia: ogni modalità ha un tempo che ne decide il risultato. */
+private fun infoPillText(
+    mode: CaptureMode,
+    settleSeconds: Float,
+    intervalSeconds: Float,
+    totalSeconds: Float,
+): String? = when (mode) {
+    CaptureMode.PANORAMA -> "attesa ${trim(settleSeconds)} s"
+    CaptureMode.TIMELAPSE, CaptureMode.SEQUENZA_TL -> "intervallo ${trim(intervalSeconds)} s"
+    CaptureMode.SEQUENZA_VIDEO -> "durata ${totalSeconds.roundToInt()} s"
+    CaptureMode.FOTO, CaptureMode.VIDEO -> null
+}
+
+private fun trim(value: Float): String =
+    if (value == value.toInt().toFloat()) value.toInt().toString() else "%.1f".format(value)
 
 /** Perché non si vede niente: spenta, in avvio, o ferma con un motivo da leggere. */
 private fun previewNote(active: Boolean, framesDecoded: Long, message: String?): String? = when {

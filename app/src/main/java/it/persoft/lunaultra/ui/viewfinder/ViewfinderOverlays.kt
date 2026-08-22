@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.ui.viewfinder
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -182,5 +184,93 @@ fun PreviewStatusNote(text: String, modifier: Modifier = Modifier) {
             color = Color.White.copy(alpha = 0.85f),
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+/**
+ * L'elenco completo delle modalità, aperto dalla ghiera.
+ *
+ * La ghiera in fondo mostra i nomi e basta, che è quello che serve mentre si riprende; quando
+ * invece si sta ancora decidendo, qui c'è anche cosa fa ognuna e se è utilizzabile — una
+ * modalità guidata senza punti memorizzati non parte, e conviene saperlo prima di sceglierla.
+ */
+@Composable
+fun ModeSheet(
+    selected: CaptureMode,
+    sequenceReady: Boolean,
+    onSelect: (CaptureMode) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    GlassPanel(modifier = modifier.width(330.dp), contentPadding = 12.dp, verticalSpacing = 6.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = "Modalità",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White,
+            )
+            Icon(
+                imageVector = LunaIcons.Close,
+                contentDescription = "Chiudi",
+                tint = Luna.OnSurfaceDim,
+                modifier = Modifier.size(20.dp).clickable(onClick = onDismiss),
+            )
+        }
+        CaptureMode.entries.forEach { mode ->
+            val usable = !mode.usesSequence || sequenceReady
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = if (mode == selected) mode.color.copy(alpha = 0.14f) else Color.Transparent,
+                        shape = RoundedCornerShape(14.dp),
+                    )
+                    .clickable {
+                        onSelect(mode)
+                        onDismiss()
+                    }
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .background(mode.color.copy(alpha = 0.18f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = mode.icon,
+                        contentDescription = null,
+                        tint = mode.color,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = mode.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (mode == selected) mode.color else Color.White,
+                    )
+                    Text(
+                        text = if (usable) mode.hint else "Servono almeno due punti memorizzati",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (usable) Luna.OnSurfaceDim else Luna.Warn,
+                    )
+                }
+                if (mode == selected) {
+                    Icon(
+                        imageVector = LunaIcons.Check,
+                        contentDescription = null,
+                        tint = mode.color,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
     }
 }

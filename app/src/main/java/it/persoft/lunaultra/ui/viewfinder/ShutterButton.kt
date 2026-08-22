@@ -22,7 +22,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import it.persoft.lunaultra.ui.theme.Luna
 
 /**
  * Il pulsante di scatto.
@@ -46,11 +45,9 @@ fun ShutterButton(
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(targetValue = if (pressed) 0.92f else 1f, label = "shutter")
 
-    val accent = when {
-        mode == CaptureMode.FOTO -> Color.White
-        mode.usesSequence -> Luna.Accent
-        else -> Luna.Rec
-    }
+    // Il pieno del pulsante porta il colore della modalità: è il modo più rapido di sapere cosa
+    // succede premendolo, senza leggere la ghiera.
+    val accent = mode.color
     val description = when {
         active -> "Ferma"
         mode == CaptureMode.FOTO -> "Scatta"
@@ -89,7 +86,7 @@ fun ShutterButton(
 
             if (progress > 0f) {
                 drawArc(
-                    color = Luna.Accent,
+                    color = mode.color,
                     startAngle = -90f,
                     sweepAngle = 360f * progress.coerceIn(0f, 1f),
                     useCenter = false,
@@ -103,7 +100,7 @@ fun ShutterButton(
             if (active) {
                 val side = radius * 0.86f
                 drawRoundRect(
-                    color = if (mode.usesSequence) Luna.Accent else Luna.Rec,
+                    color = mode.color,
                     topLeft = Offset(center.x - side / 2f, center.y - side / 2f),
                     size = Size(side, side),
                     cornerRadius = CornerRadius(side * 0.22f, side * 0.22f),

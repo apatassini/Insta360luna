@@ -1,7 +1,9 @@
 package it.persoft.lunaultra.ui.viewfinder
 
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import it.persoft.lunaultra.timelapse.ShootingMode
+import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
 
 /**
@@ -17,6 +19,8 @@ enum class CaptureMode(
     val label: String,
     val shortLabel: String,
     val icon: ImageVector,
+    /** Colore della modalità: ghiera, anello dello scatto, distintivo. */
+    val color: Color,
     val hint: String,
     /** Non nullo = la modalità percorre i punti memorizzati con questo comportamento. */
     val sequenceMode: ShootingMode?,
@@ -27,6 +31,7 @@ enum class CaptureMode(
         label = "Foto",
         shortLabel = "FOTO",
         icon = LunaIcons.Photo,
+        color = Luna.Photo,
         hint = "Uno scatto singolo, per provare l'inquadratura.",
         sequenceMode = null,
     ),
@@ -34,6 +39,7 @@ enum class CaptureMode(
         label = "Video",
         shortLabel = "VIDEO",
         icon = LunaIcons.Video,
+        color = Luna.Movie,
         hint = "Registrazione normale: parte e si ferma con lo stesso tasto.",
         sequenceMode = null,
     ),
@@ -41,6 +47,7 @@ enum class CaptureMode(
         label = "Timelapse",
         shortLabel = "TL",
         icon = LunaIcons.Timelapse,
+        color = Luna.Lapse,
         hint = "Timelapse interno della camera, a gimbal fermo.",
         sequenceMode = null,
         cameraTimelapse = true,
@@ -49,6 +56,7 @@ enum class CaptureMode(
         label = "Sequenza video",
         shortLabel = "SEQ",
         icon = LunaIcons.MotionVideo,
+        color = Luna.Path,
         hint = "Registra mentre il gimbal percorre i punti memorizzati.",
         sequenceMode = ShootingMode.VIDEO,
     ),
@@ -56,6 +64,7 @@ enum class CaptureMode(
         label = "Sequenza timelapse",
         shortLabel = "SEQ TL",
         icon = LunaIcons.MotionTimelapse,
+        color = Luna.PathLapse,
         hint = "Timelapse della camera mentre il gimbal percorre i punti.",
         sequenceMode = ShootingMode.TIMELAPSE_CAMERA,
         cameraTimelapse = true,
@@ -64,6 +73,7 @@ enum class CaptureMode(
         label = "Panorama",
         shortLabel = "PANO",
         icon = LunaIcons.Panorama,
+        color = Luna.Pano,
         hint = "Si ferma a ogni scatto lungo il percorso: foto da unire in post.",
         sequenceMode = ShootingMode.FOTO,
     ),

@@ -1,12 +1,15 @@
 package it.persoft.lunaultra.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
@@ -38,6 +41,7 @@ fun SectionCard(
     title: String,
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
+    accent: Color = Luna.Accent,
     trailing: @Composable (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
@@ -63,12 +67,21 @@ fun SectionCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     if (icon != null) {
-                        Icon(
-                            imageVector = icon,
-                            contentDescription = null,
-                            tint = Luna.Accent,
-                            modifier = Modifier.size(20.dp),
-                        )
+                        // Ogni sezione ha il suo colore: scorrendo il pannello si riconosce
+                        // dove si è senza rileggere i titoli.
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .background(accent.copy(alpha = 0.16f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                tint = accent,
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
                     }
                     Text(text = title, style = MaterialTheme.typography.titleMedium)
                 }

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Panorama
@@ -82,6 +83,7 @@ object LunaIcons {
     val Delete: ImageVector = Icons.Filled.Delete
     val Back: ImageVector = Icons.AutoMirrored.Filled.ArrowBack
     val More: ImageVector = Icons.Filled.MoreVert
+    val Menu: ImageVector = Icons.Filled.Menu
     val Share: ImageVector = Icons.Filled.Share
 
     // gimbal

@@ -18,6 +18,8 @@ import android.os.Build
 import android.os.PatternMatcher
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.Socket
 import java.net.URL
@@ -39,6 +41,7 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
     @Volatile
     private var network: Network? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
+    private val acquireMutex = Mutex()
 
     /**
      * Cerca direttamente l'access point della Luna e lo mantiene registrato fino a [release].
@@ -47,14 +50,23 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
      * "Luna Ultra". Android può chiedere una conferma di sistema la prima volta, ma le aperture
      * successive riutilizzano l'autorizzazione già data.
      */
-    suspend fun acquire(timeoutMs: Long = 15_000): Network? {
+    suspend fun acquire(timeoutMs: Long = 15_000): Network? = acquireMutex.withLock {
         network?.let { return it }
 
         currentLunaNetwork()?.let {
+            // Se una vecchia richiesta con WifiNetworkSpecifier era caduta, il suo callback
+            // può essere ancora registrato e continuare a contendere la rete alla connessione
+            // manuale. Prima di adottare la rete già attiva lo si elimina.
+            unregisterRequest()
             network = it
             log.info("Wi-Fi Luna già connesso: ${ssidOf(it) ?: LUNA_SSID_PREFIX}")
             return it
         }
+
+        // onLost azzera `network`, ma non può sospendere per serializzare un nuovo tentativo.
+        // Ogni acquire riparte quindi da una sola richiesta pulita: due specifier concorrenti
+        // fanno alternare connessione/disconnessione su diversi firmware Android.
+        unregisterRequest()
 
         val builder = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
@@ -88,17 +100,20 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
                 suspendCancellableCoroutine { cont: CancellableContinuation<Network?> ->
                     val cb = object : ConnectivityManager.NetworkCallback() {
                         override fun onAvailable(available: Network) {
+                            if (callback !== this) return
                             network = available
                             log.info("Wi-Fi Luna acquisito: ${ssidOf(available) ?: LUNA_SSID_PREFIX}")
                             if (cont.isActive) cont.resume(available)
                         }
 
                         override fun onLost(lost: Network) {
+                            if (callback !== this) return
                             if (network == lost) network = null
                             log.warn("Rete Wi-Fi persa")
                         }
 
                         override fun onUnavailable() {
+                            if (callback !== this) return
                             log.warn("Rete $LUNA_SSID_PREFIX non disponibile")
                             if (cont.isActive) cont.resume(null)
                         }
@@ -113,8 +128,7 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
             null
         }
         if (result == null) {
-            callback?.let { runCatching { connectivityManager.unregisterNetworkCallback(it) } }
-            callback = null
+            unregisterRequest()
             log.warn("Nessuna rete Wi-Fi disponibile entro ${timeoutMs} ms")
         }
         return result
@@ -187,12 +201,22 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
         log.warn("Risultati scansione Wi-Fi non leggibili: ${it.message}")
     }.getOrNull()
 
-    /** Una rete Luna già attiva non deve passare da nessuna finestra di scelta. */
+    /**
+     * Una rete Luna già attiva non deve passare da nessuna finestra di scelta.
+     *
+     * L'SSID può risultare `UNKNOWN_SSID` anche se la rete è connessa (permesso appena concesso,
+     * posizione disattivata o comportamento OEM). La sottorete 192.168.42.x è quindi il secondo
+     * identificatore: consente di adottare anche una connessione fatta manualmente dall'utente.
+     */
     private fun currentLunaNetwork(): Network? = runCatching {
         connectivityManager.allNetworks.firstOrNull { candidate ->
             val capabilities = connectivityManager.getNetworkCapabilities(candidate) ?: return@firstOrNull false
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                ssidOf(candidate)?.startsWith(LUNA_SSID_PREFIX, ignoreCase = true) == true
+            if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@firstOrNull false
+            val matchingSsid = ssidOf(candidate)?.startsWith(LUNA_SSID_PREFIX, ignoreCase = true) == true
+            val matchingSubnet = connectivityManager.getLinkProperties(candidate)
+                ?.linkAddresses
+                ?.any { it.address.hostAddress?.startsWith(LUNA_SUBNET_PREFIX) == true } == true
+            matchingSsid || matchingSubnet
         }
     }.getOrNull()
 
@@ -244,15 +268,20 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
     }
 
     fun release() {
-        callback?.let {
-            runCatching { connectivityManager.unregisterNetworkCallback(it) }
-        }
-        callback = null
+        unregisterRequest()
         network = null
+    }
+
+    private fun unregisterRequest() {
+        val registered = callback ?: return
+        callback = null
+        runCatching { connectivityManager.unregisterNetworkCallback(registered) }
+            .onFailure { log.warn("Chiusura richiesta Wi-Fi non riuscita: ${it.message}") }
     }
 
     companion object {
         const val LUNA_SSID_PREFIX = "Luna Ultra"
+        private const val LUNA_SUBNET_PREFIX = "192.168.42."
         private const val UNKNOWN_BSSID = "02:00:00:00:00:00"
         private const val SCAN_TIMEOUT_MS = 5_000L
     }

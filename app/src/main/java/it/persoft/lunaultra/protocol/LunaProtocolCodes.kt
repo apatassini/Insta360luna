@@ -189,23 +189,83 @@ object LunaProtocolCodes {
     /** Valori di `insta360.messages.PhotographyOptionType` usati dall'app. */
     object PhotographyOptionType {
         const val BRIGHTNESS = 2
+        const val SHARPNESS = 6
         const val EXPOSURE_BIAS = 7
+        const val EXPOSURE_MODE = 8
         const val WHITE_BALANCE = 13
+        const val VIDEO_GAMMA_MODE = 18
+        const val STILL_EXPOSURE_OPTIONS = 20
+        const val VIDEO_EXPOSURE_OPTIONS = 21
         const val RAW_CAPTURE_TYPE = 25
         const val RECORD_RESOLUTION = 31
+        const val COLOR_MODE = 35
         const val WHITE_BALANCE_VALUE = 39
         const val PANO_ASPECT = 98
+        const val FILTER_INTENSITY = 104
     }
 
     /** Numeri di campo di `insta360.messages.PhotographyOptions` usati dall'app. */
     object PhotographyOptionsField {
         const val BRIGHTNESS = 2
+        const val SHARPNESS = 6
         const val EXPOSURE_BIAS = 7
+        const val EXPOSURE_MODE = 8
         const val WHITE_BALANCE = 13
+        const val VIDEO_GAMMA_MODE = 18
+        const val STILL_EXPOSURE_OPTIONS = 20
+        const val VIDEO_EXPOSURE_OPTIONS = 21
         const val RAW_CAPTURE_TYPE = 25
         const val RECORD_RESOLUTION = 31
+        const val COLOR_MODE = 35
         const val WHITE_BALANCE_VALUE = 39
         const val PANO_ASPECT = 98
+        const val FILTER_INTENSITY = 104
+    }
+
+    /** Campi di `ExposureOptions`: il firmware vuole i secondi reali, non l'enum otturatore. */
+    object ExposureOptionsField {
+        const val PROGRAM = 1
+        const val ISO = 2
+        const val SHUTTER_SPEED = 3
+    }
+
+    object ExposureProgram {
+        const val AUTO = 0
+        const val ISO_PRIORITY = 1
+        const val SHUTTER_PRIORITY = 2
+        const val MANUAL = 3
+    }
+
+    object ExposureMode {
+        const val AUTO = 0
+        const val MANUAL = 2
+    }
+
+    /** Valori rimisurati sulla Luna Ultra: la vecchia enum 0/1/2/3 non è valida qui. */
+    object ColorMode {
+        const val STANDARD = 1
+        const val I_LOG = 2
+        const val DOLBY_VISION = 5
+    }
+
+    /** Il campo storico `gamma_mode` è in realtà il selettore dei filtri sulla Luna Ultra. */
+    object Filter {
+        const val ORIGINAL = 0
+        const val LEICA_NATURAL = 15
+        const val LEICA_VIVID = 16
+        const val NC_FILM = 24
+        const val CC_FILM = 26
+        const val POS_FILM = 34
+        const val NEG_FILM = 35
+        const val LEICA_CHROME = 36
+        const val CINEMATIC = 37
+        const val FRESH = 38
+    }
+
+    object FilterIntensity {
+        const val LOW = 1
+        const val MEDIUM = 2
+        const val HIGH = 3
     }
 
     object WhiteBalance {
@@ -258,6 +318,8 @@ object LunaProtocolCodes {
     object CaptureMode {
         const val UNKNOWN = 0
         const val NORMAL = 1
+        const val SLOW_MOTION = 9
+        const val PURE_VIDEO = 11
     }
 
     /** Valori di `insta360.messages.TimelapseMode`. */

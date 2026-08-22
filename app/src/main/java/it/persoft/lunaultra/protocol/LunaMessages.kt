@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.protocol
 
 import it.persoft.lunaultra.data.PhotoSettings
+import it.persoft.lunaultra.data.VideoSettings
 
 /**
  * Composizione dei corpi protobuf dei comandi.
@@ -119,6 +120,97 @@ object LunaMessages {
             value = profileCode,
             functionMode = functionMode,
         )
+
+    /**
+     * Regolazioni Pro video rimisurate sulla Luna Ultra. ISO e otturatore vivono nei due
+     * `ExposureOptions` (campi 20/21): il vecchio `exposure_manual` viene accettato ma poi
+     * torna al valore precedente, quindi qui non viene usato.
+     */
+    fun setVideoControls(value: VideoSettings, functionMode: Int): ByteArray {
+        val pro = value.proMode
+        val iso = if (pro) value.iso else 0
+        val shutter = if (pro) value.shutterSeconds else 0.0
+        val program = when {
+            iso == 0 && shutter == 0.0 -> LunaProtocolCodes.ExposureProgram.AUTO
+            iso == 0 -> LunaProtocolCodes.ExposureProgram.SHUTTER_PRIORITY
+            shutter == 0.0 -> LunaProtocolCodes.ExposureProgram.ISO_PRIORITY
+            else -> LunaProtocolCodes.ExposureProgram.MANUAL
+        }
+        val exposureMode = if (program == LunaProtocolCodes.ExposureProgram.MANUAL) {
+            LunaProtocolCodes.ExposureMode.MANUAL
+        } else {
+            LunaProtocolCodes.ExposureMode.AUTO
+        }
+        val kelvin = if (pro) value.whiteBalanceKelvin else 0
+
+        return ProtoWriter()
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.RECORD_RESOLUTION)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.EXPOSURE_MODE)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.STILL_EXPOSURE_OPTIONS)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.VIDEO_EXPOSURE_OPTIONS)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.EXPOSURE_BIAS)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.WHITE_BALANCE)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.WHITE_BALANCE_VALUE)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.SHARPNESS)
+            .message(2) {
+                int32(LunaProtocolCodes.PhotographyOptionsField.RECORD_RESOLUTION, value.profileCode)
+                int32(LunaProtocolCodes.PhotographyOptionsField.EXPOSURE_MODE, exposureMode)
+                message(LunaProtocolCodes.PhotographyOptionsField.STILL_EXPOSURE_OPTIONS) {
+                    int32(LunaProtocolCodes.ExposureOptionsField.PROGRAM, program)
+                    int32(LunaProtocolCodes.ExposureOptionsField.ISO, iso)
+                    double(LunaProtocolCodes.ExposureOptionsField.SHUTTER_SPEED, shutter)
+                }
+                message(LunaProtocolCodes.PhotographyOptionsField.VIDEO_EXPOSURE_OPTIONS) {
+                    int32(LunaProtocolCodes.ExposureOptionsField.PROGRAM, program)
+                    int32(LunaProtocolCodes.ExposureOptionsField.ISO, iso)
+                    double(LunaProtocolCodes.ExposureOptionsField.SHUTTER_SPEED, shutter)
+                }
+                sint32(
+                    LunaProtocolCodes.PhotographyOptionsField.EXPOSURE_BIAS,
+                    if (pro) value.exposureBiasThirds else 0,
+                )
+                int32(
+                    LunaProtocolCodes.PhotographyOptionsField.WHITE_BALANCE,
+                    if (kelvin == 0) LunaProtocolCodes.WhiteBalance.AUTO else LunaProtocolCodes.WhiteBalance.MANUAL_KELVIN,
+                )
+                int32(LunaProtocolCodes.PhotographyOptionsField.WHITE_BALANCE_VALUE, kelvin)
+                int32(LunaProtocolCodes.PhotographyOptionsField.SHARPNESS, value.sharpness)
+            }
+            .int32(3, functionMode)
+            .toByteArray()
+    }
+
+    /** Il colore va scritto da solo: affiancargli gamma/filter impedisce alla camera di applicarlo. */
+    fun setVideoColorMode(colorMode: Int, functionMode: Int): ByteArray =
+        setPhotographyOption(
+            LunaProtocolCodes.PhotographyOptionType.COLOR_MODE,
+            LunaProtocolCodes.PhotographyOptionsField.COLOR_MODE,
+            colorMode,
+            functionMode,
+        )
+
+    /** Un filtro invece deve ri-affermare il colore nello stesso messaggio per applicarsi subito. */
+    fun setVideoFilter(filter: Int, colorMode: Int, functionMode: Int): ByteArray =
+        ProtoWriter()
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.VIDEO_GAMMA_MODE)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.COLOR_MODE)
+            .message(2) {
+                int32(LunaProtocolCodes.PhotographyOptionsField.VIDEO_GAMMA_MODE, filter)
+                int32(LunaProtocolCodes.PhotographyOptionsField.COLOR_MODE, colorMode)
+            }
+            .int32(3, functionMode)
+            .toByteArray()
+
+    fun setVideoFilterIntensity(intensity: Int, colorMode: Int, functionMode: Int): ByteArray =
+        ProtoWriter()
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.FILTER_INTENSITY)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.COLOR_MODE)
+            .message(2) {
+                int32(LunaProtocolCodes.PhotographyOptionsField.FILTER_INTENSITY, intensity)
+                int32(LunaProtocolCodes.PhotographyOptionsField.COLOR_MODE, colorMode)
+            }
+            .int32(3, functionMode)
+            .toByteArray()
 
     /**
      * `StartLiveStream`, con i campi:

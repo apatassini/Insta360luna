@@ -21,6 +21,7 @@ Resta però un buco, ed è esattamente quello che serve qui:
 |---|---|
 | Framing UCD2, checksum, handshake, keep-alive, correlazione richiesta/risposta | **Noto e verificato sulla Luna Ultra** |
 | Stato camera, batteria, storage, avvio/stop registrazione, opzioni timelapse | **Numeri di comando e di campo noti** |
+| ISO, otturatore, EV, WB, Standard/i-Log/Dolby Vision, filtri Leica/cinema, risoluzioni/FPS | **Rimisurati sulla Luna Ultra reale** |
 | **Comando del gimbal (pan/tilt)** | **Nome noto, numero ignoto** — nessuna fonte pubblica lo riporta |
 | Lettura della posizione PTZ | Codice della notifica molto probabile (8302), contenuto non decodificato |
 
@@ -108,6 +109,8 @@ bracketing e basta.
 | Foto | `SET_OPTIONS` `PHOTO_SUB_MODE(40)` = `PHOTO_SINGLE(0)` | `TAKE_PICTURE` con `Mode.NORMAL(0)` |
 | Panorama | `PHOTO_SUB_MODE(40)` = `PHOTO_INSTA_PANO(8)` | `TAKE_PICTURE`; sferica o 2:1 da `PANO_ASPECT` |
 | Video | `VIDEO_SUB_MODE(41)` = `VIDEO_NORMAL(0)` | `START` / `STOP_CAPTURE` con `Capture_MODE_NORMAL(1)` |
+| PureVideo | `VIDEO_SUB_MODE(41)` = `VIDEO_PURE(11)` | `START` / `STOP_CAPTURE` con `Capture_MODE_PURE_VIDEO(11)` |
+| Slow-motion | `VIDEO_SUB_MODE(41)` = `VIDEO_SLOW_MOTION(9)` | `START` / `STOP_CAPTURE` con `Capture_MODE_SLOWMOTION(9)` |
 | Timelapse | `VIDEO_SUB_MODE(41)` = `VIDEO_TIMELAPSE(2)` | `START` / `STOP_TIMELAPSE` |
 
 La panoramica è **una sola sotto-modalità** anche se le proporzioni sono due: la scelta viaggia
@@ -117,6 +120,20 @@ I valori sono `PANO_ASPECT_360 = 1` e `PANO_ASPECT_2_1 = 4`.
 
 La camera lascia l'altra sotto-modalità al suo valore sentinella (`*_NONE = 100`) invece di
 azzerarla: per sapere in che modalità è, il video vince quando è diverso da `VIDEO_NONE`.
+
+### Opzioni Foto e Video
+
+Il tasto con i cursori apre le regolazioni native della camera; le automazioni di movimento del
+gimbal restano nel menu dedicato. Il pannello Video separa le tre scelte del formato
+(risoluzione, rapporto e FPS) e, in modalità Pro, mostra ISO, otturatore, EV, bilanciamento del
+bianco, profilo colore, filtro, intensità e nitidezza. PureVideo, Slow-motion e Timelapse
+limitano automaticamente le combinazioni a quelle offerte dalla modalità reale.
+
+I valori Luna-specifici sono stati confrontati con le misurazioni pubbliche di
+[`Ripwords/insta360-luna-ultra-desktop`](https://github.com/Ripwords/insta360-luna-ultra-desktop):
+fra le correzioni rispetto alle enum 2020 ci sono Standard=1, i-Log=2, Dolby Vision=5, i codici
+2,7K 242–248, 48 fps e i crop 4K 2,35:1. Il protocollo di base deriva dalle estrazioni pubbliche
+collegate da quel progetto e da [`RigacciOrg/insta360-wifi-api`](https://github.com/RigacciOrg/insta360-wifi-api).
 
 ### Galleria e scaricamento
 

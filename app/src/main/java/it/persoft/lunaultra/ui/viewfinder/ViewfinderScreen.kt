@@ -293,6 +293,15 @@ fun ViewfinderScreen(
                     settings = settings.video,
                     mode = captureMode.cameraMode,
                     onProfile = viewModel::setVideoProfile,
+                    onProMode = viewModel::setVideoProMode,
+                    onIso = viewModel::setVideoIso,
+                    onShutter = viewModel::setVideoShutter,
+                    onExposureBias = viewModel::setVideoExposureBias,
+                    onWhiteBalance = viewModel::setVideoWhiteBalance,
+                    onColorMode = viewModel::setVideoColorMode,
+                    onFilter = viewModel::setVideoFilter,
+                    onFilterIntensity = viewModel::setVideoFilterIntensity,
+                    onSharpness = viewModel::setVideoSharpness,
                     onClose = { videoSheetOpen = false },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)

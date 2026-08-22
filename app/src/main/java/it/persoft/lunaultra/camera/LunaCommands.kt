@@ -3,6 +3,7 @@ package it.persoft.lunaultra.camera
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
 import it.persoft.lunaultra.data.PhotoSettings
+import it.persoft.lunaultra.data.LunaVideoProfiles
 import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.protocol.LunaMessages
@@ -18,6 +19,15 @@ import it.persoft.lunaultra.protocol.ProtoReader
 import it.persoft.lunaultra.protocol.Ucd2Frame
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
+
+private val CINEMATIC_FILTERS = setOf(
+    LunaProtocolCodes.Filter.POS_FILM,
+    LunaProtocolCodes.Filter.NEG_FILM,
+    LunaProtocolCodes.Filter.CC_FILM,
+    LunaProtocolCodes.Filter.NC_FILM,
+    LunaProtocolCodes.Filter.FRESH,
+    LunaProtocolCodes.Filter.CINEMATIC,
+)
 
 /**
  * I comandi della camera, composti sui messaggi protobuf reali del namespace
@@ -204,11 +214,37 @@ class LunaCommands(
             LunaMessages.setPhotoControls(value, mode.functionMode),
         ).map { }
 
-    suspend fun applyVideoSettings(value: VideoSettings, mode: CameraMode): Result<Unit> =
+    suspend fun applyVideoSettings(value: VideoSettings, mode: CameraMode): Result<Unit> {
         session.request(
             LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
-            LunaMessages.setVideoProfile(value.profileCode, mode.functionMode),
-        ).map { }
+            LunaMessages.setVideoControls(value, mode.functionMode),
+        ).getOrElse { return Result.failure(it) }
+
+        // Misurato sulla camera: il cambio colore deve viaggiare da solo.
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setVideoColorMode(value.colorMode, mode.functionMode),
+        ).getOrElse { return Result.failure(it) }
+
+        val profile = LunaVideoProfiles.all.firstOrNull { it.code == value.profileCode }
+        val filtersAvailable = value.colorMode != LunaProtocolCodes.ColorMode.DOLBY_VISION &&
+            profile != null && profile.width <= 3840 && profile.fps <= 60
+        if (!filtersAvailable) return Result.success(Unit)
+
+        // Il filtro è l'inverso: deve portare con sé il colore per ricostruire subito la pipeline.
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setVideoFilter(value.filter, value.colorMode, mode.functionMode),
+        ).getOrElse { return Result.failure(it) }
+
+        if (value.filter in CINEMATIC_FILTERS) {
+            session.request(
+                LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+                LunaMessages.setVideoFilterIntensity(value.filterIntensity, value.colorMode, mode.functionMode),
+            ).getOrElse { return Result.failure(it) }
+        }
+        return Result.success(Unit)
+    }
 
     /** In che modalità è adesso la camera, letta dalle due sotto-modalità che riporta. */
     suspend fun fetchCameraMode(): Result<CameraMode?> =
@@ -357,11 +393,17 @@ class LunaCommands(
      * registrazione normale è spesso la scelta giusta (il timelapse interno accelera i tempi
      * e rende difficile far coincidere durata reale e durata della sequenza).
      */
-    suspend fun startRecording(useCameraTimelapse: Boolean): Result<Unit> =
-        if (useCameraTimelapse) startTimelapse() else startCapture()
+    suspend fun startRecording(
+        useCameraTimelapse: Boolean,
+        captureMode: Int = LunaProtocolCodes.CaptureMode.NORMAL,
+    ): Result<Unit> =
+        if (useCameraTimelapse) startTimelapse() else startCapture(captureMode)
 
-    suspend fun stopRecording(useCameraTimelapse: Boolean): Result<Unit> =
-        if (useCameraTimelapse) stopTimelapse() else stopCapture()
+    suspend fun stopRecording(
+        useCameraTimelapse: Boolean,
+        captureMode: Int = LunaProtocolCodes.CaptureMode.NORMAL,
+    ): Result<Unit> =
+        if (useCameraTimelapse) stopTimelapse() else stopCapture(captureMode)
 
     // ---- Gimbal ----
 

@@ -65,11 +65,26 @@ data class PhotoSettings(
     val whiteBalanceKelvin: Int = 0,
 )
 
-/** Risoluzione e frame rate della registrazione, codificati insieme dal protocollo Insta360. */
+/** Impostazioni video verificate sulla Luna Ultra e applicate alla modalità attiva. */
 @Serializable
 data class VideoSettings(
     /** `VideoResolution`: 24 corrisponde a 3840×2160 @ 30 fps. */
     val profileCode: Int = 24,
+    val proMode: Boolean = false,
+    /** Zero significa ISO automatico. */
+    val iso: Int = 0,
+    /** Secondi reali; zero significa otturatore automatico. */
+    val shutterSeconds: Double = 0.0,
+    /** Compensazione in terzi di stop, da -12 a +12 (±4 EV). */
+    val exposureBiasThirds: Int = 0,
+    /** Zero = automatico; altrimenti 2000…10000 K. */
+    val whiteBalanceKelvin: Int = 0,
+    /** Standard=1, i-Log=2, Dolby Vision=5 sulla Luna Ultra. */
+    val colorMode: Int = LunaProtocolCodes.ColorMode.STANDARD,
+    /** Il campo `gamma_mode` è il filtro/Look, non una curva gamma. */
+    val filter: Int = LunaProtocolCodes.Filter.ORIGINAL,
+    val filterIntensity: Int = LunaProtocolCodes.FilterIntensity.MEDIUM,
+    val sharpness: Int = 1,
 )
 
 @Serializable

@@ -50,6 +50,22 @@ enum class CameraMode(
         functionMode = LunaProtocolCodes.FunctionMode.NORMAL_VIDEO,
         captureMode = LunaProtocolCodes.CaptureMode.NORMAL,
     ),
+    PURE_VIDEO(
+        label = "PureVideo",
+        optionType = LunaProtocolCodes.OptionType.VIDEO_SUB_MODE,
+        optionField = LunaProtocolCodes.OptionsField.VIDEO_SUB_MODE,
+        subMode = LunaProtocolCodes.VideoSubMode.PURE,
+        functionMode = LunaProtocolCodes.FunctionMode.PURE_VIDEO,
+        captureMode = LunaProtocolCodes.CaptureMode.PURE_VIDEO,
+    ),
+    SLOW_MOTION(
+        label = "Slow-motion",
+        optionType = LunaProtocolCodes.OptionType.VIDEO_SUB_MODE,
+        optionField = LunaProtocolCodes.OptionsField.VIDEO_SUB_MODE,
+        subMode = LunaProtocolCodes.VideoSubMode.SLOW_MOTION,
+        functionMode = LunaProtocolCodes.FunctionMode.SLOWMOTION_VIDEO,
+        captureMode = LunaProtocolCodes.CaptureMode.SLOW_MOTION,
+    ),
     TIMELAPSE(
         label = "Timelapse",
         optionType = LunaProtocolCodes.OptionType.VIDEO_SUB_MODE,

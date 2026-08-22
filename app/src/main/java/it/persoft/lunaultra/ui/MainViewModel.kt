@@ -669,7 +669,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startCapture(cameraTimelapse: Boolean) {
         viewModelScope.launch {
-            container.commands.startRecording(cameraTimelapse)
+            val capture = _captureMode.value.cameraMode.captureMode ?: LunaProtocolCodes.CaptureMode.NORMAL
+            container.commands.startRecording(cameraTimelapse, capture)
                 .onSuccess {
                     _recordingSinceMs.value = System.currentTimeMillis()
                     _status.value = _status.value.mergedWith(CameraStatus(recording = true))
@@ -681,7 +682,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun stopCapture(cameraTimelapse: Boolean) {
         viewModelScope.launch {
-            container.commands.stopRecording(cameraTimelapse)
+            val capture = _captureMode.value.cameraMode.captureMode ?: LunaProtocolCodes.CaptureMode.NORMAL
+            container.commands.stopRecording(cameraTimelapse, capture)
                 .onSuccess {
                     _recordingSinceMs.value = 0L
                     _status.value = _status.value.mergedWith(CameraStatus(recording = false))
@@ -796,7 +798,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (applied && !mode.cameraMode.isPhoto) {
             val selected = LunaVideoProfiles.selected(settings.value.video.profileCode, mode.cameraMode)
-            container.commands.applyVideoSettings(VideoSettings(selected.code), mode.cameraMode)
+            val current = settings.value.video.copy(profileCode = selected.code)
+            container.commands.applyVideoSettings(videoSettingsForMode(current, mode.cameraMode), mode.cameraMode)
                 .onFailure { container.log.warn("Formato video non accettato: ${it.message}") }
         }
         return applied
@@ -881,11 +884,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         container.settingsStore.update { it.copy(video = it.video.copy(profileCode = selected.code)) }
         if (connectionState.value != ConnectionState.CONNECTED || mode.isPhoto) return
         viewModelScope.launch {
-            container.commands.applyVideoSettings(VideoSettings(selected.code), mode)
+            val current = settings.value.video.copy(profileCode = selected.code)
+            container.commands.applyVideoSettings(videoSettingsForMode(current, mode), mode)
                 .onSuccess { showMessage("Video ${selected.resolution} · ${selected.fps} fps") }
                 .onFailure { showMessage("Formato video non accettato: ${it.message}") }
         }
     }
+
+    fun setVideoProMode(enabled: Boolean) = updateVideoSettings { it.copy(proMode = enabled) }
+
+    fun setVideoIso(value: Int) = updateVideoSettings { it.copy(iso = value.coerceIn(0, 6400)) }
+
+    fun setVideoShutter(seconds: Double) = updateVideoSettings {
+        it.copy(shutterSeconds = seconds.coerceIn(0.0, 60.0))
+    }
+
+    fun setVideoExposureBias(thirds: Int) = updateVideoSettings {
+        it.copy(exposureBiasThirds = thirds.coerceIn(-12, 12))
+    }
+
+    fun setVideoWhiteBalance(kelvin: Int) = updateVideoSettings {
+        it.copy(whiteBalanceKelvin = if (kelvin == 0) 0 else kelvin.coerceIn(2_000, 10_000))
+    }
+
+    fun setVideoColorMode(value: Int) = updateVideoSettings {
+        val allowed = setOf(
+            LunaProtocolCodes.ColorMode.STANDARD,
+            LunaProtocolCodes.ColorMode.I_LOG,
+            LunaProtocolCodes.ColorMode.DOLBY_VISION,
+        )
+        it.copy(
+            colorMode = if (value in allowed) value else LunaProtocolCodes.ColorMode.STANDARD,
+            filter = if (value == LunaProtocolCodes.ColorMode.DOLBY_VISION) {
+                LunaProtocolCodes.Filter.ORIGINAL
+            } else it.filter,
+        )
+    }
+
+    fun setVideoFilter(value: Int) = updateVideoSettings { it.copy(filter = value) }
+
+    fun setVideoFilterIntensity(value: Int) = updateVideoSettings {
+        it.copy(filterIntensity = value.coerceIn(LunaProtocolCodes.FilterIntensity.LOW, LunaProtocolCodes.FilterIntensity.HIGH))
+    }
+
+    fun setVideoSharpness(value: Int) = updateVideoSettings { it.copy(sharpness = value.coerceIn(0, 4)) }
+
+    private fun updateVideoSettings(transform: (VideoSettings) -> VideoSettings) {
+        container.settingsStore.update { it.copy(video = transform(it.video)) }
+        val mode = _captureMode.value.cameraMode
+        if (connectionState.value != ConnectionState.CONNECTED || mode.isPhoto) return
+        viewModelScope.launch {
+            val current = settings.value.video
+            container.commands.applyVideoSettings(videoSettingsForMode(current, mode), mode)
+                .onFailure { showMessage("Regolazione video non accettata: ${it.message}") }
+        }
+    }
+
+    /** PureVideo, Slow-mo e Timelapse espongono soltanto Standard sulla camera reale. */
+    private fun videoSettingsForMode(value: VideoSettings, mode: CameraMode): VideoSettings =
+        if (mode == CameraMode.VIDEO) value else value.copy(colorMode = LunaProtocolCodes.ColorMode.STANDARD)
 
     fun updateGimbal(transform: (GimbalSettings) -> GimbalSettings) =
         container.settingsStore.update { it.copy(gimbal = transform(it.gimbal)) }

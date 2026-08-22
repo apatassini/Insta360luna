@@ -21,4 +21,18 @@ class LunaVideoProfilesTest {
         assertEquals(setOf("4K", "2.7K", "1080p"), profiles.map { it.resolution }.toSet())
         assertTrue(profiles.all { it.fps == 30 && it.aspect == "16:9" })
     }
+
+    @Test
+    fun `il 2_7K usa i codici misurati sulla Luna e comprende 48 fps`() {
+        val profiles = LunaVideoProfiles.all.filter { it.resolution == "2.7K" }
+        assertEquals(setOf(242, 243, 244, 245, 331, 246, 247, 248), profiles.map { it.code }.toSet())
+        assertEquals(setOf(120, 100, 60, 50, 48, 30, 25, 24), profiles.map { it.fps }.toSet())
+    }
+
+    @Test
+    fun `slow motion espone solo i frame rate elevati`() {
+        val profiles = LunaVideoProfiles.forMode(CameraMode.SLOW_MOTION)
+        assertTrue(profiles.isNotEmpty())
+        assertTrue(profiles.all { it.fps in setOf(240, 200, 120, 100) })
+    }
 }

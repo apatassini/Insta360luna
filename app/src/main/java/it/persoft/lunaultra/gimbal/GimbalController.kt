@@ -3,6 +3,7 @@ package it.persoft.lunaultra.gimbal
 import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.camera.PtzState
 import it.persoft.lunaultra.data.AppSettings
+import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.net.EventLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -27,6 +28,7 @@ import kotlin.math.sign
 class GimbalController(
     private val commands: LunaCommands,
     private val settings: StateFlow<AppSettings>,
+    private val calibration: StateFlow<GimbalCalibrationProfile>,
     private val log: EventLog,
     private val scope: CoroutineScope,
 ) {
@@ -152,26 +154,26 @@ class GimbalController(
      */
     suspend fun driveTo(targetPan: Float, targetTilt: Float, stepSeconds: Float): Result<Unit> {
         integrateAppliedUntilNow()
-        val cfg = settings.value.gimbal
+        val speeds = effectiveSpeeds()
         val current = _position.value
         val dt = stepSeconds.coerceAtLeast(0.02f)
-        val panSpeed = clampSpeed((targetPan - current.pan) / dt, cfg.maxPanSpeedDegPerSec)
-        val tiltSpeed = clampSpeed((targetTilt - current.tilt) / dt, cfg.maxTiltSpeedDegPerSec)
-        val panPercent = if (cfg.maxPanSpeedDegPerSec > 0f) panSpeed / cfg.maxPanSpeedDegPerSec else 0f
-        val tiltPercent = if (cfg.maxTiltSpeedDegPerSec > 0f) tiltSpeed / cfg.maxTiltSpeedDegPerSec else 0f
+        val panSpeed = clampSpeed((targetPan - current.pan) / dt, speeds.pan)
+        val tiltSpeed = clampSpeed((targetTilt - current.tilt) / dt, speeds.tilt)
+        val panPercent = if (speeds.pan > 0f) panSpeed / speeds.pan else 0f
+        val tiltPercent = if (speeds.tilt > 0f) tiltSpeed / speeds.tilt else 0f
         return sendVelocity(panPercent, tiltPercent)
     }
 
     /** Tempo minimo stimato per raggiungere un punto, considerando entrambi gli assi. */
     fun estimatedTravelSeconds(targetPan: Float, targetTilt: Float): Float {
         integrateAppliedUntilNow()
-        val cfg = settings.value.gimbal
+        val speeds = effectiveSpeeds()
         val current = _position.value
-        val panSeconds = if (cfg.maxPanSpeedDegPerSec > 0f) {
-            abs(targetPan - current.pan) / cfg.maxPanSpeedDegPerSec
+        val panSeconds = if (speeds.pan > 0f) {
+            abs(targetPan - current.pan) / speeds.pan
         } else 0f
-        val tiltSeconds = if (cfg.maxTiltSpeedDegPerSec > 0f) {
-            abs(targetTilt - current.tilt) / cfg.maxTiltSpeedDegPerSec
+        val tiltSeconds = if (speeds.tilt > 0f) {
+            abs(targetTilt - current.tilt) / speeds.tilt
         } else 0f
         return max(panSeconds, tiltSeconds)
     }
@@ -256,10 +258,11 @@ class GimbalController(
     /** Dead reckoning: integra la velocità comandata nella posizione stimata. */
     private fun integrate(panPercent: Float, tiltPercent: Float, dtSeconds: Float) {
         val cfg = settings.value.gimbal
+        val speeds = effectiveSpeeds()
         val current = _position.value
-        val pan = (current.pan + panPercent * cfg.maxPanSpeedDegPerSec * dtSeconds)
+        val pan = (current.pan + panPercent * speeds.pan * dtSeconds)
             .coerceIn(cfg.panMinDeg, cfg.panMaxDeg)
-        val tilt = (current.tilt + tiltPercent * cfg.maxTiltSpeedDegPerSec * dtSeconds)
+        val tilt = (current.tilt + tiltPercent * speeds.tilt * dtSeconds)
             .coerceIn(cfg.tiltMinDeg, cfg.tiltMaxDeg)
         // Il flag fromCamera resta a false: verrà rialzato dal prossimo dato reale della camera.
         _position.value = current.copy(
@@ -286,6 +289,22 @@ class GimbalController(
         }
         appliedSinceNanos = nowNanos
     }
+
+    /**
+     * I valori in gradi/s restano il riferimento del livello Veloce; la calibrazione misura
+     * quanto Lenta e Media rispondono davvero rispetto a quello e corregge tutta l'integrazione.
+     */
+    private fun effectiveSpeeds(): EffectiveSpeeds {
+        val cfg = settings.value.gimbal
+        val measured = calibration.value.takeIf(GimbalCalibrationProfile::isValid)
+            ?.level(cfg.hardwareSpeedLevel)
+        return EffectiveSpeeds(
+            pan = cfg.maxPanSpeedDegPerSec * (measured?.panSpeedScale ?: 1f),
+            tilt = cfg.maxTiltSpeedDegPerSec * (measured?.tiltSpeedScale ?: 1f),
+        )
+    }
+
+    private data class EffectiveSpeeds(val pan: Float, val tilt: Float)
 
     companion object {
         const val STOP_VECTOR_REPETITIONS = 4

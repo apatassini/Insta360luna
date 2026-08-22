@@ -16,6 +16,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -45,6 +46,9 @@ import it.persoft.lunaultra.ui.italianLabel
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
 import kotlin.math.roundToInt
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Le impostazioni di tutti i giorni: la camera, l'anteprima, il comportamento del gimbal.
@@ -62,6 +66,8 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
     val status by viewModel.status.collectAsState()
     val preview by viewModel.preview.collectAsState()
     val logEntries by viewModel.logEntries.collectAsState()
+    val calibration by viewModel.gimbalCalibration.collectAsState()
+    val calibrationState by viewModel.gimbalCalibrationState.collectAsState()
     val connected = connection == ConnectionState.CONNECTED
     val gimbal = settings.gimbal
     var wifiPasswordVisible by rememberSaveable { mutableStateOf(false) }
@@ -287,6 +293,66 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
+        SectionCard(title = "Calibrazione gimbal", icon = LunaIcons.Center, accent = Luna.Pano) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (calibrationState.running) {
+                    Text(calibrationState.message)
+                    LinearProgressIndicator(
+                        progress = { calibrationState.progress },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    LabeledValue(
+                        "Avanzamento",
+                        "${calibrationState.completedSteps}/${calibrationState.totalSteps} · ${(calibrationState.progress * 100).roundToInt()}%",
+                    )
+                    OutlinedButton(
+                        onClick = viewModel::cancelGimbalCalibration,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Interrompi calibrazione")
+                    }
+                } else {
+                    if (calibration.isValid) {
+                        LabeledValue("Profilo attivo", formatCalibrationDate(calibration.calibratedAtMs), Luna.Ok)
+                        LabeledValue("Qualità misure", "${calibration.qualityPercent}% · ${calibration.validSamples}/${calibration.totalSamples}")
+                        LabeledValue("Ritardo / assestamento", "${calibration.responseOverheadMs} ms / ${calibration.settleMs} ms")
+                        calibration.levels.sortedBy { it.hardwareLevel }.forEach { level ->
+                            LabeledValue(
+                                when (level.hardwareLevel) { 1 -> "Lenta"; 2 -> "Media"; else -> "Veloce" },
+                                "pan %+.0f px/s · tilt %+.0f px/s".format(
+                                    level.panImagePixelsPerSecond,
+                                    level.tiltImagePixelsPerSecond,
+                                ),
+                            )
+                        }
+                    } else {
+                        LabeledValue("Profilo attivo", "Non ancora calibrato")
+                    }
+                    calibrationState.error?.let { Hint("Ultimo tentativo: $it") }
+                    Button(
+                        onClick = viewModel::startGimbalCalibration,
+                        enabled = connected,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(LunaIcons.Center, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text(if (calibration.isValid) "  Riesegui calibrazione completa" else "  Avvia calibrazione completa")
+                    }
+                }
+                Hint(
+                    "Durata circa 2 minuti. Lascia la camera libera di ruotare, inquadra una " +
+                        "scena ferma e ricca di dettagli e non toccarla. Vengono misurati Lenta, " +
+                        "Media e Veloce sui due assi; il profilo precedente resta valido se la " +
+                        "nuova prova viene interrotta o non è affidabile.",
+                )
+                if (calibration.isValid) {
+                    Hint(
+                        "Il file gimbal_calibration.json viene caricato a ogni avvio e usato " +
+                            "automaticamente per tempi, direzioni e correzione visiva dei waypoint.",
+                    )
+                }
+            }
+        }
+
         SectionCard(title = "Timelapse della camera", icon = LunaIcons.Timelapse, accent = Luna.Lapse) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 NumberField(
@@ -334,3 +400,6 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
         }
     }
 }
+
+private fun formatCalibrationDate(timestampMs: Long): String =
+    SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.ITALIAN).format(Date(timestampMs))

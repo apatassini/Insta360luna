@@ -153,6 +153,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val logEntries = container.log.entries
     val ptz = container.gimbal.position
     val gimbalMoving = container.gimbal.moving
+    val gimbalCalibration = container.calibrationStore.state
+    val gimbalCalibrationState = container.calibrator.state
     val runState = container.engine.state
     val preview: StateFlow<PreviewState> = container.preview.state
 
@@ -553,6 +555,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 .onFailure { showMessage("Velocità gimbal non applicata: ${it.message}") }
         }
+    }
+
+    fun startGimbalCalibration() {
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti alla camera prima della calibrazione")
+            return
+        }
+        if (runState.value.running || gimbalCalibrationState.value.running) {
+            showMessage("Ferma la sequenza in corso prima della calibrazione")
+            return
+        }
+        container.calibrator.start(
+            cameraModel = status.value.model.orEmpty(),
+            firmware = status.value.firmware.orEmpty(),
+            originalHardwareLevel = settings.value.gimbal.hardwareSpeedLevel,
+        )
+        showMessage("Calibrazione avviata · non muovere camera o scena")
+    }
+
+    fun cancelGimbalCalibration() {
+        container.calibrator.cancel()
+        showMessage("Interruzione calibrazione…")
     }
 
     private fun gimbalSpeedLabel(level: Int): String = when (level) {

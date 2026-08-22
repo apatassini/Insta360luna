@@ -2,6 +2,7 @@ package it.persoft.lunaultra.timelapse
 
 import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
+import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.diagnostics.ImageVerification
 import it.persoft.lunaultra.diagnostics.PositionVerdict
 import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
@@ -64,6 +65,7 @@ class TimelapseEngine(
     private val gimbal: GimbalController,
     private val preview: PreviewController,
     private val settings: StateFlow<AppSettings>,
+    private val calibration: StateFlow<GimbalCalibrationProfile>,
     private val log: EventLog,
     private val scope: CoroutineScope,
 ) {
@@ -452,11 +454,21 @@ class TimelapseEngine(
                 }
             }
 
-            // Se la camera guarda troppo a destra, i dettagli scorrono a sinistra: Δx e pan
-            // hanno quindi lo stesso segno correttivo. Per il tilt l'asse immagine è opposto.
-            val panPulse = correctionAxis(verification.shiftX)
-            val tiltPulse = correctionAxis(-verification.shiftY)
-            val pulseMs = correctionPulseMs(verification)
+            val measured = calibration.value.takeIf(GimbalCalibrationProfile::isValid)
+                ?.level(settings.value.gimbal.hardwareSpeedLevel)
+            // Con un profilo valido non si presume più il verso: è quello misurato sulla camera.
+            // Il comando deve produrre nell'immagine lo spostamento opposto all'errore rilevato.
+            val panPulse = correctionAxis(
+                errorPixels = verification.shiftX,
+                measuredPositiveRate = measured?.panImagePixelsPerSecond,
+                fallbackSignedError = verification.shiftX,
+            )
+            val tiltPulse = correctionAxis(
+                errorPixels = verification.shiftY,
+                measuredPositiveRate = measured?.tiltImagePixelsPerSecond,
+                fallbackSignedError = -verification.shiftY,
+            )
+            val pulseMs = correctionPulseMs(verification, panPulse, tiltPulse, measured)
             _state.value = _state.value.copy(
                 phase = RunPhase.RUNNING,
                 message = "Correzione visiva ${target.name} · ${attempt + 1}/$MAX_VISUAL_ATTEMPTS",
@@ -467,7 +479,7 @@ class TimelapseEngine(
             )
             gimbal.correctionPulse(panPulse, tiltPulse, pulseMs)
                 .getOrElse { throw IllegalStateException("Impulso correttivo non inviato: ${it.message}", it) }
-            delay(VISUAL_SETTLE_MS)
+            delay(calibration.value.takeIf(GimbalCalibrationProfile::isValid)?.settleMs ?: VISUAL_SETTLE_MS)
             currentJpeg = preview.captureThumbnailJpeg()
         }
         log.warn("RUN $traceId · ALLINEAMENTO VISIVO NON RIUSCITO · $phase")
@@ -512,17 +524,38 @@ class TimelapseEngine(
             .coerceAtMost((legSeconds - MIN_VISUAL_MOTION_SECONDS).coerceAtLeast(0f))
     }
 
-    private fun correctionAxis(errorPixels: Float): Float {
+    private fun correctionAxis(
+        errorPixels: Float,
+        measuredPositiveRate: Float?,
+        fallbackSignedError: Float,
+    ): Float {
         if (abs(errorPixels) <= CORRECTION_DEAD_ZONE_PX) return 0f
         val magnitude = (abs(errorPixels) / CORRECTION_FULL_SCALE_PX)
             .coerceIn(MIN_CORRECTION_SPEED, MAX_CORRECTION_SPEED)
-        return magnitude * sign(errorPixels)
+        val signedCommand = if (measuredPositiveRate != null && abs(measuredPositiveRate) >= GimbalCalibrationProfile.MIN_RATE) {
+            -errorPixels / measuredPositiveRate
+        } else fallbackSignedError
+        return magnitude * sign(signedCommand)
     }
 
-    private fun correctionPulseMs(verification: ImageVerification): Long =
-        (BASE_CORRECTION_PULSE_MS + verification.displacementPixels * CORRECTION_MS_PER_PIXEL)
-            .toLong()
-            .coerceIn(MIN_CORRECTION_PULSE_MS, MAX_CORRECTION_PULSE_MS)
+    private fun correctionPulseMs(
+        verification: ImageVerification,
+        panPulse: Float,
+        tiltPulse: Float,
+        measured: it.persoft.lunaultra.data.GimbalLevelCalibration?,
+    ): Long {
+        if (measured != null) {
+            val panMs = if (abs(panPulse) > 0f && abs(measured.panImagePixelsPerSecond) >= GimbalCalibrationProfile.MIN_RATE) {
+                abs(verification.shiftX) / (abs(measured.panImagePixelsPerSecond) * abs(panPulse)) * 1000f
+            } else 0f
+            val tiltMs = if (abs(tiltPulse) > 0f && abs(measured.tiltImagePixelsPerSecond) >= GimbalCalibrationProfile.MIN_RATE) {
+                abs(verification.shiftY) / (abs(measured.tiltImagePixelsPerSecond) * abs(tiltPulse)) * 1000f
+            } else 0f
+            return max(panMs, tiltMs).toLong().coerceIn(MIN_CORRECTION_PULSE_MS, MAX_CORRECTION_PULSE_MS)
+        }
+        return (BASE_CORRECTION_PULSE_MS + verification.displacementPixels * CORRECTION_MS_PER_PIXEL)
+            .toLong().coerceIn(MIN_CORRECTION_PULSE_MS, MAX_CORRECTION_PULSE_MS)
+    }
 
     private suspend fun shutdown(aborted: Boolean, reason: String) {
         runCatching { gimbal.stop() }
@@ -562,6 +595,6 @@ class TimelapseEngine(
         const val BASE_CORRECTION_PULSE_MS = 140f
         const val CORRECTION_MS_PER_PIXEL = 4.5f
         const val MIN_CORRECTION_PULSE_MS = 160L
-        const val MAX_CORRECTION_PULSE_MS = 330L
+        const val MAX_CORRECTION_PULSE_MS = 600L
     }
 }

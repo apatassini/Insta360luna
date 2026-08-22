@@ -10,6 +10,8 @@ import it.persoft.lunaultra.protocol.LunaProtocolCodes.CaptureStatusField
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.OptionType
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.OptionsField
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.StorageField
+import it.persoft.lunaultra.media.Jpeg
+import it.persoft.lunaultra.protocol.ProtoField
 import it.persoft.lunaultra.protocol.ProtoReader
 import it.persoft.lunaultra.protocol.Ucd2Frame
 import kotlinx.coroutines.flow.StateFlow
@@ -212,6 +214,59 @@ class LunaCommands(
             timeoutMs = PHOTO_TIMEOUT_MS,
         ).map { }
 
+    // ---- Media sulla camera ----
+
+    /**
+     * Una pagina dell'elenco dei file: i percorsi e il totale dichiarato dalla camera.
+     *
+     * Dal firmware 1.0.238 la camera non espone più l'indice HTTP delle cartelle, che è come si
+     * elencavano i file prima: si enumerano da qui, e restano scaricabili per URL finché la
+     * sessione di controllo è aperta.
+     */
+    suspend fun getFileList(start: Int, limit: Int): Result<FileListPage> =
+        session.request(
+            LunaProtocolCodes.GET_FILE_LIST,
+            LunaMessages.getFileList(LunaProtocolCodes.MediaType.VIDEO_AND_PHOTO, start, limit),
+            timeoutMs = FILE_LIST_TIMEOUT_MS,
+        ).map { frame ->
+            val fields = ProtoReader(frame.payload).fields()
+            val paths = fields
+                .filterIsInstance<ProtoField.LengthDelimited>()
+                .filter { it.number == 1 }
+                .map { String(it.value, Charsets.UTF_8) }
+            val total = fields
+                .filterIsInstance<ProtoField.VarInt>()
+                .firstOrNull { it.number == 2 }
+                ?.value
+                ?.toInt()
+            FileListPage(paths = paths, total = total)
+        }
+
+    /**
+     * La miniatura di un file, se la camera la manda.
+     *
+     * La forma della risposta non è documentata, quindi non si dà per scontata: si cerca un
+     * JPEG dentro il corpo, il che funziona sia se arriva nudo sia se è dentro un campo
+     * protobuf. Quando non c'è, chi chiama ripiega invece di restare senza immagine.
+     */
+    suspend fun getMiniThumbnail(uri: String): Result<ByteArray> =
+        session.request(
+            LunaProtocolCodes.GET_MINI_THUMBNAIL,
+            LunaMessages.getMiniThumbnail(uri),
+            timeoutMs = THUMBNAIL_TIMEOUT_MS,
+        ).mapCatching { frame ->
+            Jpeg.extract(frame.payload)
+                ?: throw IllegalStateException("nessuna miniatura nella risposta")
+        }
+
+    /** Cancella file dalla camera. Irreversibile: la conferma la chiede chi chiama. */
+    suspend fun deleteFiles(uris: List<String>): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.DELETE_FILES,
+            LunaMessages.deleteFiles(uris),
+            timeoutMs = DELETE_TIMEOUT_MS,
+        ).map { }
+
     // ---- Anteprima dal vivo ----
 
     /**
@@ -324,10 +379,18 @@ class LunaCommands(
 
     data class CaptureSnapshot(val state: Int, val seconds: Int?)
 
+    /** Una pagina di `GET_FILE_LIST`: i percorsi letti e quanti ne dichiara in tutto la camera. */
+    data class FileListPage(val paths: List<String>, val total: Int?)
+
     companion object {
         private const val OPTIONS = LunaMessages.FIELD_OPTIONS_VALUE
 
         /** Uno scatto può richiedere più tempo di un comando qualsiasi: HDR, posa lunga, salvataggio. */
         private const val PHOTO_TIMEOUT_MS = 15_000L
+
+        /** L'elenco dei file su una scheda piena richiede più tempo di un comando qualsiasi. */
+        private const val FILE_LIST_TIMEOUT_MS = 12_000L
+        private const val THUMBNAIL_TIMEOUT_MS = 8_000L
+        private const val DELETE_TIMEOUT_MS = 20_000L
     }
 }

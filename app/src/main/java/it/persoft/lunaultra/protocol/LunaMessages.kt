@@ -100,6 +100,29 @@ object LunaMessages {
             .sint32(tiltField, tiltValue)
             .toByteArray()
 
+    /**
+     * `GetFileList { MediaType media_type = 1; uint32 start = 2; uint32 limit = 3 }`
+     *
+     * La risposta è `GetFileListResp { repeated string uri = 1; uint32 total_count = 2 }`.
+     * L'elenco arriva a pagine: il totale dichiarato serve a sapere quando fermarsi.
+     */
+    fun getFileList(mediaType: Int, start: Int, limit: Int): ByteArray =
+        ProtoWriter()
+            .int32(1, mediaType)
+            .int32(2, start)
+            .int32(3, limit)
+            .toByteArray()
+
+    /** `GetMiniThumbnail { string uri = 1 }` — la miniatura di un file, per percorso completo. */
+    fun getMiniThumbnail(uri: String): ByteArray = ProtoWriter().string(1, uri).toByteArray()
+
+    /** `DeleteFiles { repeated string uri = 1 }` */
+    fun deleteFiles(uris: List<String>): ByteArray {
+        val writer = ProtoWriter()
+        uris.forEach { writer.string(1, it) }
+        return writer.toByteArray()
+    }
+
     /** Campo di `GetOptions`/`SetOptions` che elenca i tipi di opzione richiesti. */
     const val FIELD_OPTION_TYPES = 1
 

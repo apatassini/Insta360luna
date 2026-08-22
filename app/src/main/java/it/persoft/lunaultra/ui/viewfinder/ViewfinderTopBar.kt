@@ -60,6 +60,7 @@ fun ViewfinderTopBar(
     onHideChrome: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSequence: () -> Unit,
+    onOpenGallery: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onRefreshStatus: () -> Unit,
     onShareLog: () -> Unit,
@@ -135,6 +136,10 @@ fun ViewfinderTopBar(
                     MenuRow(label = "Nascondi i comandi", icon = LunaIcons.Hide) {
                         menuOpen = false
                         onHideChrome()
+                    }
+                    MenuRow(label = "Galleria della camera", icon = LunaIcons.Gallery) {
+                        menuOpen = false
+                        onOpenGallery()
                     }
                     MenuRow(label = "Sequenza e punti", icon = LunaIcons.Sequence) {
                         menuOpen = false

@@ -87,6 +87,8 @@ Comandi usati dall'app, tutti con numero noto:
 | 22 / 23 | `START` / `STOP_TIMELAPSE` | timelapse interno della camera |
 | 3 | `TAKE_PICTURE` | scatto singolo |
 | 9 | `SET_PHOTOGRAPHY_OPTIONS` | proporzione della panoramica (sferica / 2:1) |
+| 13 | `GET_FILE_LIST` | elenco dei media sulla camera, a pagine |
+| 30 | `GET_MINI_THUMBNAIL` | miniatura di un file |
 
 ### Le modalità della camera: due trappole misurate
 
@@ -115,6 +117,35 @@ I valori sono `PANO_ASPECT_360 = 1` e `PANO_ASPECT_2_1 = 4`.
 
 La camera lascia l'altra sotto-modalità al suo valore sentinella (`*_NONE = 100`) invece di
 azzerarla: per sapere in che modalità è, il video vince quando è diverso da `VIDEO_NONE`.
+
+### Galleria e scaricamento
+
+I file si elencano **dalla sessione di controllo** e si scaricano **in HTTP**, e sono due cose
+separate per un motivo: dal firmware 1.0.238 la camera non pubblica più l'indice HTTP delle
+cartelle che le app scavalcavano prima, ma i singoli file restano scaricabili dal loro percorso
+finché la sessione è aperta.
+
+```text
+GetFileList     { MediaType media_type = 1; uint32 start = 2; uint32 limit = 3 }
+GetFileListResp { repeated string uri = 1; uint32 total_count = 2 }
+```
+
+Da lì escono percorsi come `/storage_internal/DCIM/Camera01/IMG_20260718_142012_00_002.jpg`, che
+sono insieme l'identità del file e il suo indirizzo: `http://192.168.42.1<percorso>`.
+
+Sull'elenco si applicano tre regole che l'occhio non vede ma che cambiano cosa compare:
+
+- ogni video ha accanto un **proxy `.lrv`** a bassa risoluzione. Non è un file da mostrare: è
+  l'anteprima, e viene accoppiato al suo video invece di finire in griglia da solo;
+- le **foto in movimento** salvano un `.live.mp4` di servizio, che non è una ripresa;
+- un **DNG** ha accanto il JPG dello stesso scatto, che è ciò che il telefono sa disegnare.
+
+Le miniature costano: una foto della Luna Ultra pesa decine di megabyte e scaricarla per
+disegnare un quadratino da 112 punti sarebbe assurdo. L'app le prende, in ordine, da
+`GET_MINI_THUMBNAIL`, dall'anteprima EXIF letta scaricando **solo i primi 256 KB** del file con
+una richiesta `Range`, e infine dal primo fotogramma di un proxy già in cache. Se nessuna di
+queste strade porta un'immagine, la casella mostra il tipo di file: meglio di una griglia che si
+riempie in cinque minuti.
 
 ### Restare connessi
 
@@ -190,7 +221,7 @@ invece che sotto — un tocco sull'immagine le toglie e l'anteprima si allarga a
 | Fascia in alto | connessione (si tocca per connettere), distintivo della modalità, anteprima on/off, griglia, impostazioni, menu ⋮ |
 | Sull'immagine, in alto a sinistra | spazio libero, batteria, gimbal pronto o no, cronometro di registrazione |
 | Sull'immagine, in basso | azzera posizione, pastiglia del tempo che conta nella modalità, comandi del gimbal |
-| Fascia in basso | memorizza punto · **pulsante di scatto** · sequenza e tempi · interpolazione, e sotto la ghiera delle modalità |
+| Fascia in basso | galleria (o memorizza punto, nelle modalità guidate) · **pulsante di scatto** · sequenza e tempi · interpolazione, e sotto la ghiera delle modalità |
 | Al centro | invito a connettersi, oppure il motivo per cui l'anteprima è ancora nera |
 
 Ogni modalità ha un colore e lo porta ovunque: la voce accesa nella ghiera, il pieno del
@@ -203,9 +234,23 @@ ognuna e l'avviso se non è utilizzabile — una modalità guidata senza punti m
 Ruotando il telefono la fascia di scatto passa sul lato destro e il pannello del gimbal si
 rimpicciolisce: in orizzontale l'altezza è il bene scarso.
 
-Tre pannelli si aprono sopra il mirino e si chiudono con Indietro: **Sequenza e punti**
+Quattro pannelli si aprono sopra il mirino e si chiudono con Indietro: **Galleria**,
+**Sequenza e punti**
 (riepilogo a numeri grandi, punti in griglia con la bussola di dove guardano),
 **Impostazioni** (camera, anteprima, movimento manuale) e **Diagnostica**.
+
+### La galleria
+
+Griglia dei file sulla camera, con filtro foto/video e i distintivi che dicono cos'è ogni cosa —
+video, panoramica, RAW. Un tocco apre il file a schermo intero: le foto si ingrandiscono con due
+dita, i video si riproducono dalla **copia locale del proxy**, non in streaming dalla camera —
+il lettore di sistema apre connessioni sue, che non passano dal binding sulla rete della camera.
+
+Tenendo premuto si entra in selezione multipla; il pulsante scarica i file scelti nella galleria
+del telefono, in `Immagini/Luna Ultra` e `Filmati/Luna Ultra`. Lo scaricamento va diritto dentro
+MediaStore invece di passare da una copia in cache: un video lungo occuperebbe due volte lo
+spazio, e su un telefono pieno è la differenza fra riuscire e no. Continua anche se chiudi la
+galleria.
 
 ### Le modalità della ghiera
 
@@ -411,7 +456,7 @@ Il codice qui è scritto da zero in Kotlin; da quei progetti vengono i **fatti s
 
 ## Fuori scope
 
-Editing e download dei media, AI tracking, Deep Track, live streaming, cloud e account Insta360,
+Editing dei media, AI tracking, Deep Track, live streaming, cloud e account Insta360,
 controllo multi-camera.
 
 ## Nota legale

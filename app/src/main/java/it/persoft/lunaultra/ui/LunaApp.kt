@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.screens.DiagnosticsScreen
+import it.persoft.lunaultra.ui.screens.GalleryScreen
 import it.persoft.lunaultra.ui.screens.SequenceScreen
 import it.persoft.lunaultra.ui.screens.SettingsScreen
 import it.persoft.lunaultra.ui.theme.Luna
@@ -64,6 +65,10 @@ fun LunaApp(viewModel: MainViewModel) {
 
     BackHandler(enabled = panel != Panel.NONE) { panelOrdinal = Panel.NONE.ordinal }
 
+    // Uscendo dalla galleria si chiude anche il file aperto a schermo intero: riaprirla e
+    // ritrovarsi dentro una foto di prima non è quello che si è chiesto.
+    LaunchedEffect(panel) { if (panel != Panel.GALLERY) viewModel.closeViewer() }
+
     Box(modifier = Modifier.fillMaxSize()) {
         ViewfinderScreen(
             viewModel = viewModel,
@@ -77,6 +82,7 @@ fun LunaApp(viewModel: MainViewModel) {
         ) {
             PanelHost(panel = panel, onClose = { panelOrdinal = Panel.NONE.ordinal }) {
                 when (panel) {
+                    Panel.GALLERY -> GalleryScreen(viewModel)
                     Panel.SEQUENCE -> SequenceScreen(viewModel)
                     Panel.SETTINGS -> SettingsScreen(viewModel, onOpenDiagnostics = {
                         panelOrdinal = Panel.DIAGNOSTICS.ordinal

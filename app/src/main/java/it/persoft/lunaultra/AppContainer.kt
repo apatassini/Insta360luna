@@ -7,6 +7,7 @@ import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.JsonFileStore
 import it.persoft.lunaultra.gimbal.GimbalController
+import it.persoft.lunaultra.media.MediaRepository
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
 import it.persoft.lunaultra.net.WifiNetworkBinder
@@ -45,6 +46,7 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val preview = PreviewController(session, commands, settingsStore.state, wifiBinder, log, scope)
     val gimbal = GimbalController(commands, settingsStore.state, log, scope)
     val engine = TimelapseEngine(commands, gimbal, log, scope)
+    val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log)
 
     suspend fun load() {
         settingsStore.load()

@@ -10,6 +10,7 @@ import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
+import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.preview.PreviewState
 import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
@@ -23,6 +24,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -89,6 +92,38 @@ data class ProbeUiState(
     val calibration: CodeProbe.Calibration? = null,
 )
 
+/**
+ * La libreria della camera vista dalla UI.
+ *
+ * Gli scaricamenti in corso stanno qui e non nella schermata: chi chiude la galleria mentre sta
+ * salvando un video non si aspetta che il salvataggio muoia con la schermata.
+ */
+data class GalleryState(
+    val loading: Boolean = false,
+    val items: List<MediaItem> = emptyList(),
+    val error: String? = null,
+    val selected: Set<String> = emptySet(),
+    /** Percorso del file → avanzamento, da 0 a 1. */
+    val downloads: Map<String, Float> = emptyMap(),
+    val loadedAtMs: Long = 0L,
+) {
+    val selectionMode: Boolean get() = selected.isNotEmpty()
+    val photos: Int get() = items.count { !it.isVideo }
+    val videos: Int get() = items.count { it.isVideo }
+}
+
+/** Il file aperto a schermo intero. */
+data class ViewerState(
+    val item: MediaItem? = null,
+    val index: Int = -1,
+    val loading: Boolean = false,
+    val progress: Float = 0f,
+    val photo: android.graphics.Bitmap? = null,
+    /** Percorso locale del video già scaricato, pronto per il lettore di sistema. */
+    val videoFile: String? = null,
+    val message: String? = null,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val container = AppContainer(application, viewModelScope)
@@ -121,6 +156,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val _recordingSinceMs = MutableStateFlow(0L)
     val recordingSinceMs: StateFlow<Long> = _recordingSinceMs
+
+    private val _gallery = MutableStateFlow(GalleryState())
+    val gallery: StateFlow<GalleryState> = _gallery
+
+    private val _viewer = MutableStateFlow(ViewerState())
+    val viewer: StateFlow<ViewerState> = _viewer
+
+    /**
+     * Quante miniature si chiedono insieme. Passano dalla sessione di controllo, che è una sola:
+     * scatenarne cinquanta in parallelo significa mettere in coda anche i comandi di ripresa.
+     */
+    private val thumbnailGate = Semaphore(THUMBNAIL_CONCURRENCY)
 
     private val _probe = MutableStateFlow(ProbeUiState())
     val probe: StateFlow<ProbeUiState> = _probe
@@ -155,6 +202,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectJob: Job? = null
 
     private var pollJob: Job? = null
+    private var viewerJob: Job? = null
     private var probeJob: Job? = null
     private var monitorJob: Job? = null
 
@@ -965,6 +1013,183 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ---------------------------------------------------------------- galleria
+
+    /**
+     * Rilegge la libreria dalla camera. Senza [force] non rifà il giro se l'elenco è recente:
+     * aprire e chiudere la galleria non deve costare un'enumerazione di migliaia di file.
+     */
+    fun refreshGallery(force: Boolean = false) {
+        if (_gallery.value.loading) return
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            _gallery.value = _gallery.value.copy(error = "Connettiti alla camera per vedere i file")
+            return
+        }
+        val age = System.currentTimeMillis() - _gallery.value.loadedAtMs
+        if (!force && _gallery.value.items.isNotEmpty() && age < GALLERY_FRESH_MS) return
+
+        viewModelScope.launch {
+            _gallery.value = _gallery.value.copy(loading = true, error = null)
+            container.media.list()
+                .onSuccess { items ->
+                    _gallery.value = _gallery.value.copy(
+                        loading = false,
+                        items = items,
+                        error = if (items.isEmpty()) "Nessun file sulla camera" else null,
+                        loadedAtMs = System.currentTimeMillis(),
+                    )
+                }
+                .onFailure {
+                    _gallery.value = _gallery.value.copy(
+                        loading = false,
+                        error = "Elenco non riuscito: ${it.message}",
+                    )
+                }
+        }
+    }
+
+    /** La miniatura di un file. Restituisce null quando non c'è modo di averne una. */
+    suspend fun thumbnail(item: MediaItem): android.graphics.Bitmap? =
+        thumbnailGate.withPermit { container.media.thumbnail(item) }
+
+    fun toggleSelection(item: MediaItem) {
+        val selected = _gallery.value.selected
+        _gallery.value = _gallery.value.copy(
+            selected = if (item.path in selected) selected - item.path else selected + item.path,
+        )
+    }
+
+    fun clearSelection() {
+        _gallery.value = _gallery.value.copy(selected = emptySet())
+    }
+
+    fun selectAll() {
+        _gallery.value = _gallery.value.copy(selected = _gallery.value.items.map { it.path }.toSet())
+    }
+
+    /** Salva nella galleria del telefono i file selezionati, uno alla volta. */
+    fun downloadSelected() {
+        val state = _gallery.value
+        val items = state.items.filter { it.path in state.selected }
+        if (items.isEmpty()) return
+        clearSelection()
+        viewModelScope.launch {
+            var done = 0
+            for (item in items) {
+                if (saveOne(item)) done++
+            }
+            showMessage(
+                when {
+                    done == items.size && done == 1 -> "Salvato nella galleria del telefono"
+                    done == items.size -> "$done file salvati nella galleria del telefono"
+                    else -> "Salvati $done file su ${items.size}"
+                }
+            )
+        }
+    }
+
+    fun download(item: MediaItem) {
+        viewModelScope.launch {
+            if (saveOne(item)) showMessage("${item.name} salvato nella galleria del telefono")
+        }
+    }
+
+    private suspend fun saveOne(item: MediaItem): Boolean {
+        updateProgress(item.path, 0f)
+        val result = container.media.saveToGallery(item) { progress -> updateProgress(item.path, progress) }
+        clearProgress(item.path)
+        return result
+            .onFailure { showMessage("Salvataggio di ${item.name} non riuscito: ${it.message}") }
+            .isSuccess
+    }
+
+    private fun updateProgress(path: String, progress: Float) {
+        _gallery.value = _gallery.value.copy(downloads = _gallery.value.downloads + (path to progress))
+    }
+
+    private fun clearProgress(path: String) {
+        _gallery.value = _gallery.value.copy(downloads = _gallery.value.downloads - path)
+    }
+
+    // ---------------------------------------------------------------- visione
+
+    /**
+     * Apre un file a schermo intero.
+     *
+     * Foto: si scarica e si decodifica ridotta a quanto serve per lo schermo. Video: si scarica
+     * il proxy a bassa risoluzione, che la camera salva apposta accanto a ogni ripresa — il file
+     * grosso si scarica solo se lo chiedi.
+     */
+    fun openViewer(item: MediaItem) {
+        val index = _gallery.value.items.indexOfFirst { it.path == item.path }
+        viewerJob?.cancel()
+        _viewer.value = ViewerState(item = item, index = index, loading = true)
+        viewerJob = viewModelScope.launch {
+            when {
+                item.isVideo -> {
+                    val proxy = item.proxyPath != null
+                    container.media.cache(item, preferProxy = proxy) { progress ->
+                        _viewer.value = _viewer.value.copy(progress = progress)
+                    }
+                        .onSuccess { file ->
+                            _viewer.value = _viewer.value.copy(
+                                loading = false,
+                                videoFile = file.absolutePath,
+                                message = if (proxy) "anteprima a bassa risoluzione" else null,
+                            )
+                        }
+                        .onFailure {
+                            _viewer.value = _viewer.value.copy(
+                                loading = false,
+                                message = "Video non scaricabile: ${it.message}",
+                            )
+                        }
+                }
+
+                !item.renderable && item.previewPath == null -> {
+                    _viewer.value = _viewer.value.copy(
+                        loading = false,
+                        message = "Formato ${item.extension.uppercase()} non visualizzabile sul telefono: puoi scaricarlo",
+                    )
+                }
+
+                else -> {
+                    container.media.loadPhoto(item, PHOTO_VIEW_MAX_SIZE) { progress ->
+                        _viewer.value = _viewer.value.copy(progress = progress)
+                    }
+                        .onSuccess { bitmap ->
+                            _viewer.value = _viewer.value.copy(loading = false, photo = bitmap)
+                        }
+                        .onFailure {
+                            _viewer.value = _viewer.value.copy(
+                                loading = false,
+                                message = "Foto non caricata: ${it.message}",
+                            )
+                        }
+                }
+            }
+        }
+    }
+
+    fun closeViewer() {
+        viewerJob?.cancel()
+        viewerJob = null
+        _viewer.value = ViewerState()
+    }
+
+    /** Passa al file precedente o successivo restando a schermo intero. */
+    fun stepViewer(delta: Int) {
+        val items = _gallery.value.items
+        val next = _viewer.value.index + delta
+        if (next !in items.indices) return
+        openViewer(items[next])
+    }
+
+    fun clearGalleryCache() {
+        container.media.clearDownloads()
+        showMessage("Copie locali cancellate")
+    }
+
     fun clearLog() = container.log.clear()
 
     fun exportLog(): String = container.log.exportText()
@@ -1021,6 +1246,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val GIMBAL_WARNING_INTERVAL_MS = 8_000L
 
         /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano fino a otto volte. */
+        /** Quanto resta valido un elenco della libreria prima di rifare il giro. */
+        const val GALLERY_FRESH_MS = 60_000L
+        const val THUMBNAIL_CONCURRENCY = 3
+        const val PHOTO_VIEW_MAX_SIZE = 2_048
+
         const val RECONNECT_BASE_MS = 2_000L
         const val MAX_RECONNECT_ATTEMPTS = 6
 

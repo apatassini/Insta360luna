@@ -16,6 +16,9 @@ object LunaProtocolCodes {
     const val TAKE_PICTURE = 3
     const val START_CAPTURE = 4
     const val STOP_CAPTURE = 5
+    const val DELETE_FILES = 12
+    const val GET_FILE_LIST = 13
+    const val GET_MINI_THUMBNAIL = 30
     const val SET_OPTIONS = 7
     const val GET_OPTIONS = 8
     const val SET_PHOTOGRAPHY_OPTIONS = 9
@@ -111,6 +114,17 @@ object LunaProtocolCodes {
         const val PHOTO_SUB_MODE = 40
         const val VIDEO_SUB_MODE = 41
         const val CAMERA_TYPE = 48
+    }
+
+    /** Valori di `insta360.messages.MediaType` (`media.proto`). */
+    object MediaType {
+        const val VIDEO = 0
+        const val PHOTO = 1
+        const val VIDEO_AND_PHOTO = 2
+        const val DNG = 3
+        const val MP4 = 4
+        const val JPG = 5
+        const val INS_DATA = 6
     }
 
     /**

@@ -288,6 +288,7 @@ fun ViewfinderScreen(
                     onHideChrome = { chromeVisible = false },
                     onOpenSettings = { onOpenPanel(Panel.SETTINGS) },
                     onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
+                    onOpenGallery = { onOpenPanel(Panel.GALLERY) },
                     onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
                     onRefreshStatus = viewModel::refreshStatus,
                     onShareLog = { viewModel.shareLog(context) },
@@ -305,6 +306,7 @@ fun ViewfinderScreen(
                     waypointCount = sequence.waypoints.size,
                     onCaptureWaypoint = viewModel::captureWaypoint,
                     onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
+                    onOpenGallery = { onOpenPanel(Panel.GALLERY) },
                     interpolationLabel = if (sequence.interpolation == InterpolationMode.SMOOTH) "SMTH" else "LIN",
                     onToggleInterpolation = {
                         viewModel.setInterpolation(

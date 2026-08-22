@@ -58,11 +58,20 @@ jobs:
         run: |
           set -euo pipefail
           TAG="apk-${BRANCH//\//-}"
-          NOTES="Build automatica del commit ${COMMIT}. Scarica app-debug.apk qui sotto. E' una build di debug: sul telefono va consentita l'installazione da origini sconosciute."
+          {
+            echo "Build automatica del commit ${COMMIT}. Scarica app-debug.apk qui sotto."
+            echo
+            echo "E' una build di debug: sul telefono va consentita l'installazione da origini sconosciute."
+            echo
+            echo "Gli aggiornamenti si installano sopra la versione precedente, senza disinstallare."
+            echo "Se compare «il pacchetto e' in conflitto con un pacchetto esistente» vieni da una"
+            echo "build vecchia, firmata con una chiave casuale: disinstalla l'app una volta sola e"
+            echo "da li in poi gli aggiornamenti si installano sopra."
+          } > release-notes.md
           gh release delete "$TAG" --yes --cleanup-tag || true
           gh release create "$TAG" \
             --target "$COMMIT" \
             --title "APK di debug - $BRANCH" \
-            --notes "$NOTES" \
+            --notes-file release-notes.md \
             --prerelease \
             app/build/outputs/apk/debug/app-debug.apk

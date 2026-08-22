@@ -166,7 +166,19 @@ Due cose diverse, tutte e due necessarie:
 ### In CI (consigliato)
 
 Il workflow `.github/workflows/android.yml` compila a ogni push e pubblica l'APK di debug come
-artefatto della run (`luna-timelapse-debug`). Non serve nulla installato in locale.
+artefatto della run (`luna-timelapse-debug`) e come release scaricabile. Non serve nulla
+installato in locale.
+
+**La firma è fissa e sta nel repository** (`app/debug.keystore`). Senza, ogni run della CI parte
+da zero e genera una chiave di debug nuova: l'APK esce firmato con un certificato diverso ogni
+volta e Android rifiuta l'aggiornamento con «il pacchetto è in conflitto con un pacchetto
+esistente», costringendo a disinstallare — e a perdere punti e impostazioni — a ogni versione.
+È una chiave di debug e non protegge niente: serve solo a far riconoscere le build come la
+stessa app. Una distribuzione vera va firmata con una chiave di release tenuta fuori dal
+repository.
+
+Il `versionCode` cresce con il numero della run (`GITHUB_RUN_NUMBER`), perché Android non
+installa sopra una versione con numero uguale o più alto.
 
 ### In locale
 

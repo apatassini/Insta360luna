@@ -5,6 +5,13 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+/**
+ * Numero della build in CI. Serve a far crescere il `versionCode` a ogni pubblicazione:
+ * Android rifiuta di installare sopra una versione uguale o più recente, e con un numero fisso
+ * ogni aggiornamento sarebbe un reinstall a mano.
+ */
+val buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toIntOrNull() ?: 0
+
 android {
     namespace = "it.persoft.lunaultra"
     compileSdk = 35
@@ -13,15 +20,37 @@ android {
         applicationId = "it.persoft.lunaultra"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 1 + buildNumber
+        versionName = "0.2.$buildNumber"
+    }
+
+    /**
+     * Chiave di firma fissa, tenuta nel repository.
+     *
+     * Senza, ogni macchina che compila — e ogni run della CI, che parte da zero — genera una
+     * `debug.keystore` nuova: l'APK esce firmato con un certificato diverso ogni volta e Android
+     * rifiuta l'aggiornamento con «il pacchetto è in conflitto con un pacchetto esistente»,
+     * costringendo a disinstallare e perdere punti e impostazioni a ogni versione.
+     *
+     * È una chiave di debug e va trattata come tale: non protegge niente, serve solo a far
+     * riconoscere le build come la stessa app. Se un giorno l'app venisse distribuita davvero,
+     * la firma di release va fatta con una chiave privata tenuta fuori dal repository.
+     */
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "luna"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
-        // La build di debug è quella che viene distribuita: è l'unica firmabile senza una
-        // chiave, e va scaricata sul telefono. Senza R8 pesa 10 MB di dex non ottimizzato, che
-        // su una connessione incerta è un download che non arriva in fondo.
+        // La build di debug è quella che viene distribuita, firmata con la chiave fissa qui
+        // sopra. Senza R8 pesa 10 MB di dex non ottimizzato, che su una connessione incerta è
+        // un download che non arriva in fondo.
         debug {
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

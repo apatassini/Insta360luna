@@ -313,7 +313,11 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     }
                 } else {
                     if (calibration.isValid) {
-                        LabeledValue("Profilo attivo", formatCalibrationDate(calibration.calibratedAtMs), Luna.Ok)
+                        LabeledValue(
+                            "Profilo attivo",
+                            formatCalibrationDate(calibration.calibratedAtMs),
+                            valueColor = Luna.Ok,
+                        )
                         LabeledValue("Qualità misure", "${calibration.qualityPercent}% · ${calibration.validSamples}/${calibration.totalSamples}")
                         LabeledValue("Ritardo / assestamento", "${calibration.responseOverheadMs} ms / ${calibration.settleMs} ms")
                         calibration.levels.sortedBy { it.hardwareLevel }.forEach { level ->

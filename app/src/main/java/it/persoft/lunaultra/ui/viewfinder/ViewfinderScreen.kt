@@ -444,7 +444,8 @@ private fun infoPillText(
     CaptureMode.SEQUENZA_FOTO -> "attesa ${trim(settleSeconds)} s"
     CaptureMode.TIMELAPSE, CaptureMode.SEQUENZA_TL -> "intervallo ${trim(intervalSeconds)} s"
     CaptureMode.SEQUENZA_VIDEO -> "durata ${totalSeconds.roundToInt()} s"
-    CaptureMode.FOTO, CaptureMode.VIDEO, CaptureMode.PANORAMA -> null
+    CaptureMode.FOTO, CaptureMode.VIDEO, CaptureMode.PURE_VIDEO,
+    CaptureMode.SLOW_MOTION, CaptureMode.PANORAMA -> null
 }
 
 private fun trim(value: Float): String =

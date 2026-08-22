@@ -309,12 +309,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connectionJob = viewModelScope.launch {
             _wifiConnecting.value = true
             container.log.info("Ricerca della rete Luna Ultra…")
-            val network = container.wifiBinder.acquire(settings.value.cameraWifiPassword)
+            val currentSettings = settings.value
+            val network = container.wifiBinder.acquire(
+                password = currentSettings.cameraWifiPassword,
+                cameraHost = currentSettings.host,
+            )
             _wifiConnecting.value = false
             if (network == null) {
                 wantConnected = false
                 if (showFailure) {
-                    showMessage("Connessione Wi-Fi automatica non riuscita: verifica la password della Luna")
+                    val detail = if (currentSettings.cameraWifiPassword.isBlank()) {
+                        "collegati una volta alla Luna oppure inserisci la password nelle Impostazioni"
+                    } else {
+                        "Android non ha autorizzato il cambio rete; verifica password e conferma di sistema"
+                    }
+                    showMessage("Connessione Wi-Fi automatica non riuscita: $detail")
                 }
                 return@launch
             }
@@ -409,7 +418,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.log.warn("Sessione caduta: riprovo fra ${wait / 1000}s (tentativo $attempt)")
             delay(wait)
             if (!wantConnected) return@launch
-            val network = container.wifiBinder.acquire(settings.value.cameraWifiPassword)
+            val currentSettings = settings.value
+            val network = container.wifiBinder.acquire(
+                password = currentSettings.cameraWifiPassword,
+                cameraHost = currentSettings.host,
+            )
             if (network == null) {
                 container.log.warn("Riconnessione Wi-Fi non riuscita")
                 return@launch

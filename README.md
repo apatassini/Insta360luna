@@ -229,7 +229,11 @@ Due cose diverse, tutte e due necessarie:
   crescenti (2, 4, 8, 16 secondi…) finché non riesce o finché non si arrende dopo sei tentativi.
   Smette solo quando sei tu a premere «disconnetti».
 
-La selezione iniziale della rete è automatica e usa l'SSID esatto trovato dalla scansione. La
+Prima di richiedere un cambio rete, l'app controlla tutte le reti Wi-Fi attive e riutilizza
+direttamente la Luna se il telefono è già collegato: in questo caso non apre il selettore di
+Android. Riconosce sia l'SSID sia il collegamento/gateway verso `192.168.42.1`, compresi i
+firmware che oscurano l'SSID nelle API moderne. Se la Luna non è ancora attiva, la selezione
+iniziale usa l'SSID esatto trovato dalla scansione. La
 Luna protegge l'access point con una password modificabile: Android non consente a un'app di
 leggere quella già salvata nel telefono. Per questo basta una delle due strade:
 

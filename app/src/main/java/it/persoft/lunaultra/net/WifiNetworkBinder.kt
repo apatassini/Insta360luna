@@ -16,6 +16,7 @@ import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.PatternMatcher
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -49,10 +50,15 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
      * "Luna Ultra". Android può chiedere una conferma di sistema la prima volta, ma le aperture
      * successive riutilizzano l'autorizzazione già data.
      */
-    suspend fun acquire(password: String = "", timeoutMs: Long = 15_000): Network? = acquireMutex.withLock {
-        network?.let { return it }
+    suspend fun acquire(
+        password: String = "",
+        cameraHost: String = DEFAULT_CAMERA_HOST,
+        timeoutMs: Long = 15_000,
+    ): Network? = acquireMutex.withLock {
+        network?.takeIf(::isUsableWifiNetwork)?.let { return it }
+        network = null
 
-        currentLunaNetwork()?.let {
+        currentLunaNetwork(cameraHost)?.let {
             // Se una vecchia richiesta con WifiNetworkSpecifier era caduta, il suo callback
             // può essere ancora registrato e continuare a contendere la rete alla connessione
             // manuale. Prima di adottare la rete già attiva lo si elimina.
@@ -144,7 +150,16 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
         }
         if (result == null) {
             unregisterRequest()
-            log.warn("Nessuna rete Wi-Fi disponibile entro ${timeoutMs} ms")
+            // Alcuni firmware completano lo switch proprio mentre chiudono il selettore con
+            // onUnavailable(). Prima di dichiarare il fallimento controlliamo quindi lo stato
+            // reale: se il telefono è arrivato sulla Luna, la adottiamo senza una seconda
+            // richiesta che causerebbe il ciclo connessione/disconnessione.
+            awaitCurrentLunaNetwork(cameraHost)?.let {
+                network = it
+                log.info("Wi-Fi Luna attivo dopo il selettore: ${ssidOf(it) ?: LUNA_SSID_PREFIX}")
+                return it
+            }
+            log.warn("Nessuna rete Wi-Fi Luna disponibile entro ${timeoutMs} ms")
         }
         return result
     }
@@ -217,36 +232,82 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
     /**
      * Una rete Luna già attiva non deve passare da nessuna finestra di scelta.
      *
-     * L'SSID può risultare `UNKNOWN_SSID` anche se la rete è connessa (permesso appena concesso,
-     * posizione disattivata o comportamento OEM). La sottorete 192.168.42.x è quindi il secondo
-     * identificatore: consente di adottare anche una connessione fatta manualmente dall'utente.
+     * L'SSID può risultare sconosciuto anche se la rete è connessa (permesso appena concesso,
+     * posizione disattivata o comportamento OEM). Indirizzi locali e gateway verso l'host della
+     * camera sono quindi identificatori aggiuntivi della connessione fatta manualmente.
      */
-    private fun currentLunaNetwork(): Network? = runCatching {
-        connectivityManager.allNetworks.firstOrNull { candidate ->
-            val capabilities = connectivityManager.getNetworkCapabilities(candidate) ?: return@firstOrNull false
-            if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@firstOrNull false
-            val matchingSsid = ssidOf(candidate)?.startsWith(LUNA_SSID_PREFIX, ignoreCase = true) == true
-            val matchingSubnet = connectivityManager.getLinkProperties(candidate)
-                ?.linkAddresses
-                ?.any { it.address.hostAddress?.startsWith(LUNA_SUBNET_PREFIX) == true } == true
-            matchingSsid || matchingSubnet
+    private fun currentLunaNetwork(cameraHost: String): Network? = runCatching {
+        val wifiNetworks = connectivityManager.allNetworks.filter(::isUsableWifiNetwork)
+        if (wifiNetworks.isEmpty()) return@runCatching null
+
+        // È l'identificatore più preciso e resta corretto anche sui telefoni con due reti Wi-Fi
+        // simultanee (funzione disponibile su alcuni Android recenti).
+        wifiNetworks.firstOrNull { LunaWifiIdentity.isLunaSsid(capabilitySsidOf(it)) }
+            ?.let { return@runCatching it }
+
+        // Se transportInfo è oscurato, WifiManager spesso conserva il vero SSID della rete
+        // Wi-Fi primaria. Prima il codice preferiva sempre "<unknown ssid>" e non arrivava mai
+        // a questo dato: era la causa del nuovo selettore anche a Luna già connessa.
+        val primarySsid = legacyConnectedSsid()
+        if (LunaWifiIdentity.isLunaSsid(primarySsid)) {
+            return@runCatching wifiNetworks.firstOrNull { matchesCameraLink(it, cameraHost) }
+                ?: wifiNetworks.firstOrNull { !isValidated(it) }
+                ?: wifiNetworks.singleOrNull()
+                ?: wifiNetworks.first()
         }
+
+        // L'indirizzo del telefono non è necessariamente 192.168.42.x. Per questo controlliamo
+        // anche il gateway: nelle catture Luna il telefono può avere 10.x ma raggiunge la camera
+        // tramite il gateway configurato a 192.168.42.1.
+        wifiNetworks.firstOrNull { matchesCameraLink(it, cameraHost) }
+    }.onFailure {
+        log.warn("Stato della rete Wi-Fi non leggibile: ${it.message}")
     }.getOrNull()
+
+    private suspend fun awaitCurrentLunaNetwork(cameraHost: String): Network? {
+        repeat(POST_SELECTOR_CHECKS) { attempt ->
+            currentLunaNetwork(cameraHost)?.let { return it }
+            if (attempt < POST_SELECTOR_CHECKS - 1) delay(POST_SELECTOR_CHECK_INTERVAL_MS)
+        }
+        return null
+    }
+
+    private fun isUsableWifiNetwork(candidate: Network): Boolean =
+        connectivityManager.getNetworkCapabilities(candidate)
+            ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+
+    private fun isValidated(candidate: Network): Boolean =
+        connectivityManager.getNetworkCapabilities(candidate)
+            ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+
+    private fun matchesCameraLink(candidate: Network, cameraHost: String): Boolean {
+        val properties = connectivityManager.getLinkProperties(candidate) ?: return false
+        val matchingAddress = properties.linkAddresses.any {
+            LunaWifiIdentity.isCameraSubnetAddress(it.address.hostAddress)
+        }
+        val matchingGateway = properties.routes.any {
+            LunaWifiIdentity.isCameraGateway(it.gateway?.hostAddress, cameraHost)
+        }
+        return matchingAddress || matchingGateway
+    }
+
+    private fun capabilitySsidOf(candidate: Network): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val raw = connectivityManager.getNetworkCapabilities(candidate)
+            ?.transportInfo
+            ?.let { it as? WifiInfo }
+            ?.ssid
+        return LunaWifiIdentity.normalizeSsid(raw)
+    }
+
+    @SuppressLint("MissingPermission")
+    @Suppress("DEPRECATION")
+    private fun legacyConnectedSsid(): String? =
+        LunaWifiIdentity.normalizeSsid(wifiManager.connectionInfo?.ssid)
 
     @Suppress("DEPRECATION")
     private fun ssidOf(candidate: Network): String? {
-        val fromCapabilities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            connectivityManager.getNetworkCapabilities(candidate)
-                ?.transportInfo
-                ?.let { it as? WifiInfo }
-                ?.ssid
-        } else {
-            null
-        }
-        val raw = fromCapabilities ?: wifiManager.connectionInfo?.ssid
-        return raw
-            ?.removeSurrounding("\"")
-            ?.takeUnless { it == WifiManager.UNKNOWN_SSID }
+        return capabilitySsidOf(candidate) ?: legacyConnectedSsid()
     }
 
     /** Associa il socket alla rete Wi-Fi. Restituisce true se il binding è riuscito. */
@@ -293,9 +354,11 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
     }
 
     companion object {
-        const val LUNA_SSID_PREFIX = "Luna Ultra"
-        private const val LUNA_SUBNET_PREFIX = "192.168.42."
+        const val LUNA_SSID_PREFIX = LunaWifiIdentity.SSID_PREFIX
+        private const val DEFAULT_CAMERA_HOST = "192.168.42.1"
         private const val SCAN_TIMEOUT_MS = 5_000L
+        private const val POST_SELECTOR_CHECKS = 5
+        private const val POST_SELECTOR_CHECK_INTERVAL_MS = 300L
     }
 
     private data class LunaAccessPoint(val ssid: String, val security: WifiSecurity)

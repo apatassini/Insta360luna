@@ -178,7 +178,8 @@ stessa app. Una distribuzione vera va firmata con una chiave di release tenuta f
 repository.
 
 Il `versionCode` cresce con il numero della run (`GITHUB_RUN_NUMBER`), perché Android non
-installa sopra una versione con numero uguale o più alto.
+installa sopra una versione con numero uguale o più alto. Una build fatta in locale vale 1 e
+quindi **non** si installa sopra una build della CI: per provarla, disinstalla prima.
 
 ### In locale
 

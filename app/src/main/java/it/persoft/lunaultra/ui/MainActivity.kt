@@ -2,9 +2,13 @@ package it.persoft.lunaultra.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -14,10 +18,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import it.persoft.lunaultra.ui.theme.LunaTheme
+import java.io.File
 
 class MainActivity : ComponentActivity() {
+
+    private var pendingUpdate: File? = null
+    private val installPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        val update = pendingUpdate ?: return@registerForActivityResult
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+            pendingUpdate = null
+            openInstaller(update)
+        } else {
+            Toast.makeText(this, "Autorizzazione installazione non concessa", Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -27,10 +45,36 @@ class MainActivity : ComponentActivity() {
         setContent {
             LunaTheme {
                 val vm: MainViewModel = viewModel()
-                AskRuntimePermissions(onReady = vm::autoConnect)
+                AskRuntimePermissions(onReady = { vm.autoUpdateAndConnect(::installUpdate) })
                 LunaApp(vm)
             }
         }
+    }
+
+    private fun installUpdate(apk: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            pendingUpdate = apk
+            installPermission.launch(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName"),
+                )
+            )
+            return
+        }
+        openInstaller(apk)
+    }
+
+    private fun openInstaller(apk: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { startActivity(intent) }
+            .onFailure {
+                Toast.makeText(this, "Installazione non disponibile: ${it.message}", Toast.LENGTH_LONG).show()
+            }
     }
 }
 

@@ -64,6 +64,7 @@ jobs:
             echo "E' una build di debug: sul telefono va consentita l'installazione da origini sconosciute."
             echo
             echo "Gli aggiornamenti si installano sopra la versione precedente, senza disinstallare."
+            echo "Dalla build che include l'updater, l'app controlla e scarica questa release all'avvio."
             echo "Se compare «il pacchetto e' in conflitto con un pacchetto esistente» vieni da una"
             echo "build vecchia, firmata con una chiave casuale: disinstalla l'app una volta sola e"
             echo "da li in poi gli aggiornamenti si installano sopra."

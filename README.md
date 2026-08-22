@@ -263,6 +263,15 @@ Il `versionCode` cresce con il numero della run (`GITHUB_RUN_NUMBER`), perché A
 installa sopra una versione con numero uguale o più alto. Una build fatta in locale vale 1 e
 quindi **non** si installa sopra una build della CI: per provarla, disinstalla prima.
 
+### Aggiornamenti automatici
+
+All'avvio, prima di collegarsi al Wi-Fi locale della camera, l'app interroga la release GitHub
+del branch. Se il commit è cambiato scarica automaticamente `app-debug.apk`, verifica il digest
+SHA-256 pubblicato da GitHub e apre l'installer di Android. La prima volta va consentito a Luna
+Ultra di installare app da questa origine; Android richiede comunque la conferma finale per ogni
+installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
+sistema. Se GitHub non è raggiungibile, il controllo non blocca la connessione alla camera.
+
 ### In locale
 
 Requisiti: JDK 17, Android SDK (compileSdk 35).

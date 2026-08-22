@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import it.persoft.lunaultra.AppContainer
+import it.persoft.lunaultra.BuildConfig
 import it.persoft.lunaultra.camera.CameraMode
 import it.persoft.lunaultra.camera.CameraStatus
 import it.persoft.lunaultra.camera.CodeProbe
@@ -23,6 +24,7 @@ import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
+import it.persoft.lunaultra.update.UpdateManager
 import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -33,6 +35,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 
 /** Una notifica spontanea osservata sul canale di controllo. */
 data class NotificationSighting(
@@ -139,6 +142,7 @@ data class ViewerState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val container = AppContainer(application, viewModelScope)
+    private val updateManager = UpdateManager(application)
 
     val settings: StateFlow<AppSettings> = container.settingsStore.state
     val sequence: StateFlow<TimelapseSequence> = container.sequenceStore.state
@@ -220,6 +224,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectJob: Job? = null
     private var connectionJob: Job? = null
     private var autoConnectStarted = false
+    private var updateCheckStarted = false
     private var photoCountdownJob: Job? = null
 
     private var pollJob: Job? = null
@@ -263,6 +268,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ---------------------------------------------------------------- connessione
+
+    /**
+     * Prima di chiedere la rete locale della camera usa la normale connessione Internet per
+     * controllare la release GitHub. Il download è automatico; Android mostra comunque la sua
+     * conferma di installazione, che un'app normale non può aggirare.
+     */
+    fun autoUpdateAndConnect(onReadyToInstall: (File) -> Unit) {
+        if (updateCheckStarted) return
+        updateCheckStarted = true
+        viewModelScope.launch {
+            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA)
+                .onSuccess { update ->
+                    if (update != null) {
+                        showMessage("Aggiornamento scaricato: conferma l'installazione")
+                        onReadyToInstall(update.apk)
+                    }
+                }
+                .onFailure {
+                    container.log.warn("Controllo aggiornamenti non riuscito: ${it.message}")
+                }
+            autoConnect()
+        }
+    }
 
     /** Tentativo unico all'apertura: se la Luna non c'è, l'app resta semplicemente pronta. */
     fun autoConnect() {

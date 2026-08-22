@@ -1,10 +1,16 @@
 package it.persoft.lunaultra.net
 
+import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
+import android.net.MacAddress
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.ScanResult
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
@@ -56,11 +62,24 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            builder.setNetworkSpecifier(
-                WifiNetworkSpecifier.Builder()
-                    .setSsidPattern(PatternMatcher(LUNA_SSID_PREFIX, PatternMatcher.PATTERN_PREFIX))
-                    .build()
-            )
+            val accessPoint = discoverLunaAccessPoint()
+            val specifier = WifiNetworkSpecifier.Builder().apply {
+                if (accessPoint != null) {
+                    // Una richiesta specifica evita il selettore OEM e, dopo la prima conferma,
+                    // Android può riconnettersi allo stesso access point senza chiederla ancora.
+                    setSsid(accessPoint.ssid)
+                    accessPoint.bssid?.let(::setBssid)
+                    log.info(
+                        "Access point Luna individuato: ${accessPoint.ssid}" +
+                            (accessPoint.bssid?.let { " ($it)" } ?: "")
+                    )
+                } else {
+                    // Ripiego per posizione disattivata, permesso negato o scansione limitata.
+                    setSsidPattern(PatternMatcher(LUNA_SSID_PREFIX, PatternMatcher.PATTERN_PREFIX))
+                    log.warn("SSID Luna esatto non leggibile: uso il filtro per prefisso")
+                }
+            }.build()
+            builder.setNetworkSpecifier(specifier)
         }
         val request = builder.build()
 
@@ -100,6 +119,73 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
         }
         return result
     }
+
+    /**
+     * Trova il punto di accesso Luna più vicino e restituisce identificatori esatti.
+     *
+     * Il risultato memorizzato dal sistema viene provato subito. Se non contiene la Luna si
+     * chiede una nuova scansione e si attende il broadcast, con un timeout breve: il sistema può
+     * rifiutare `startScan` per throttling, ma in quel caso lascia comunque disponibili gli
+     * ultimi risultati noti.
+     */
+    @SuppressLint("MissingPermission")
+    private suspend fun discoverLunaAccessPoint(): LunaAccessPoint? {
+        bestCachedLunaAccessPoint()?.let { return it }
+
+        withTimeoutOrNull(SCAN_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont: CancellableContinuation<Unit> ->
+                lateinit var receiver: BroadcastReceiver
+                fun unregister() {
+                    runCatching { appContext.unregisterReceiver(receiver) }
+                }
+
+                receiver = object : BroadcastReceiver() {
+                    override fun onReceive(context: Context?, intent: Intent?) {
+                        unregister()
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+                }
+
+                try {
+                    val filter = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        appContext.registerReceiver(receiver, filter)
+                    }
+                    cont.invokeOnCancellation { unregister() }
+                    if (!wifiManager.startScan()) {
+                        unregister()
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+                } catch (e: SecurityException) {
+                    unregister()
+                    log.warn("Scansione Wi-Fi non autorizzata: ${e.message}")
+                    if (cont.isActive) cont.resume(Unit)
+                }
+            }
+        }
+        return bestCachedLunaAccessPoint()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun bestCachedLunaAccessPoint(): LunaAccessPoint? = runCatching {
+        wifiManager.scanResults
+            .asSequence()
+            .filter { it.SSID.startsWith(LUNA_SSID_PREFIX, ignoreCase = true) }
+            .maxByOrNull(ScanResult::level)
+            ?.let { result ->
+                LunaAccessPoint(
+                    ssid = result.SSID,
+                    bssid = result.BSSID
+                        ?.takeUnless { it == UNKNOWN_BSSID }
+                        ?.let { runCatching { MacAddress.fromString(it) }.getOrNull() },
+                )
+            }
+    }.onFailure {
+        log.warn("Risultati scansione Wi-Fi non leggibili: ${it.message}")
+    }.getOrNull()
 
     /** Una rete Luna già attiva non deve passare da nessuna finestra di scelta. */
     private fun currentLunaNetwork(): Network? = runCatching {
@@ -167,5 +253,9 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
 
     companion object {
         const val LUNA_SSID_PREFIX = "Luna Ultra"
+        private const val UNKNOWN_BSSID = "02:00:00:00:00:00"
+        private const val SCAN_TIMEOUT_MS = 5_000L
     }
+
+    private data class LunaAccessPoint(val ssid: String, val bssid: MacAddress?)
 }

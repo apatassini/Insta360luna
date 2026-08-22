@@ -49,11 +49,13 @@ private fun AskRuntimePermissions(onReady: () -> Unit) {
     }
     LaunchedEffect(Unit) {
         val requested = buildList {
+            // Anche da Android 13 la scansione SSID/BSSID richiede ACCESS_FINE_LOCATION.
+            // NEARBY_WIFI_DEVICES da solo consente la richiesta della rete, ma non permette
+            // di trasformare il filtro generico nel punto di accesso Luna esatto.
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.NEARBY_WIFI_DEVICES)
                 add(Manifest.permission.POST_NOTIFICATIONS)
-            } else {
-                add(Manifest.permission.ACCESS_FINE_LOCATION)
             }
         }
         val missing = requested.filter {

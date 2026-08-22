@@ -68,7 +68,7 @@ class LunaMessagesTest {
         assertBody("080112020876", horizontal = 0, vertical = 59)
         assertBody("0801120508b4011014", horizontal = 10, vertical = 90)
         assertBody("0801120508c401101a", horizontal = 13, vertical = 98)
-        assertBody("08011205082910c001", horizontal = 96, vertical = 21)
+        assertBody("08011205082910c001", horizontal = 96, vertical = -21)
     }
 
     @Test

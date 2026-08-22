@@ -203,6 +203,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var pollJob: Job? = null
     private var viewerJob: Job? = null
+    private var prefetchJob: Job? = null
     private var probeJob: Job? = null
     private var monitorJob: Job? = null
 
@@ -1027,6 +1028,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val age = System.currentTimeMillis() - _gallery.value.loadedAtMs
         if (!force && _gallery.value.items.isNotEmpty() && age < GALLERY_FRESH_MS) return
+        // «Aggiorna» vuol dire anche «riprova le miniature che non erano venute».
+        if (force) container.media.retryThumbnails()
 
         viewModelScope.launch {
             _gallery.value = _gallery.value.copy(loading = true, error = null)
@@ -1123,7 +1126,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openViewer(item: MediaItem) {
         val index = _gallery.value.items.indexOfFirst { it.path == item.path }
         viewerJob?.cancel()
+        prefetchJob?.cancel()
         _viewer.value = ViewerState(item = item, index = index, loading = true)
+        // Mentre si guarda questa, arrivano le prossime: sfogliare è un gesto prevedibile.
+        prefetchJob = viewModelScope.launch { prefetchAfter(index) }
         viewerJob = viewModelScope.launch {
             when {
                 item.isVideo -> {
@@ -1174,7 +1180,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun closeViewer() {
         viewerJob?.cancel()
         viewerJob = null
+        prefetchJob?.cancel()
+        prefetchJob = null
         _viewer.value = ViewerState()
+    }
+
+    /**
+     * Scarica in anticipo i file che vengono dopo quello aperto.
+     *
+     * Uno alla volta e dopo una breve attesa: la foto che si sta guardando ha la precedenza
+     * sulla rete, e chi sfoglia veloce cambia idea prima che il precaricamento serva.
+     */
+    private suspend fun prefetchAfter(index: Int) {
+        delay(PREFETCH_DELAY_MS)
+        val items = _gallery.value.items
+        for (offset in 1..PREFETCH_AHEAD) {
+            val next = items.getOrNull(index + offset) ?: return
+            container.media.prefetch(next, PHOTO_VIEW_MAX_SIZE)
+        }
     }
 
     /** Passa al file precedente o successivo restando a schermo intero. */
@@ -1248,7 +1271,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano fino a otto volte. */
         /** Quanto resta valido un elenco della libreria prima di rifare il giro. */
         const val GALLERY_FRESH_MS = 60_000L
-        const val THUMBNAIL_CONCURRENCY = 3
+        const val THUMBNAIL_CONCURRENCY = 4
+
+        /** Quanti file caricare in anticipo davanti a quello aperto, e dopo quanto iniziare. */
+        const val PREFETCH_AHEAD = 2
+        const val PREFETCH_DELAY_MS = 400L
         const val PHOTO_VIEW_MAX_SIZE = 2_048
 
         const val RECONNECT_BASE_MS = 2_000L

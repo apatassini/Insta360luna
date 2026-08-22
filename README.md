@@ -141,11 +141,30 @@ Sull'elenco si applicano tre regole che l'occhio non vede ma che cambiano cosa c
 - un **DNG** ha accanto il JPG dello stesso scatto, che è ciò che il telefono sa disegnare.
 
 Le miniature costano: una foto della Luna Ultra pesa decine di megabyte e scaricarla per
-disegnare un quadratino da 112 punti sarebbe assurdo. L'app le prende, in ordine, da
-`GET_MINI_THUMBNAIL`, dall'anteprima EXIF letta scaricando **solo i primi 256 KB** del file con
-una richiesta `Range`, e infine dal primo fotogramma di un proxy già in cache. Se nessuna di
-queste strade porta un'immagine, la casella mostra il tipo di file: meglio di una griglia che si
-riempie in cinque minuti.
+disegnare un quadratino da 112 punti sarebbe assurdo. L'app le prende, **in quest'ordine**:
+
+1. l'**anteprima EXIF** dentro il file, leggendone solo i primi 512 KB e chiudendo la
+   connessione. Non si chiede un intervallo di byte con `Range` — c'è chi risponde 416 e chi
+   ignora l'intestazione — si legge l'inizio e si smette: quello che non si legge non si scarica;
+2. `GET_MINI_THUMBNAIL` sulla sessione di controllo, che **si spegne da solo** dopo tre rifiuti
+   di fila. Non tutte le camere lo implementano, e il modo in cui una camera dice «non lo
+   conosco» è far scadere l'attesa: pagare quel timeout su ogni casella è ciò che faceva
+   sembrare le anteprime rotte;
+3. per i video, il **primo fotogramma del proxy** `.lrv`, che va scaricato comunque per
+   guardarli.
+
+Un file che non dà miniature finisce in un elenco e non viene più ritentato finché non premi
+«Aggiorna»: senza, scorrere su e giù una griglia lunga sarebbe traffico continuo verso la camera
+per immagini che non arrivano.
+
+### Sfogliare
+
+Nel visore si passa da un file all'altro con uno **scorrimento laterale** — lo stesso gesto che
+a foto ingrandita la trascina, perché sopra la scala 1 il dito serve a spostarsi dentro
+l'immagine. Mentre guardi, l'app **scarica in anticipo i due file successivi**, e tiene in cache
+locale **gli ultimi dieci** aperti: avanti e indietro fra due scatti non ripaga due volte lo
+stesso scaricamento. Le foto già decodificate restano in memoria fino a un quarto dell'heap
+disponibile, poi le più vecchie vengono buttate.
 
 ### Restare connessi
 

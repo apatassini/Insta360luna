@@ -3,7 +3,10 @@ package it.persoft.lunaultra.ui.screens
 import android.widget.VideoView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,7 +23,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +35,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -63,9 +66,48 @@ fun MediaViewer(
     val item = state.item ?: return
     BackHandler(enabled = true, onBack = onClose)
 
-    Box(modifier = modifier.background(Color.Black)) {
+    // Lo zoom vive qui e non dentro l'immagine perché lo stesso gesto fa due cose: a scala 1
+    // uno scorrimento orizzontale cambia file, da lì in su trascina l'immagine ingrandita.
+    var scale by remember(item.path) { mutableFloatStateOf(1f) }
+    var offset by remember(item.path) { mutableStateOf(Offset.Zero) }
+
+    Box(
+        modifier = modifier
+            .background(Color.Black)
+            .pointerInput(item.path) {
+                val swipeThreshold = SWIPE_THRESHOLD.toPx()
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var accumulated = Offset.Zero
+                    var stepped = false
+                    var pressed: Boolean
+                    do {
+                        val event = awaitPointerEvent()
+                        val zoom = event.calculateZoom()
+                        val pan = event.calculatePan()
+                        if (zoom != 1f) scale = (scale * zoom).coerceIn(1f, 8f)
+                        if (scale > 1f) {
+                            offset += pan
+                        } else {
+                            accumulated += pan
+                            // Il cambio scatta appena la soglia è superata, non al rilascio:
+                            // sfogliare deve rispondere sotto il dito.
+                            if (!stepped && kotlin.math.abs(accumulated.x) > swipeThreshold &&
+                                kotlin.math.abs(accumulated.x) > kotlin.math.abs(accumulated.y)
+                            ) {
+                                stepped = true
+                                onStep(if (accumulated.x < 0f) 1 else -1)
+                            }
+                        }
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        pressed = event.changes.any { it.pressed }
+                    } while (pressed)
+                    if (scale <= 1f) offset = Offset.Zero
+                }
+            },
+    ) {
         when {
-            state.photo != null -> ZoomableImage(state)
+            state.photo != null -> ZoomableImage(state, scale, offset)
             state.videoFile != null -> VideoPlayer(path = state.videoFile)
             state.loading -> Column(
                 modifier = Modifier.fillMaxSize(),
@@ -178,25 +220,14 @@ fun MediaViewer(
 }
 
 @Composable
-private fun ZoomableImage(state: ViewerState) {
+private fun ZoomableImage(state: ViewerState, scale: Float, offset: Offset) {
     val bitmap = state.photo ?: return
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-
     Image(
         bitmap = bitmap.asImageBitmap(),
         contentDescription = state.item?.name,
         contentScale = ContentScale.Fit,
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(bitmap) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 8f)
-                    // A scala 1 l'immagine torna centrata: uno spostamento residuo su una foto
-                    // che riempie lo schermo si legge come un difetto.
-                    offset = if (scale <= 1f) Offset.Zero else offset + pan
-                }
-            }
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -205,6 +236,9 @@ private fun ZoomableImage(state: ViewerState) {
             },
     )
 }
+
+/** Quanto si deve trascinare, di lato, perché il file cambi. */
+private val SWIPE_THRESHOLD = 96.dp
 
 @Composable
 private fun VideoPlayer(path: String) {
@@ -234,7 +268,4 @@ private fun VideoPlayer(path: String) {
         )
     }
 
-    DisposableEffect(path) {
-        onDispose { }
-    }
 }

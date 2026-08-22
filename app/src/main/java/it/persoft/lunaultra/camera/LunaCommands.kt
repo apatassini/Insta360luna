@@ -390,7 +390,11 @@ class LunaCommands(
 
         /** L'elenco dei file su una scheda piena richiede più tempo di un comando qualsiasi. */
         private const val FILE_LIST_TIMEOUT_MS = 12_000L
-        private const val THUMBNAIL_TIMEOUT_MS = 8_000L
+        /**
+         * La miniatura o arriva subito o non arriva. Un'attesa lunga qui blocca la griglia:
+         * ottanta caselle per otto secondi sono dieci minuti di caselle vuote.
+         */
+        private const val THUMBNAIL_TIMEOUT_MS = 2_500L
         private const val DELETE_TIMEOUT_MS = 20_000L
     }
 }

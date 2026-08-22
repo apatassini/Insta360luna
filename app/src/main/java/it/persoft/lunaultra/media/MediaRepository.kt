@@ -58,7 +58,41 @@ class MediaRepository(
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
 
+    /**
+     * Le ultime foto aperte, già decodificate.
+     *
+     * Il tetto è in byte perché una foto a schermo intero occupa quindici megabyte: contarle a
+     * numero significherebbe tenerne dieci e finire la memoria alla quarta.
+     */
+    private val photos = object : LruCache<String, Bitmap>(photoBudgetBytes()) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    /**
+     * Il comando della miniatura si spegne da solo dopo qualche rifiuto.
+     *
+     * Non tutte le camere lo implementano, e il modo in cui una camera dice «non lo conosco» è
+     * far scadere l'attesa. Pagare quel timeout su ogni casella della griglia è il motivo per
+     * cui le anteprime sembravano non arrivare mai.
+     */
+    @Volatile
+    private var cameraThumbnailFailures = 0
+
+    /**
+     * I file di cui non si è riusciti a fare una miniatura.
+     *
+     * Senza questo elenco, ogni volta che la casella rientra nello schermo l'app riproverebbe a
+     * scaricarne l'inizio: scorrere su e giù una griglia lunga diventerebbe un traffico continuo
+     * verso la camera per immagini che non arriveranno comunque. Si svuota con «Aggiorna».
+     */
+    private val withoutThumbnail = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     private val host: String get() = settings.value.host
+
+    private fun photoBudgetBytes(): Int {
+        val heap = Runtime.getRuntime().maxMemory()
+        return (heap / 4).coerceIn(32L * 1024 * 1024, 128L * 1024 * 1024).toInt()
+    }
 
     // ------------------------------------------------------------------ elenco
 
@@ -105,9 +139,18 @@ class MediaRepository(
                 return@withContext it
             }
         }
+        if (item.path in withoutThumbnail) return@withContext null
 
-        val bytes = fromCameraThumbnail(item) ?: fromExifThumbnail(item) ?: fromCachedVideoFrame(item)
-        val bitmap = bytes?.let { decodeBytes(it, THUMBNAIL_SIZE) } ?: return@withContext null
+        // L'ordine conta più delle strategie stesse: prima quella che risponde in un secondo,
+        // dopo quella che può far scadere un'attesa.
+        val bytes = fromExifThumbnail(item)
+            ?: fromCameraThumbnail(item)
+            ?: fromVideoProxy(item)
+        val bitmap = bytes?.let { decodeBytes(it, THUMBNAIL_SIZE) }
+        if (bitmap == null) {
+            withoutThumbnail.add(item.path)
+            return@withContext null
+        }
         runCatching {
             thumbsDir.mkdirs()
             FileOutputStream(cached).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
@@ -117,40 +160,52 @@ class MediaRepository(
     }
 
     private suspend fun fromCameraThumbnail(item: MediaItem): ByteArray? {
-        commands.getMiniThumbnail(item.path).getOrNull()?.let { return it }
-        if (item.displayPath != item.path) {
-            commands.getMiniThumbnail(item.displayPath).getOrNull()?.let { return it }
+        if (cameraThumbnailFailures >= CAMERA_THUMBNAIL_GIVE_UP) return null
+        val result = commands.getMiniThumbnail(item.path)
+        result.onSuccess { cameraThumbnailFailures = 0 }
+        result.onFailure {
+            cameraThumbnailFailures++
+            if (cameraThumbnailFailures == CAMERA_THUMBNAIL_GIVE_UP) {
+                log.warn("La camera non manda miniature: uso solo l'anteprima dentro i file")
+            }
         }
-        return null
+        return result.getOrNull()
     }
 
     /**
      * L'anteprima incorporata nei metadati EXIF, scaricando solo l'inizio del file.
      *
-     * Un JPEG da 200 megapixel pesa decine di megabyte, ma la sua miniatura sta nei primi
-     * chilobyte: una richiesta con `Range` la porta a casa senza scaricare la foto.
+     * Una foto della Luna Ultra pesa decine di megabyte, ma la sua miniatura sta nei primi
+     * chilobyte. Non si chiede al server un intervallo di byte — c'è chi risponde 416 e chi
+     * ignora l'intestazione: si apre la richiesta normale, si leggono i primi mezzo megabyte e
+     * si chiude. Funziona con qualunque server, e quello che non si legge non si scarica.
      */
     private fun fromExifThumbnail(item: MediaItem): ByteArray? {
         if (item.isVideo) return null
-        if (item.extension !in MediaItem.RENDERABLE_IMAGE_EXTENSIONS && item.extension != "dng") return null
-        var connection: HttpURLConnection? = null
+        val prefix = readPrefix(item.displayUrl(host), EXIF_PREFIX_BYTES) ?: return null
         return try {
-            connection = open(item.displayUrl(host), rangeBytes = EXIF_RANGE_BYTES)
-            connection.inputStream.use { stream ->
-                ExifInterface(stream).thumbnailBytes
-            }
+            ExifInterface(java.io.ByteArrayInputStream(prefix)).thumbnailBytes
         } catch (e: Exception) {
-            log.warn("Miniatura EXIF non disponibile per ${item.name}: ${e.message}")
+            log.warn("Anteprima EXIF illeggibile in ${item.name}: ${e.message}")
             null
-        } finally {
-            connection?.disconnect()
         }
     }
 
-    /** Se il proxy del video è già in cache, il primo fotogramma è gratis. */
-    private fun fromCachedVideoFrame(item: MediaItem): ByteArray? {
+    /**
+     * Il primo fotogramma del proxy del video.
+     *
+     * Il proxy è la versione a bassa risoluzione che la camera salva accanto a ogni ripresa:
+     * scaricarlo per intero costa pochi megabyte, e serve comunque per guardare il video.
+     * Del file grosso invece non si scarica niente.
+     */
+    private fun fromVideoProxy(item: MediaItem): ByteArray? {
         if (!item.isVideo) return null
-        val local = localFile(item.proxyPath ?: return null).takeIf { it.exists() } ?: return null
+        val proxyPath = item.proxyPath ?: return null
+        val local = localFile(proxyPath)
+        if (!local.exists() || local.length() == 0L) {
+            val downloaded = runCatching { downloadTo(("http://" + host + proxyPath), local) }
+            if (downloaded.isFailure) return null
+        }
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(local.absolutePath)
@@ -162,6 +217,29 @@ class MediaRepository(
             null
         } finally {
             runCatching { retriever.release() }
+        }
+    }
+
+    /** I primi [maxBytes] di una risorsa, poi si chiude senza aspettare il resto. */
+    private fun readPrefix(url: String, maxBytes: Int): ByteArray? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = open(url)
+            val buffer = ByteArray(32 * 1024)
+            val out = java.io.ByteArrayOutputStream(maxBytes.coerceAtMost(64 * 1024))
+            connection.inputStream.use { input ->
+                while (out.size() < maxBytes) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    out.write(buffer, 0, read)
+                }
+            }
+            out.toByteArray().takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            log.warn("Lettura dell'inizio di $url non riuscita: ${e.message}")
+            null
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -182,38 +260,72 @@ class MediaRepository(
         val path = if (preferProxy) item.proxyPath ?: item.displayPath else item.displayPath
         val target = localFile(path)
         if (target.exists() && target.length() > 0) {
+            // Rimetterlo in cima alla fila: è appena stato usato, non è il candidato da buttare.
+            target.setLastModified(System.currentTimeMillis())
             onProgress(1f)
             return@withContext Result.success(target)
         }
-        runCatching {
-            filesDir.mkdirs()
-            val partial = File(target.absolutePath + ".part")
-            var connection: HttpURLConnection? = null
-            try {
-                connection = open("http://$host$path")
-                val length = connection.contentLengthLong
-                connection.inputStream.use { input ->
-                    FileOutputStream(partial).use { output -> copy(input, output, length, onProgress) }
-                }
-            } finally {
-                connection?.disconnect()
-            }
-            if (!partial.renameTo(target)) {
-                partial.copyTo(target, overwrite = true)
-                partial.delete()
-            }
-            target
-        }.onFailure { log.warn("Scaricamento di $path non riuscito: ${it.message}") }
+        runCatching { downloadTo("http://$host$path", target, onProgress) }
+            .onSuccess { pruneDownloads() }
+            .onFailure { log.warn("Scaricamento di $path non riuscito: ${it.message}") }
     }
 
-    /** Una foto decodificata alla dimensione che serve per guardarla, non a quella originale. */
+    /** Scarica una risorsa in un file locale, passando da un file parziale. */
+    private fun downloadTo(url: String, target: File, onProgress: (Float) -> Unit = {}): File {
+        filesDir.mkdirs()
+        val partial = File(target.absolutePath + ".part")
+        var connection: HttpURLConnection? = null
+        try {
+            connection = open(url)
+            val length = connection.contentLengthLong
+            connection.inputStream.use { input ->
+                FileOutputStream(partial).use { output -> copy(input, output, length, onProgress) }
+            }
+        } finally {
+            connection?.disconnect()
+        }
+        if (!partial.renameTo(target)) {
+            partial.copyTo(target, overwrite = true)
+            partial.delete()
+        }
+        return target
+    }
+
+    /**
+     * Una foto pronta da guardare: dalla memoria se c'è, altrimenti scaricata e decodificata
+     * alla dimensione che serve allo schermo, non a quella originale.
+     */
     suspend fun loadPhoto(
         item: MediaItem,
         maxSize: Int,
         onProgress: (Float) -> Unit = {},
     ): Result<Bitmap> = withContext(Dispatchers.IO) {
+        photos.get(item.path)?.let {
+            onProgress(1f)
+            return@withContext Result.success(it)
+        }
         cache(item, preferProxy = false, onProgress = onProgress).mapCatching { file ->
-            decodeFile(file, maxSize) ?: error("formato non visualizzabile")
+            val bitmap = decodeFile(file, maxSize) ?: error("formato non visualizzabile")
+            photos.put(item.path, bitmap)
+            bitmap
+        }
+    }
+
+    /**
+     * Porta avanti il lavoro sul file successivo mentre l'utente guarda quello aperto.
+     *
+     * Sfogliare una galleria è un gesto veloce e prevedibile: la foto dopo la si guarda quasi
+     * sempre, e scaricarla mentre l'occhio è ancora sulla precedente è tempo che non si aspetta.
+     */
+    suspend fun prefetch(item: MediaItem, maxSize: Int) = withContext(Dispatchers.IO) {
+        if (item.isVideo) {
+            if (item.proxyPath != null) cache(item, preferProxy = true)
+            return@withContext
+        }
+        if (photos.get(item.path) != null) return@withContext
+        if (!item.renderable && item.previewPath == null) return@withContext
+        cache(item, preferProxy = false).onSuccess { file ->
+            decodeFile(file, maxSize)?.let { photos.put(item.path, it) }
         }
     }
 
@@ -296,18 +408,39 @@ class MediaRepository(
 
     private fun thumbFile(item: MediaItem): File = File(thumbsDir, item.path.replace('/', '_') + ".jpg")
 
+    /** Nuovo tentativo per le miniature che erano fallite: lo chiede chi preme «Aggiorna». */
+    fun retryThumbnails() {
+        withoutThumbnail.clear()
+        cameraThumbnailFailures = 0
+    }
+
     /** Svuota le copie locali. Le miniature restano: costano poco e si rifarebbero subito. */
     fun clearDownloads() {
         runCatching { filesDir.deleteRecursively() }
+        photos.evictAll()
     }
 
-    private fun open(url: String, rangeBytes: Long? = null): HttpURLConnection {
+    /**
+     * Tiene in cache solo gli ultimi file aperti.
+     *
+     * Senza un tetto, sfogliare una galleria da ottanta scatti riempirebbe la memoria del
+     * telefono di copie che non si riguarderanno: si tengono i più recenti, che sono quelli
+     * su cui si sta tornando avanti e indietro.
+     */
+    private fun pruneDownloads(keep: Int = CACHE_KEEP_FILES) {
+        val files = filesDir.listFiles()?.filter { it.isFile && !it.name.endsWith(".part") } ?: return
+        if (files.size <= keep) return
+        files.sortedByDescending { it.lastModified() }
+            .drop(keep)
+            .forEach { runCatching { it.delete() } }
+    }
+
+    private fun open(url: String): HttpURLConnection {
         val target = URL(url)
         val connection = (binder?.openConnection(target) ?: target.openConnection()) as HttpURLConnection
         connection.connectTimeout = CONNECT_TIMEOUT_MS
         connection.readTimeout = READ_TIMEOUT_MS
         connection.instanceFollowRedirects = true
-        if (rangeBytes != null) connection.setRequestProperty("Range", "bytes=0-${rangeBytes - 1}")
         connection.connect()
         return connection
     }
@@ -377,7 +510,14 @@ class MediaRepository(
         const val MAX_FILES = 5_000
         const val THUMBNAIL_SIZE = 320
         const val THUMBNAIL_MEMORY_BYTES = 24 * 1024 * 1024
-        const val EXIF_RANGE_BYTES = 256L * 1024L
+        /** Quanto si legge dall'inizio di una foto per trovarci dentro l'anteprima EXIF. */
+        const val EXIF_PREFIX_BYTES = 512 * 1024
+
+        /** Dopo tanti rifiuti di fila, il comando della miniatura si considera non supportato. */
+        const val CAMERA_THUMBNAIL_GIVE_UP = 3
+
+        /** Quanti file scaricati tenere in cache locale. */
+        const val CACHE_KEEP_FILES = 10
         const val CONNECT_TIMEOUT_MS = 8_000
         const val READ_TIMEOUT_MS = 20_000
         const val GALLERY_FOLDER = "Luna Ultra"

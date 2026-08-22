@@ -117,18 +117,24 @@ fun GalleryScreen(viewModel: MainViewModel) {
 
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "${gallery.items.size} file  ·  ${gallery.photos} foto  ·  ${gallery.videos} video",
+                    text = "${gallery.items.size} file · ${gallery.photos} foto · ${gallery.videos} video",
                     style = MaterialTheme.typography.labelMedium,
                     color = Luna.OnSurfaceDim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
                 if (gallery.items.isNotEmpty()) {
                     Text(
-                        text = if (gallery.selectionMode) "${gallery.selected.size} selezionati" else "tieni premuto per selezionare",
+                        text = if (gallery.selectionMode) "${gallery.selected.size} selezionati"
+                        else "premi a lungo = seleziona",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (gallery.selectionMode) Luna.Accent else Luna.OnSurfaceDim,
+                        maxLines = 1,
                     )
                 }
             }

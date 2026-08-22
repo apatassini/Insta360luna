@@ -1,6 +1,8 @@
 package it.persoft.lunaultra.ui.screens
 
+import android.app.Activity
 import android.widget.VideoView
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -17,12 +19,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -37,78 +45,144 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.activity.compose.BackHandler
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import it.persoft.lunaultra.ui.ViewerState
 import it.persoft.lunaultra.ui.components.HudIconButton
+import it.persoft.lunaultra.ui.media.SphereImage
+import it.persoft.lunaultra.ui.media.SphereState
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
+import kotlinx.coroutines.delay
+import kotlin.math.abs
+
+/** Quanto largo è il bordo che, toccato, cambia file. */
+private const val EDGE_FRACTION = 0.22f
+
+/** Quanto si deve trascinare, in frazione di schermo, perché il file cambi. */
+private const val SWIPE_FRACTION = 0.22f
+
+/** Dopo quanto spariscono i comandi se non li tocchi. */
+private const val CHROME_TIMEOUT_MS = 2_600L
 
 /**
  * Un file a schermo intero.
  *
- * Le foto si guardano ridotte a quanto serve allo schermo e si ingrandiscono con due dita; i
- * video si riproducono dalla copia locale, non in streaming dalla camera — il lettore di sistema
- * apre connessioni sue, che non passano dal binding sulla rete della camera e finirebbero sui
- * dati mobili a cercare un indirizzo che lì non esiste.
+ * Guardare una foto vuol dire guardare la foto: le barre di sistema spariscono, i comandi si
+ * tolgono da soli dopo un paio di secondi e tornano al tocco. Restano tre modi di cambiare
+ * immagine perché servono in momenti diversi — le frecce quando si guarda con calma, il bordo
+ * dello schermo quando si scorre veloce con il pollice, il trascinamento quando si sfoglia.
+ *
+ * Le panoramiche non si mostrano piatte: un'equirettangolare stesa deforma i poli e taglia in
+ * due la scena dove i bordi si ricongiungono. Si aprono dentro la sfera, e ci si gira intorno.
  */
 @Composable
 fun MediaViewer(
     state: ViewerState,
+    favorite: Boolean,
     onClose: () -> Unit,
     onStep: (Int) -> Unit,
     onDownload: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    total: Int,
     modifier: Modifier = Modifier,
 ) {
     val item = state.item ?: return
     BackHandler(enabled = true, onBack = onClose)
+    ImmersiveWhileOpen()
 
-    // Lo zoom vive qui e non dentro l'immagine perché lo stesso gesto fa due cose: a scala 1
-    // uno scorrimento orizzontale cambia file, da lì in su trascina l'immagine ingrandita.
+    var chromeVisible by remember { mutableStateOf(true) }
     var scale by remember(item.path) { mutableFloatStateOf(1f) }
     var offset by remember(item.path) { mutableStateOf(Offset.Zero) }
+    val sphere = remember(item.path) { SphereState() }
+    var sphereMode by remember(item.path) { mutableStateOf(item.panoramic) }
+
+    LaunchedEffect(item.path, chromeVisible) {
+        if (chromeVisible) {
+            delay(CHROME_TIMEOUT_MS)
+            chromeVisible = false
+        }
+    }
 
     Box(
         modifier = modifier
             .background(Color.Black)
-            .pointerInput(item.path) {
-                val swipeThreshold = SWIPE_THRESHOLD.toPx()
+            .pointerInput(item.path, sphereMode) {
+                val width = size.width.toFloat().coerceAtLeast(1f)
+                val slop = viewConfiguration.touchSlop
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    var accumulated = Offset.Zero
-                    var stepped = false
-                    var pressed: Boolean
-                    do {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var pan = Offset.Zero
+                    var moved = false
+                    var pressed = true
+                    while (pressed) {
                         val event = awaitPointerEvent()
                         val zoom = event.calculateZoom()
-                        val pan = event.calculatePan()
-                        if (zoom != 1f) scale = (scale * zoom).coerceIn(1f, 8f)
-                        if (scale > 1f) {
-                            offset += pan
-                        } else {
-                            accumulated += pan
-                            // Il cambio scatta appena la soglia è superata, non al rilascio:
-                            // sfogliare deve rispondere sotto il dito.
-                            if (!stepped && kotlin.math.abs(accumulated.x) > swipeThreshold &&
-                                kotlin.math.abs(accumulated.x) > kotlin.math.abs(accumulated.y)
-                            ) {
-                                stepped = true
-                                onStep(if (accumulated.x < 0f) 1 else -1)
+                        val panChange = event.calculatePan()
+                        if (zoom != 1f) {
+                            moved = true
+                            if (sphereMode) sphere.zoomBy(zoom) else scale = (scale * zoom).coerceIn(1f, 8f)
+                        }
+                        if (panChange != Offset.Zero) {
+                            pan += panChange
+                            if (abs(pan.x) > slop || abs(pan.y) > slop) moved = true
+                            if (sphereMode) {
+                                // Un dito che attraversa lo schermo gira di quanto si vede:
+                                // così la scena segue la mano invece di scappare.
+                                val degreesPerPixel = sphere.fovDegrees / width
+                                sphere.rotateBy(-panChange.x * degreesPerPixel, panChange.y * degreesPerPixel)
+                            } else if (scale > 1f) {
+                                offset += panChange
                             }
                         }
                         event.changes.forEach { if (it.positionChanged()) it.consume() }
                         pressed = event.changes.any { it.pressed }
-                    } while (pressed)
-                    if (scale <= 1f) offset = Offset.Zero
+                    }
+                    when {
+                        !moved -> when {
+                            down.position.x < width * EDGE_FRACTION -> onStep(-1)
+                            down.position.x > width * (1f - EDGE_FRACTION) -> onStep(1)
+                            else -> chromeVisible = !chromeVisible
+                        }
+
+                        !sphereMode && scale <= 1f &&
+                            abs(pan.x) > width * SWIPE_FRACTION && abs(pan.x) > abs(pan.y) ->
+                            onStep(if (pan.x < 0f) 1 else -1)
+                    }
+                    if (!sphereMode && scale <= 1f) offset = Offset.Zero
                 }
             },
     ) {
+        val photo = state.photo
         when {
-            state.photo != null -> ZoomableImage(state, scale, offset)
+            photo != null && sphereMode -> SphereImage(
+                bitmap = photo,
+                state = sphere,
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            photo != null -> Image(
+                bitmap = photo.asImageBitmap(),
+                contentDescription = item.name,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offset.x
+                        translationY = offset.y
+                    },
+            )
+
             state.videoFile != null -> VideoPlayer(path = state.videoFile)
+
             state.loading -> Column(
                 modifier = Modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -145,49 +219,6 @@ fun MediaViewer(
             }
         }
 
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .background(Luna.ScrimStrong)
-                .safeDrawingPadding()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            HudIconButton(
-                icon = LunaIcons.Close,
-                contentDescription = "Chiudi",
-                onClick = onClose,
-                size = 40.dp,
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = item.name,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = buildString {
-                        append(mediaDateLabel(item.takenAtMs))
-                        if (state.message != null && state.videoFile != null) append("  ·  ${state.message}")
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Luna.OnSurfaceDim,
-                    maxLines = 1,
-                )
-            }
-            HudIconButton(
-                icon = LunaIcons.Download,
-                contentDescription = "Salva nella galleria del telefono",
-                onClick = onDownload,
-                size = 40.dp,
-                activeColor = Luna.Pano,
-            )
-        }
-
         if (state.loading && state.progress > 0f) {
             LinearProgressIndicator(
                 progress = { state.progress },
@@ -195,50 +226,121 @@ fun MediaViewer(
             )
         }
 
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .safeDrawingPadding()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+        AnimatedVisibility(
+            visible = chromeVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize(),
         ) {
-            HudIconButton(
-                icon = LunaIcons.Left,
-                contentDescription = "File precedente",
-                onClick = { onStep(-1) },
-                size = 44.dp,
-            )
-            HudIconButton(
-                icon = LunaIcons.Right,
-                contentDescription = "File successivo",
-                onClick = { onStep(1) },
-                size = 44.dp,
-            )
+            Box(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .background(Luna.ScrimStrong)
+                        .safeDrawingPadding()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    HudIconButton(
+                        icon = LunaIcons.Close,
+                        contentDescription = "Chiudi",
+                        onClick = onClose,
+                        size = 40.dp,
+                    )
+                    Text(
+                        text = item.name,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (item.panoramic && state.photo != null) {
+                        HudIconButton(
+                            icon = LunaIcons.Panorama,
+                            contentDescription = if (sphereMode) "Mostra piatta" else "Mostra a 360°",
+                            onClick = {
+                                sphereMode = !sphereMode
+                                sphere.reset()
+                                scale = 1f
+                                offset = Offset.Zero
+                            },
+                            size = 40.dp,
+                            selected = sphereMode,
+                            activeColor = Luna.Pano,
+                        )
+                    }
+                    HudIconButton(
+                        icon = if (favorite) LunaIcons.Star else LunaIcons.StarOutline,
+                        contentDescription = if (favorite) "Togli dai preferiti" else "Aggiungi ai preferiti",
+                        onClick = onToggleFavorite,
+                        size = 40.dp,
+                        selected = favorite,
+                        activeColor = Luna.Photo,
+                    )
+                    HudIconButton(
+                        icon = LunaIcons.Download,
+                        contentDescription = "Salva nella galleria del telefono",
+                        onClick = onDownload,
+                        size = 40.dp,
+                        activeColor = Luna.Pano,
+                    )
+                }
+
+                HudIconButton(
+                    icon = LunaIcons.Left,
+                    contentDescription = "File precedente",
+                    onClick = { onStep(-1) },
+                    size = 52.dp,
+                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 10.dp),
+                )
+                HudIconButton(
+                    icon = LunaIcons.Right,
+                    contentDescription = "File successivo",
+                    onClick = { onStep(1) },
+                    size = 52.dp,
+                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
+                )
+
+                if (total > 0 && state.index >= 0) {
+                    Text(
+                        text = "${state.index + 1} / $total",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .safeDrawingPadding()
+                            .padding(bottom = 14.dp)
+                            .background(Luna.Glass, CircleShape)
+                            .padding(horizontal = 12.dp, vertical = 5.dp),
+                    )
+                }
+            }
         }
     }
 }
 
+/**
+ * Toglie le barre di sistema finché il visore è aperto.
+ *
+ * A schermo intero vuol dire davvero intero: ruotando il telefono la foto prende tutto, senza
+ * l'orologio sopra e i tasti sotto. Alla chiusura tornano com'erano.
+ */
 @Composable
-private fun ZoomableImage(state: ViewerState, scale: Float, offset: Offset) {
-    val bitmap = state.photo ?: return
-    Image(
-        bitmap = bitmap.asImageBitmap(),
-        contentDescription = state.item?.name,
-        contentScale = ContentScale.Fit,
-        modifier = Modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
-            },
-    )
+private fun ImmersiveWhileOpen() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val window = (view.context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        controller?.apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+    }
 }
-
-/** Quanto si deve trascinare, di lato, perché il file cambi. */
-private val SWIPE_THRESHOLD = 96.dp
 
 @Composable
 private fun VideoPlayer(path: String) {
@@ -267,5 +369,4 @@ private fun VideoPlayer(path: String) {
             size = 56.dp,
         )
     }
-
 }

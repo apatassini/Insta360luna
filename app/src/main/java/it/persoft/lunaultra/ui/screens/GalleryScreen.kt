@@ -60,7 +60,12 @@ import java.util.Date
 import java.util.Locale
 
 /** I tre filtri della griglia: quello che si cerca è quasi sempre uno dei due tipi. */
-private enum class GalleryFilter(val label: String) { TUTTO("Tutto"), FOTO("Foto"), VIDEO("Video") }
+private enum class GalleryFilter(val label: String) {
+    TUTTO("Tutto"),
+    FOTO("Foto"),
+    VIDEO("Video"),
+    PREFERITI("Preferiti"),
+}
 
 /**
  * La galleria della camera.
@@ -75,16 +80,18 @@ private enum class GalleryFilter(val label: String) { TUTTO("Tutto"), FOTO("Foto
 fun GalleryScreen(viewModel: MainViewModel) {
     val gallery by viewModel.gallery.collectAsState()
     val viewer by viewModel.viewer.collectAsState()
+    val favorites by viewModel.favorites.collectAsState()
     var filterIndex by rememberSaveable { mutableIntStateOf(0) }
     val filter = GalleryFilter.entries[filterIndex]
 
     LaunchedEffect(Unit) { viewModel.refreshGallery() }
 
-    val items = remember(gallery.items, filter) {
+    val items = remember(gallery.items, filter, favorites) {
         when (filter) {
             GalleryFilter.TUTTO -> gallery.items
             GalleryFilter.FOTO -> gallery.items.filter { !it.isVideo }
             GalleryFilter.VIDEO -> gallery.items.filter { it.isVideo }
+            GalleryFilter.PREFERITI -> gallery.items.filter { it.path in favorites }
         }
     }
 
@@ -98,13 +105,20 @@ fun GalleryScreen(viewModel: MainViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 GalleryFilter.entries.forEachIndexed { index, entry ->
+                    val accent = if (entry == GalleryFilter.PREFERITI) Luna.Photo else Luna.Path
                     FilterChip(
                         selected = filterIndex == index,
                         onClick = { filterIndex = index },
                         label = { Text(entry.label) },
+                        leadingIcon = if (entry == GalleryFilter.PREFERITI) {
+                            { Icon(LunaIcons.Star, contentDescription = null, modifier = Modifier.size(15.dp)) }
+                        } else {
+                            null
+                        },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Luna.Path.copy(alpha = 0.20f),
-                            selectedLabelColor = Luna.Path,
+                            selectedContainerColor = accent.copy(alpha = 0.20f),
+                            selectedLabelColor = accent,
+                            selectedLeadingIconColor = accent,
                         ),
                     )
                 }
@@ -182,6 +196,7 @@ fun GalleryScreen(viewModel: MainViewModel) {
                             item = item,
                             selected = item.path in gallery.selected,
                             selectionMode = gallery.selectionMode,
+                            favorite = item.path in favorites,
                             progress = gallery.downloads[item.path],
                             loadThumbnail = { viewModel.thumbnail(item) },
                             onClick = {
@@ -214,23 +229,43 @@ fun GalleryScreen(viewModel: MainViewModel) {
                         Text("  Scarica ${gallery.selected.size}")
                     }
                 }
-            } else if (gallery.downloads.isNotEmpty()) {
+            } else if (gallery.queueTotal > 0) {
                 Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                    Hint("Scaricamento in corso: ${gallery.downloads.size} file")
+                    val current = (gallery.queueDone + 1).coerceAtMost(gallery.queueTotal)
+                    val name = gallery.downloads.keys.firstOrNull()?.substringAfterLast('/')
+                    Hint(
+                        buildString {
+                            append("Scaricamento $current di ${gallery.queueTotal}")
+                            if (name != null) append(" · $name")
+                        }
+                    )
                     LinearProgressIndicator(
-                        progress = { gallery.downloads.values.average().toFloat() },
+                        progress = {
+                            val file = gallery.downloads.values.firstOrNull() ?: 0f
+                            ((gallery.queueDone + file) / gallery.queueTotal).coerceIn(0f, 1f)
+                        },
                         modifier = Modifier.fillMaxWidth().height(4.dp).padding(top = 6.dp),
                     )
+                }
+            } else if (filter == GalleryFilter.PREFERITI && items.isNotEmpty()) {
+                Row(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                    Button(onClick = viewModel::downloadFavorites, modifier = Modifier.fillMaxWidth()) {
+                        Icon(LunaIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("  Scarica i ${items.size} preferiti")
+                    }
                 }
             }
         }
 
-        if (viewer.item != null) {
+        viewer.item?.let { open ->
             MediaViewer(
                 state = viewer,
+                favorite = open.path in favorites,
                 onClose = viewModel::closeViewer,
                 onStep = viewModel::stepViewer,
-                onDownload = { viewer.item?.let(viewModel::download) },
+                onDownload = { viewModel.download(open) },
+                onToggleFavorite = { viewModel.toggleFavorite(open) },
+                total = gallery.items.size,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -260,6 +295,7 @@ private fun MediaTile(
     item: MediaItem,
     selected: Boolean,
     selectionMode: Boolean,
+    favorite: Boolean,
     progress: Float?,
     loadThumbnail: suspend () -> Bitmap?,
     onClick: () -> Unit,
@@ -317,6 +353,7 @@ private fun MediaTile(
         ) {
             if (item.isVideo) TileBadge(LunaIcons.PlayCircle, Luna.Movie)
             if (item.panoramic) TileBadge(LunaIcons.Panorama, Luna.Pano)
+            if (favorite) TileBadge(LunaIcons.Star, Luna.Photo)
             if (item.extension == "dng") {
                 Text(
                     text = "RAW",

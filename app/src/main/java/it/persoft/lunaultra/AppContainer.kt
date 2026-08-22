@@ -7,6 +7,7 @@ import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.JsonFileStore
 import it.persoft.lunaultra.gimbal.GimbalController
+import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaRepository
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
@@ -38,6 +39,13 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
         scope = scope,
     )
 
+    val favoritesStore = JsonFileStore(
+        file = File(appContext.filesDir, "favorites.json"),
+        serializer = Favorites.serializer(),
+        default = Favorites(),
+        scope = scope,
+    )
+
     val wifiBinder = WifiNetworkBinder(appContext, log)
     val tcpClient = TcpClient(log, wifiBinder)
     val session = CameraSession(log, tcpClient, scope, settingsStore.state)
@@ -51,5 +59,6 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     suspend fun load() {
         settingsStore.load()
         sequenceStore.load()
+        favoritesStore.load()
     }
 }

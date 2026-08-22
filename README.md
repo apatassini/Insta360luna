@@ -153,18 +153,37 @@ disegnare un quadratino da 112 punti sarebbe assurdo. L'app le prende, **in ques
 3. per i video, il **primo fotogramma del proxy** `.lrv`, che va scaricato comunque per
    guardarli.
 
-Un file che non dà miniature finisce in un elenco e non viene più ritentato finché non premi
-«Aggiorna»: senza, scorrere su e giù una griglia lunga sarebbe traffico continuo verso la camera
-per immagini che non arrivano.
+Se nessuna di queste porta un'immagine resta l'ultima spiaggia: **scaricare la foto intera e
+ridurla**, una alla volta e per ultima. Costa quanto la foto, ma è l'unica strada che non dipende
+da cosa la camera ha messo dentro il file, e il risultato finisce su disco — il prezzo si paga
+una volta per file, non a ogni scorrimento.
 
-### Sfogliare
+Un file che non dà miniature nemmeno così finisce in un elenco e non viene più ritentato finché
+non premi «Aggiorna».
 
-Nel visore si passa da un file all'altro con uno **scorrimento laterale** — lo stesso gesto che
-a foto ingrandita la trascina, perché sopra la scala 1 il dito serve a spostarsi dentro
-l'immagine. Mentre guardi, l'app **scarica in anticipo i due file successivi**, e tiene in cache
-locale **gli ultimi dieci** aperti: avanti e indietro fra due scatti non ripaga due volte lo
-stesso scaricamento. Le foto già decodificate restano in memoria fino a un quarto dell'heap
-disponibile, poi le più vecchie vengono buttate.
+### Guardare
+
+A schermo intero vuol dire intero: le barre di sistema spariscono, i comandi si tolgono da soli
+dopo un paio di secondi e tornano al tocco, e ruotando il telefono la foto prende tutto.
+
+Tre modi di cambiare immagine, perché servono in momenti diversi: le **frecce** ai lati quando
+si guarda con calma, il **tocco sul bordo** destro o sinistro quando si scorre veloce con il
+pollice, il **trascinamento** quando si sfoglia. A foto ingrandita il trascinamento la sposta,
+che è quello che serve lì.
+
+Le **panoramiche** non si mostrano piatte: un'equirettangolare stesa deforma i poli e taglia in
+due la scena dove i bordi si ricongiungono. Si aprono dentro la sfera — si trascina per girarsi
+intorno, si stringe per allargare il campo visivo — e il tasto con l'icona della panoramica
+torna alla vista piatta. Non c'è nessuna sfera da disegnare: due triangoli coprono lo schermo e
+per ogni pixel il frammento calcola dove si sta guardando.
+
+Con la **stella** si segnano i preferiti, che hanno un filtro tutto loro nella griglia e si
+scaricano in blocco.
+
+Mentre guardi, l'app **scarica in anticipo i due file successivi**, e tiene in cache locale
+**gli ultimi dieci** aperti: avanti e indietro fra due scatti non ripaga due volte lo stesso
+scaricamento. Le foto già decodificate restano in memoria fino a un sesto dell'heap, poi le più
+vecchie vengono buttate.
 
 ### Restare connessi
 
@@ -279,7 +298,8 @@ dita, i video si riproducono dalla **copia locale del proxy**, non in streaming 
 il lettore di sistema apre connessioni sue, che non passano dal binding sulla rete della camera.
 
 Tenendo premuto si entra in selezione multipla; il pulsante scarica i file scelti nella galleria
-del telefono, in `Immagini/Luna Ultra` e `Filmati/Luna Ultra`. Lo scaricamento va diritto dentro
+del telefono, in `Immagini/Luna Ultra` e `Filmati/Luna Ultra`, dicendo a che punto è — «3 di 6»,
+non sei volte «scaricamento in corso». Lo scaricamento va diritto dentro
 MediaStore invece di passare da una copia in cache: un video lungo occuperebbe due volte lo
 spazio, e su un telefono pieno è la differenza fra riuscire e no. Continua anche se chiudi la
 galleria.

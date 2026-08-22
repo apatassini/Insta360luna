@@ -18,6 +18,8 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Gamepad
@@ -101,6 +103,8 @@ object LunaIcons {
     val SelectAll: ImageVector = Icons.Filled.SelectAll
     val PlayCircle: ImageVector = Icons.Filled.PlayCircleFilled
     val OpenExternal: ImageVector = Icons.Filled.OpenInNew
+    val Star: ImageVector = Icons.Filled.Star
+    val StarOutline: ImageVector = Icons.Filled.StarBorder
 
     // gimbal
     val Joystick: ImageVector = Icons.Filled.Gamepad

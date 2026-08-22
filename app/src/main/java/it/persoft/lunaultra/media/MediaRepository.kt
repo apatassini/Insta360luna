@@ -17,8 +17,10 @@ import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.SocketBinder
+import it.persoft.lunaultra.protocol.Hex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -78,6 +80,15 @@ class MediaRepository(
     @Volatile
     private var cameraThumbnailFailures = 0
 
+    /** Le miniature fatte scaricando il file intero vanno una alla volta: pesano quanto il file. */
+    private val heavyThumbnails = kotlinx.coroutines.sync.Semaphore(1)
+
+    @Volatile
+    private var announcedHeavyThumbnails = false
+
+    @Volatile
+    private var exifReports = 0
+
     /**
      * I file di cui non si è riusciti a fare una miniatura.
      *
@@ -91,7 +102,7 @@ class MediaRepository(
 
     private fun photoBudgetBytes(): Int {
         val heap = Runtime.getRuntime().maxMemory()
-        return (heap / 4).coerceIn(32L * 1024 * 1024, 128L * 1024 * 1024).toInt()
+        return (heap / 6).coerceIn(24L * 1024 * 1024, 96L * 1024 * 1024).toInt()
     }
 
     // ------------------------------------------------------------------ elenco
@@ -146,17 +157,22 @@ class MediaRepository(
         val bytes = fromExifThumbnail(item)
             ?: fromCameraThumbnail(item)
             ?: fromVideoProxy(item)
+            ?: fromFullFile(item)
         val bitmap = bytes?.let { decodeBytes(it, THUMBNAIL_SIZE) }
         if (bitmap == null) {
             withoutThumbnail.add(item.path)
             return@withContext null
         }
-        runCatching {
-            thumbsDir.mkdirs()
-            FileOutputStream(cached).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
-        }
+        saveThumbnail(item, bitmap)
         memory.put(item.path, bitmap)
         bitmap
+    }
+
+    private fun saveThumbnail(item: MediaItem, bitmap: Bitmap) {
+        runCatching {
+            thumbsDir.mkdirs()
+            FileOutputStream(thumbFile(item)).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+        }
     }
 
     private suspend fun fromCameraThumbnail(item: MediaItem): ByteArray? {
@@ -183,11 +199,57 @@ class MediaRepository(
     private fun fromExifThumbnail(item: MediaItem): ByteArray? {
         if (item.isVideo) return null
         val prefix = readPrefix(item.displayUrl(host), EXIF_PREFIX_BYTES) ?: return null
-        return try {
+        val thumbnail = try {
             ExifInterface(java.io.ByteArrayInputStream(prefix)).thumbnailBytes
         } catch (e: Exception) {
-            log.warn("Anteprima EXIF illeggibile in ${item.name}: ${e.message}")
             null
+        }
+        if (thumbnail == null && exifReports < DIAGNOSTIC_REPORTS) {
+            exifReports++
+            // Detto una volta sola e con i numeri in mano: senza, «non si vedono le anteprime»
+            // resta indistinguibile da «la camera non risponde».
+            log.warn(
+                "Nessuna anteprima EXIF in ${item.name}: letti ${prefix.size} byte, " +
+                    "inizio ${Hex.encode(prefix.copyOfRange(0, minOf(8, prefix.size)))}"
+            )
+        }
+        return thumbnail
+    }
+
+    /**
+     * L'ultima spiaggia: scaricare la foto intera e ridurla.
+     *
+     * Costa quanto la foto, e per questo viene per ultima e una alla volta. Ma è l'unica strada
+     * che non dipende da cosa la camera ha deciso di mettere nel file: se l'immagine si scarica,
+     * la miniatura si fa. Il risultato resta su disco, quindi il prezzo si paga una volta sola
+     * per file, non a ogni scorrimento.
+     */
+    private suspend fun fromFullFile(item: MediaItem): ByteArray? {
+        if (item.isVideo) return null
+        if (!item.renderable && item.previewPath == null) return null
+        return heavyThumbnails.withPermit {
+            if (!announcedHeavyThumbnails) {
+                announcedHeavyThumbnails = true
+                log.info("Nessuna anteprima veloce: le miniature si fanno dalle foto intere, una alla volta")
+            }
+            val path = item.displayPath
+            val cached = localFile(path)
+            val existed = cached.exists() && cached.length() > 0
+            val file = if (existed) cached else runCatching {
+                downloadTo("http://$host$path", cached)
+            }.getOrNull() ?: return@withPermit null
+
+            val bitmap = decodeFile(file, THUMBNAIL_SIZE)
+            // Se il file non era già in cache non lo si tiene: la cache serve a chi sfoglia,
+            // non a chi ha solo guardato una griglia.
+            if (!existed) runCatching { file.delete() }
+            bitmap ?: return@withPermit null
+            val stream = java.io.ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+            // Si scrive subito su disco: se la casella è già uscita dallo schermo e la coroutine
+            // viene annullata, il file intero è stato scaricato per niente.
+            saveThumbnail(item, bitmap)
+            stream.toByteArray()
         }
     }
 
@@ -467,23 +529,31 @@ class MediaRepository(
         onProgress(1f)
     }
 
-    private fun decodeFile(file: File, maxSize: Int): Bitmap? {
+    /**
+     * Decodifica ridotta. Il `runCatching` prende anche l'esaurimento della memoria, che qui non
+     * è un caso raro: una foto da duecento megapixel non entra nell'heap a dimensione piena, e
+     * far morire l'app mentre si guarda una galleria è il modo peggiore di dirlo.
+     */
+    private fun decodeFile(file: File, maxSize: Int): Bitmap? = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.absolutePath, bounds)
         val options = BitmapFactory.Options().apply {
             inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSize)
         }
-        return BitmapFactory.decodeFile(file.absolutePath, options)
+        BitmapFactory.decodeFile(file.absolutePath, options)
+    }.getOrElse {
+        log.warn("Decodifica di ${file.name} non riuscita: ${it.message}")
+        null
     }
 
-    private fun decodeBytes(bytes: ByteArray, maxSize: Int): Bitmap? {
+    private fun decodeBytes(bytes: ByteArray, maxSize: Int): Bitmap? = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         val options = BitmapFactory.Options().apply {
             inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSize)
         }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-    }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }.getOrNull()
 
     /**
      * Il fattore di riduzione in decodifica. Una foto della Luna Ultra non entra in memoria a
@@ -509,9 +579,12 @@ class MediaRepository(
         const val PAGE_SIZE = 100
         const val MAX_FILES = 5_000
         const val THUMBNAIL_SIZE = 320
-        const val THUMBNAIL_MEMORY_BYTES = 24 * 1024 * 1024
+        const val THUMBNAIL_MEMORY_BYTES = 16 * 1024 * 1024
         /** Quanto si legge dall'inizio di una foto per trovarci dentro l'anteprima EXIF. */
-        const val EXIF_PREFIX_BYTES = 512 * 1024
+        const val EXIF_PREFIX_BYTES = 2 * 1024 * 1024
+
+        /** Quante volte spiegare nel log perché una strategia non ha prodotto miniature. */
+        const val DIAGNOSTIC_REPORTS = 2
 
         /** Dopo tanti rifiuti di fila, il comando della miniatura si considera non supportato. */
         const val CAMERA_THUMBNAIL_GIVE_UP = 3

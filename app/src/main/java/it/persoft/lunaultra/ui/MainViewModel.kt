@@ -10,6 +10,7 @@ import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
+import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.preview.PreviewState
 import it.persoft.lunaultra.protocol.Hex
@@ -105,6 +106,9 @@ data class GalleryState(
     val selected: Set<String> = emptySet(),
     /** Percorso del file → avanzamento, da 0 a 1. */
     val downloads: Map<String, Float> = emptyMap(),
+    /** Quanti file conta lo scaricamento in corso e a che punto è: «3 di 6». */
+    val queueTotal: Int = 0,
+    val queueDone: Int = 0,
     val loadedAtMs: Long = 0L,
 ) {
     val selectionMode: Boolean get() = selected.isNotEmpty()
@@ -159,6 +163,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _gallery = MutableStateFlow(GalleryState())
     val gallery: StateFlow<GalleryState> = _gallery
+
+    /** I file segnati con la stella, ricaricati all'avvio. */
+    val favorites: StateFlow<Favorites> = container.favoritesStore.state
 
     private val _viewer = MutableStateFlow(ViewerState())
     val viewer: StateFlow<ViewerState> = _viewer
@@ -1073,29 +1080,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Salva nella galleria del telefono i file selezionati, uno alla volta. */
     fun downloadSelected() {
         val state = _gallery.value
-        val items = state.items.filter { it.path in state.selected }
-        if (items.isEmpty()) return
+        downloadAll(state.items.filter { it.path in state.selected })
         clearSelection()
+    }
+
+    /** Salva tutti i preferiti, senza doverli selezionare a mano. */
+    fun downloadFavorites() {
+        val marked = favorites.value.paths
+        downloadAll(_gallery.value.items.filter { it.path in marked })
+    }
+
+    fun download(item: MediaItem) = downloadAll(listOf(item))
+
+    /**
+     * Una coda sola per tutti gli scaricamenti.
+     *
+     * Il conteggio «3 di 6» sta nello stato e non nel messaggio perché la barra deve dire dove
+     * si è arrivati mentre va, non a cose fatte: sei file identici che dicono tutti
+     * «scaricamento in corso» non sono un avanzamento, sono un'attesa al buio.
+     */
+    private fun downloadAll(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        val already = _gallery.value.queueTotal - _gallery.value.queueDone
+        _gallery.value = _gallery.value.copy(
+            queueTotal = if (already > 0) _gallery.value.queueTotal + items.size else items.size,
+            queueDone = if (already > 0) _gallery.value.queueDone else 0,
+        )
         viewModelScope.launch {
-            var done = 0
+            var saved = 0
             for (item in items) {
-                if (saveOne(item)) done++
+                if (saveOne(item)) saved++
+                _gallery.value = _gallery.value.copy(queueDone = _gallery.value.queueDone + 1)
+            }
+            val state = _gallery.value
+            if (state.queueDone >= state.queueTotal) {
+                _gallery.value = state.copy(queueTotal = 0, queueDone = 0)
             }
             showMessage(
                 when {
-                    done == items.size && done == 1 -> "Salvato nella galleria del telefono"
-                    done == items.size -> "$done file salvati nella galleria del telefono"
-                    else -> "Salvati $done file su ${items.size}"
+                    saved == items.size && saved == 1 -> "Salvato nella galleria del telefono"
+                    saved == items.size -> "$saved file salvati nella galleria del telefono"
+                    else -> "Salvati $saved file su ${items.size}"
                 }
             )
         }
     }
 
-    fun download(item: MediaItem) {
-        viewModelScope.launch {
-            if (saveOne(item)) showMessage("${item.name} salvato nella galleria del telefono")
-        }
+    // ---------------------------------------------------------------- preferiti
+
+    fun toggleFavorite(item: MediaItem) {
+        container.favoritesStore.update { it.toggled(item.path) }
     }
+
+    fun isFavorite(item: MediaItem): Boolean = item.path in favorites.value
 
     private suspend fun saveOne(item: MediaItem): Boolean {
         updateProgress(item.path, 0f)
@@ -1160,7 +1197,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 else -> {
-                    container.media.loadPhoto(item, PHOTO_VIEW_MAX_SIZE) { progress ->
+                    // Una panoramica si guarda da dentro e si ingrandisce: le serve più
+                    // risoluzione di una foto piatta, che sullo schermo ci sta tutta.
+                    val maxSize = if (item.panoramic) PANO_VIEW_MAX_SIZE else PHOTO_VIEW_MAX_SIZE
+                    container.media.loadPhoto(item, maxSize) { progress ->
                         _viewer.value = _viewer.value.copy(progress = progress)
                     }
                         .onSuccess { bitmap ->
@@ -1196,7 +1236,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val items = _gallery.value.items
         for (offset in 1..PREFETCH_AHEAD) {
             val next = items.getOrNull(index + offset) ?: return
-            container.media.prefetch(next, PHOTO_VIEW_MAX_SIZE)
+            val maxSize = if (next.panoramic) PANO_VIEW_MAX_SIZE else PHOTO_VIEW_MAX_SIZE
+            container.media.prefetch(next, maxSize)
         }
     }
 
@@ -1277,6 +1318,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val PREFETCH_AHEAD = 2
         const val PREFETCH_DELAY_MS = 400L
         const val PHOTO_VIEW_MAX_SIZE = 2_048
+        const val PANO_VIEW_MAX_SIZE = 4_096
 
         const val RECONNECT_BASE_MS = 2_000L
         const val MAX_RECONNECT_ATTEMPTS = 6

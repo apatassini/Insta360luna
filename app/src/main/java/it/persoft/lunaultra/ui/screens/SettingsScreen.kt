@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -14,12 +15,19 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
@@ -53,6 +61,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
     val preview by viewModel.preview.collectAsState()
     val connected = connection == ConnectionState.CONNECTED
     val gimbal = settings.gimbal
+    var wifiPasswordVisible by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -77,6 +86,36 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         modifier = Modifier.weight(1f),
                     )
                 }
+                OutlinedTextField(
+                    value = settings.cameraWifiPassword,
+                    onValueChange = viewModel::setCameraWifiPassword,
+                    label = { Text("Password Wi-Fi Luna") },
+                    supportingText = {
+                        Text(
+                            if (settings.cameraWifiPassword.isBlank()) {
+                                "Inseriscila una volta, oppure connettiti manualmente: l'app proverà a leggerla dalla camera."
+                            } else {
+                                "Salvata: la rete Luna verrà selezionata automaticamente all'avvio."
+                            }
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = if (wifiPasswordVisible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { wifiPasswordVisible = !wifiPasswordVisible }) {
+                            Icon(
+                                imageVector = if (wifiPasswordVisible) LunaIcons.Hide else LunaIcons.Show,
+                                contentDescription = if (wifiPasswordVisible) "Nascondi password" else "Mostra password",
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
                         onClick = { if (connected) viewModel.disconnect() else viewModel.connect() },

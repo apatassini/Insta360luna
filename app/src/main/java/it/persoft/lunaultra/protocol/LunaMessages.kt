@@ -109,6 +109,18 @@ object LunaMessages {
     }
 
     /**
+     * Imposta la combinazione risoluzione/FPS della registrazione. Nel protocollo non sono due
+     * valori indipendenti: entrambi vivono nell'enum `VideoResolution` del campo 31.
+     */
+    fun setVideoProfile(profileCode: Int, functionMode: Int): ByteArray =
+        setPhotographyOption(
+            optionType = LunaProtocolCodes.PhotographyOptionType.RECORD_RESOLUTION,
+            field = LunaProtocolCodes.PhotographyOptionsField.RECORD_RESOLUTION,
+            value = profileCode,
+            functionMode = functionMode,
+        )
+
+    /**
      * `StartLiveStream`, con i campi:
      * `2 enableVideo, 6 videoBitrate, 7 resolution, 8 enableGyro, 9 videoBitrate1, 10 resolution1`.
      *

@@ -3,6 +3,7 @@ package it.persoft.lunaultra.camera
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
 import it.persoft.lunaultra.data.PhotoSettings
+import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
@@ -54,6 +55,31 @@ class LunaCommands(
                 firmware = reader.stringOrNull(OPTIONS, OptionsField.FIRMWARE_REVISION),
                 lastUpdateMs = System.currentTimeMillis(),
                 rawDump = frame.describePayload(),
+            )
+        }
+
+    /**
+     * Legge SSID e password direttamente dalla camera quando la sessione Wi-Fi è già aperta.
+     * È lo stesso dato che l'app ufficiale riceve durante l'associazione; serve a trasformare
+     * una sola connessione manuale in connessioni automatiche successive.
+     */
+    suspend fun fetchWifiInfo(): Result<CameraWifiInfo> =
+        session.request(
+            LunaProtocolCodes.GET_OPTIONS,
+            LunaMessages.getOptions(OptionType.WIFI_INFO),
+        ).map { frame ->
+            val reader = optionsReader(frame)
+            CameraWifiInfo(
+                ssid = reader.stringOrNull(
+                    OPTIONS,
+                    OptionsField.WIFI_INFO,
+                    LunaProtocolCodes.WifiInfoField.SSID,
+                ),
+                password = reader.stringOrNull(
+                    OPTIONS,
+                    OptionsField.WIFI_INFO,
+                    LunaProtocolCodes.WifiInfoField.PASSWORD,
+                ),
             )
         }
 
@@ -176,6 +202,12 @@ class LunaCommands(
         session.request(
             LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
             LunaMessages.setPhotoControls(value, mode.functionMode),
+        ).map { }
+
+    suspend fun applyVideoSettings(value: VideoSettings, mode: CameraMode): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setVideoProfile(value.profileCode, mode.functionMode),
         ).map { }
 
     /** In che modalità è adesso la camera, letta dalle due sotto-modalità che riporta. */

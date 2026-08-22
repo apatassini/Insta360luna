@@ -141,7 +141,7 @@ fun ViewfinderTopBar(
                         menuOpen = false
                         onOpenGallery()
                     }
-                    MenuRow(label = "Sequenza e punti", icon = LunaIcons.Sequence) {
+                    MenuRow(label = "Automazioni gimbal", icon = LunaIcons.Sequence) {
                         menuOpen = false
                         onOpenSequence()
                     }

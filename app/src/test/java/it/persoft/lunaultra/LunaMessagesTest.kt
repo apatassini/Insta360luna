@@ -66,4 +66,14 @@ class LunaMessagesTest {
         assertEquals(-40, (fields[0] as it.persoft.lunaultra.protocol.ProtoField.VarInt).asSInt)
         assertEquals(40, (fields[1] as it.persoft.lunaultra.protocol.ProtoField.VarInt).asSInt)
     }
+
+    @Test
+    fun `il formato video usa il campo record resolution e il function mode`() {
+        val body = LunaMessages.setVideoProfile(profileCode = 154, functionMode = 7)
+        val reader = ProtoReader(body)
+
+        assertEquals(31, reader.intOrNull(1))
+        assertEquals(154, reader.intOrNull(2, 31))
+        assertEquals(7, reader.intOrNull(3))
+    }
 }

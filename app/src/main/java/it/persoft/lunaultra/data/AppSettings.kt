@@ -65,10 +65,24 @@ data class PhotoSettings(
     val whiteBalanceKelvin: Int = 0,
 )
 
+/** Risoluzione e frame rate della registrazione, codificati insieme dal protocollo Insta360. */
+@Serializable
+data class VideoSettings(
+    /** `VideoResolution`: 24 corrisponde a 3840×2160 @ 30 fps. */
+    val profileCode: Int = 24,
+)
+
 @Serializable
 data class AppSettings(
     val host: String = "192.168.42.1",
     val port: Int = 6666,
+
+    /**
+     * Credenziale dell'access point della camera. Android non espone alle app le password
+     * delle reti già salvate: dopo una prima connessione manuale la leggiamo dalla camera con
+     * `GET_OPTIONS(WIFI_INFO)` e la conserviamo per le connessioni automatiche successive.
+     */
+    val cameraWifiPassword: String = "",
 
     /** L'app ufficiale ripete l'handshake ogni 3 secondi come keep-alive. */
     val keepAliveSeconds: Int = 3,
@@ -84,6 +98,8 @@ data class AppSettings(
     val panoAspect: Int = LunaProtocolCodes.PanoAspect.SPHERE_360,
 
     val photo: PhotoSettings = PhotoSettings(),
+
+    val video: VideoSettings = VideoSettings(),
 
     /**
      * Modalità timelapse usata dai comandi `*_TIMELAPSE`

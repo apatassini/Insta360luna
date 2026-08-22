@@ -92,6 +92,7 @@ object LunaProtocolCodes {
         const val TIME_ZONE = 13
         const val SERIAL_NUMBER = 15
         const val STORAGE_STATE = 20
+        const val WIFI_INFO = 36
         const val FIRMWARE_REVISION = 30
         const val PHOTO_SUB_MODE = 40
         const val VIDEO_SUB_MODE = 41
@@ -110,10 +111,17 @@ object LunaProtocolCodes {
         const val BATTERY_STATUS = 11
         const val SERIAL_NUMBER = 15
         const val STORAGE_STATE = 20
+        const val WIFI_INFO = 36
         const val FIRMWARE_REVISION = 30
         const val PHOTO_SUB_MODE = 40
         const val VIDEO_SUB_MODE = 41
         const val CAMERA_TYPE = 48
+    }
+
+    /** Numeri di campo di `Options.WifiInfo`. */
+    object WifiInfoField {
+        const val SSID = 1
+        const val PASSWORD = 2
     }
 
     /** Valori di `insta360.messages.MediaType` (`media.proto`). */
@@ -184,6 +192,7 @@ object LunaProtocolCodes {
         const val EXPOSURE_BIAS = 7
         const val WHITE_BALANCE = 13
         const val RAW_CAPTURE_TYPE = 25
+        const val RECORD_RESOLUTION = 31
         const val WHITE_BALANCE_VALUE = 39
         const val PANO_ASPECT = 98
     }
@@ -194,6 +203,7 @@ object LunaProtocolCodes {
         const val EXPOSURE_BIAS = 7
         const val WHITE_BALANCE = 13
         const val RAW_CAPTURE_TYPE = 25
+        const val RECORD_RESOLUTION = 31
         const val WHITE_BALANCE_VALUE = 39
         const val PANO_ASPECT = 98
     }

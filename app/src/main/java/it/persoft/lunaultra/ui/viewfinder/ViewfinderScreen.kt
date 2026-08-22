@@ -32,7 +32,6 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
-import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.Panel
 import it.persoft.lunaultra.ui.components.HudIconButton
@@ -84,9 +83,11 @@ fun ViewfinderScreen(
     var dockVisible by rememberSaveable { mutableStateOf(true) }
     var modeSheetOpen by remember { mutableStateOf(false) }
     var photoSheetOpen by remember { mutableStateOf(false) }
+    var videoSheetOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(captureMode) {
-        if (!captureMode.cameraMode.isPhoto || captureMode.usesSequence) photoSheetOpen = false
+        if (!captureMode.cameraMode.isPhoto) photoSheetOpen = false
+        if (captureMode.cameraMode.isPhoto) videoSheetOpen = false
     }
 
     val connected = connection == ConnectionState.CONNECTED
@@ -157,6 +158,7 @@ fun ViewfinderScreen(
                             when {
                                 modeSheetOpen -> modeSheetOpen = false
                                 photoSheetOpen -> photoSheetOpen = false
+                                videoSheetOpen -> videoSheetOpen = false
                                 else -> chromeVisible = !chromeVisible
                             }
                         },
@@ -286,6 +288,18 @@ fun ViewfinderScreen(
                 )
             }
 
+            if (videoSheetOpen && chromeVisible) {
+                VideoControlsSheet(
+                    settings = settings.video,
+                    mode = captureMode.cameraMode,
+                    onProfile = viewModel::setVideoProfile,
+                    onClose = { videoSheetOpen = false },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                )
+            }
+
             if (modeSheetOpen && chromeVisible) {
                 ModeSheet(
                     selected = captureMode,
@@ -336,25 +350,23 @@ fun ViewfinderScreen(
                     onShutter = viewModel::onShutter,
                     waypointCount = sequence.waypoints.size,
                     onCaptureWaypoint = viewModel::captureWaypoint,
-                    onOpenSequence = {
-                        if (captureMode.cameraMode.isPhoto && !captureMode.usesSequence) {
+                    onOpenCameraSettings = {
+                        if (captureMode.cameraMode.isPhoto) {
                             photoSheetOpen = !photoSheetOpen
+                            videoSheetOpen = false
                             modeSheetOpen = false
                         } else {
-                            onOpenPanel(Panel.SEQUENCE)
+                            videoSheetOpen = !videoSheetOpen
+                            photoSheetOpen = false
+                            modeSheetOpen = false
                         }
                     },
+                    onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
                     onOpenGallery = { onOpenPanel(Panel.GALLERY) },
-                    interpolationLabel = if (sequence.interpolation == InterpolationMode.SMOOTH) "SMTH" else "LIN",
-                    onToggleInterpolation = {
-                        viewModel.setInterpolation(
-                            if (sequence.interpolation == InterpolationMode.SMOOTH) InterpolationMode.LINEAR
-                            else InterpolationMode.SMOOTH
-                        )
-                    },
                     onOpenModeSheet = {
                         modeSheetOpen = !modeSheetOpen
                         photoSheetOpen = false
+                        videoSheetOpen = false
                     },
                     vertical = landscape,
                 )

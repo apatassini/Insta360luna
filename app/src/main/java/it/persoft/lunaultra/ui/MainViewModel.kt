@@ -11,6 +11,8 @@ import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
 import it.persoft.lunaultra.data.PhotoSettings
+import it.persoft.lunaultra.data.LunaVideoProfiles
+import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.preview.PreviewState
@@ -282,11 +284,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connectionJob = viewModelScope.launch {
             _wifiConnecting.value = true
             container.log.info("Ricerca della rete Luna Ultra…")
-            val network = container.wifiBinder.acquire()
+            val network = container.wifiBinder.acquire(settings.value.cameraWifiPassword)
             _wifiConnecting.value = false
             if (network == null) {
                 wantConnected = false
-                if (showFailure) showMessage("Rete Wi-Fi Luna Ultra non trovata")
+                if (showFailure) {
+                    showMessage("Connessione Wi-Fi automatica non riuscita: verifica la password della Luna")
+                }
                 return@launch
             }
             container.session.connect()
@@ -295,6 +299,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     else container.log.warn("Connessione automatica non riuscita: ${it.message}")
                 }
                 .onSuccess {
+                    learnCameraWifiPassword()
                     if (showFailure) showMessage("Luna Ultra connessa")
                     refreshStatus()
                     syncCameraMode()
@@ -379,15 +384,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.log.warn("Sessione caduta: riprovo fra ${wait / 1000}s (tentativo $attempt)")
             delay(wait)
             if (!wantConnected) return@launch
-            container.wifiBinder.acquire()
+            val network = container.wifiBinder.acquire(settings.value.cameraWifiPassword)
+            if (network == null) {
+                container.log.warn("Riconnessione Wi-Fi non riuscita")
+                return@launch
+            }
             container.session.connect()
                 .onSuccess {
+                    learnCameraWifiPassword()
                     showMessage("Riconnessa alla camera")
                     refreshStatus()
                     syncCameraMode()
                 }
                 .onFailure { container.log.warn("Riconnessione non riuscita: ${it.message}") }
         }
+    }
+
+    /**
+     * Dopo una prima connessione manuale la camera stessa ci consegna la sua password Wi-Fi.
+     * Non viene mai scritta nel log; serve soltanto ai successivi `WifiNetworkSpecifier`.
+     */
+    private suspend fun learnCameraWifiPassword() {
+        container.commands.fetchWifiInfo()
+            .onSuccess { info ->
+                val learned = info.password?.takeIf { it.isNotBlank() } ?: return@onSuccess
+                if (learned != settings.value.cameraWifiPassword) {
+                    container.settingsStore.update { it.copy(cameraWifiPassword = learned) }
+                    container.log.info("Credenziali Wi-Fi Luna memorizzate per le connessioni automatiche")
+                }
+            }
+            .onFailure { container.log.warn("Informazioni Wi-Fi della camera non leggibili: ${it.message}") }
     }
 
     /**
@@ -768,6 +794,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.commands.applyPhotoSettings(settings.value.photo, mode.cameraMode)
                 .onFailure { container.log.warn("Regolazioni foto non accettate: ${it.message}") }
         }
+        if (applied && !mode.cameraMode.isPhoto) {
+            val selected = LunaVideoProfiles.selected(settings.value.video.profileCode, mode.cameraMode)
+            container.commands.applyVideoSettings(VideoSettings(selected.code), mode.cameraMode)
+                .onFailure { container.log.warn("Formato video non accettato: ${it.message}") }
+        }
         return applied
     }
 
@@ -814,6 +845,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setPort(port: Int) = container.settingsStore.update { it.copy(port = port) }
 
+    fun setCameraWifiPassword(password: String) =
+        container.settingsStore.update { it.copy(cameraWifiPassword = password.trim()) }
+
     fun setPhotoTimer(seconds: Int) = updatePhotoSettings { it.copy(timerSeconds = seconds.coerceIn(0, 20)) }
 
     fun setPhotoProMode(enabled: Boolean) = updatePhotoSettings { it.copy(proMode = enabled) }
@@ -838,6 +872,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             container.commands.applyPhotoSettings(settings.value.photo, mode.cameraMode)
                 .onFailure { showMessage("Regolazione non accettata: ${it.message}") }
+        }
+    }
+
+    fun setVideoProfile(code: Int) {
+        val mode = _captureMode.value.cameraMode
+        val selected = LunaVideoProfiles.forMode(mode).firstOrNull { it.code == code } ?: return
+        container.settingsStore.update { it.copy(video = it.video.copy(profileCode = selected.code)) }
+        if (connectionState.value != ConnectionState.CONNECTED || mode.isPhoto) return
+        viewModelScope.launch {
+            container.commands.applyVideoSettings(VideoSettings(selected.code), mode)
+                .onSuccess { showMessage("Video ${selected.resolution} · ${selected.fps} fps") }
+                .onFailure { showMessage("Formato video non accettato: ${it.message}") }
         }
     }
 

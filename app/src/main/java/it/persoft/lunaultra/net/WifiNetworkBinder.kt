@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.ConnectivityManager
-import android.net.MacAddress
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -50,7 +49,7 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
      * "Luna Ultra". Android può chiedere una conferma di sistema la prima volta, ma le aperture
      * successive riutilizzano l'autorizzazione già data.
      */
-    suspend fun acquire(timeoutMs: Long = 15_000): Network? = acquireMutex.withLock {
+    suspend fun acquire(password: String = "", timeoutMs: Long = 15_000): Network? = acquireMutex.withLock {
         network?.let { return it }
 
         currentLunaNetwork()?.let {
@@ -75,15 +74,31 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val accessPoint = discoverLunaAccessPoint()
+            if (accessPoint?.security?.needsPassphrase == true && password.isBlank()) {
+                log.warn(
+                    "La rete ${accessPoint.ssid} è protetta (${accessPoint.security.label}), " +
+                        "ma l'app non ha ancora la password"
+                )
+                return@withLock null
+            }
+            if (accessPoint?.security == WifiSecurity.UNSUPPORTED) {
+                log.warn("Sicurezza Wi-Fi non supportata per ${accessPoint.ssid}")
+                return@withLock null
+            }
             val specifier = WifiNetworkSpecifier.Builder().apply {
                 if (accessPoint != null) {
                     // Una richiesta specifica evita il selettore OEM e, dopo la prima conferma,
                     // Android può riconnettersi allo stesso access point senza chiederla ancora.
                     setSsid(accessPoint.ssid)
-                    accessPoint.bssid?.let(::setBssid)
+                    when (accessPoint.security) {
+                        WifiSecurity.WPA2 -> setWpa2Passphrase(password)
+                        WifiSecurity.WPA3 -> setWpa3Passphrase(password)
+                        WifiSecurity.ENHANCED_OPEN -> setIsEnhancedOpen(true)
+                        WifiSecurity.OPEN, WifiSecurity.UNSUPPORTED -> Unit
+                    }
                     log.info(
-                        "Access point Luna individuato: ${accessPoint.ssid}" +
-                            (accessPoint.bssid?.let { " ($it)" } ?: "")
+                        "Access point Luna individuato: ${accessPoint.ssid} " +
+                            "(${accessPoint.security.label})"
                     )
                 } else {
                     // Ripiego per posizione disattivata, permesso negato o scansione limitata.
@@ -192,9 +207,7 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
             ?.let { result ->
                 LunaAccessPoint(
                     ssid = result.SSID,
-                    bssid = result.BSSID
-                        ?.takeUnless { it == UNKNOWN_BSSID }
-                        ?.let { runCatching { MacAddress.fromString(it) }.getOrNull() },
+                    security = WifiSecurity.fromCapabilities(result.capabilities),
                 )
             }
     }.onFailure {
@@ -282,9 +295,30 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
     companion object {
         const val LUNA_SSID_PREFIX = "Luna Ultra"
         private const val LUNA_SUBNET_PREFIX = "192.168.42."
-        private const val UNKNOWN_BSSID = "02:00:00:00:00:00"
         private const val SCAN_TIMEOUT_MS = 5_000L
     }
 
-    private data class LunaAccessPoint(val ssid: String, val bssid: MacAddress?)
+    private data class LunaAccessPoint(val ssid: String, val security: WifiSecurity)
+
+    private enum class WifiSecurity(val label: String, val needsPassphrase: Boolean) {
+        OPEN("aperta", false),
+        ENHANCED_OPEN("OWE", false),
+        WPA2("WPA2", true),
+        WPA3("WPA3", true),
+        UNSUPPORTED("non riconosciuta", true),
+        ;
+
+        companion object {
+            fun fromCapabilities(value: String?): WifiSecurity {
+                val capabilities = value.orEmpty().uppercase()
+                return when {
+                    "PSK" in capabilities -> WPA2 // include le reti WPA2/WPA3 transition
+                    "SAE" in capabilities -> WPA3
+                    "OWE" in capabilities -> ENHANCED_OPEN
+                    "WEP" in capabilities || "EAP" in capabilities -> UNSUPPORTED
+                    else -> OPEN
+                }
+            }
+        }
+    }
 }

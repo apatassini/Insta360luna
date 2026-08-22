@@ -206,6 +206,18 @@ Due cose diverse, tutte e due necessarie:
   crescenti (2, 4, 8, 16 secondi…) finché non riesce o finché non si arrende dopo sei tentativi.
   Smette solo quando sei tu a premere «disconnetti».
 
+La selezione iniziale della rete è automatica e usa l'SSID esatto trovato dalla scansione. La
+Luna protegge l'access point con una password modificabile: Android non consente a un'app di
+leggere quella già salvata nel telefono. Per questo basta una delle due strade:
+
+- inserire una volta la **Password Wi-Fi Luna** nelle impostazioni dell'app;
+- connettere una volta il telefono manualmente e poi premere Connetti: a sessione aperta l'app
+  legge `Options.WifiInfo` dalla camera e conserva la password per gli avvii successivi.
+
+La password non viene mai scritta nel log. Le richieste Wi-Fi sono serializzate e un vecchio
+`WifiNetworkSpecifier` viene chiuso prima di aprirne un altro, per evitare il ciclo
+connessione/disconnessione osservato su alcuni firmware Android.
+
 ---
 
 ## Compilare l'APK
@@ -246,9 +258,10 @@ In alternativa, aprire la cartella con Android Studio (Ladybug o successivo).
 L'app è un mirino: l'anteprima occupa tutto lo schermo e i comandi ci stanno sopra, come in
 un'app di ripresa. Un tocco sull'immagine nasconde i comandi e lascia solo l'inquadratura.
 
-1. Collegare il telefono alla rete Wi-Fi della Luna Ultra.
-2. Aprire l'app e premere **Connetti**, al centro dell'anteprima
-   (l'app forza il routing dei socket sulla rete Wi-Fi anche se non offre Internet).
+1. Accendere il Wi-Fi della Luna Ultra e aprire l'app: se la password è già stata associata,
+   l'app seleziona la rete e si connette da sola. Altrimenti inserirla una volta nelle
+   impostazioni, oppure fare una prima connessione manuale e premere **Connetti**.
+2. L'app forza il routing dei socket sulla rete Wi-Fi della camera anche se non offre Internet.
    Batteria, spazio e stato compaiono subito nella riga in alto: se li vedi, il protocollo gira.
 3. **Accendi l'anteprima** con il primo tasto della colonna dei comandi rapidi, a destra.
 4. **La prima volta**: menu ⋮ → **Diagnostica** → trovare il codice del comando gimbal
@@ -281,7 +294,7 @@ invece che sotto — un tocco sull'immagine le toglie e l'anteprima si allarga a
 | Fascia in alto | connessione (si tocca per connettere), distintivo della modalità, anteprima on/off, griglia, impostazioni, menu ⋮ |
 | Sull'immagine, in alto a sinistra | spazio libero, batteria, gimbal pronto o no, cronometro di registrazione |
 | Sull'immagine, in basso | azzera posizione, pastiglia del tempo che conta nella modalità, comandi del gimbal |
-| Fascia in basso | galleria (o memorizza punto, nelle modalità guidate) · **pulsante di scatto** · sequenza e tempi · interpolazione, e sotto la ghiera delle modalità |
+| Fascia in basso | galleria (o memorizza punto) · **pulsante di scatto** · impostazioni **Camera** · **Automazioni gimbal**, e sotto la ghiera delle modalità |
 | Al centro | invito a connettersi, oppure il motivo per cui l'anteprima è ancora nera |
 
 Ogni modalità ha un colore e lo porta ovunque: la voce accesa nella ghiera, il pieno del
@@ -295,7 +308,7 @@ Ruotando il telefono la fascia di scatto passa sul lato destro e il pannello del
 rimpicciolisce: in orizzontale l'altezza è il bene scarso.
 
 Quattro pannelli si aprono sopra il mirino e si chiudono con Indietro: **Galleria**,
-**Sequenza e punti**
+**Automazioni gimbal**
 (riepilogo a numeri grandi, punti in griglia con la bussola di dove guardano),
 **Impostazioni** (camera, anteprima, movimento manuale) e **Diagnostica**.
 
@@ -332,6 +345,12 @@ ghiera adotta la modalità in cui la camera si trova già.
 Le tre modalità guidate hanno bisogno di almeno due punti: senza, il pulsante di scatto resta
 spento. Sceglierne una dalla ghiera equivale a sceglierla nel pannello della sequenza, e
 viceversa: è la stessa impostazione detta in due posti.
+
+Le impostazioni native e le funzioni aggiuntive non sono mescolate: il tasto con i cursori apre
+il menu **Camera** (per il video: risoluzione, rapporto e FPS; per la foto: timer, formato e
+regolazioni Auto/Pro), mentre il tasto con il percorso apre **Automazioni gimbal**. Il firmware
+codifica risoluzione e FPS in un solo `VideoResolution`: il menu propone quindi solo
+combinazioni atomiche realmente descrivibili dal protocollo, da 8K a 1080p.
 
 ---
 

@@ -483,7 +483,31 @@ class GimbalCalibrator(
             previous = settled.jpeg
         }
 
-        val sample = if (validSegments > 0 && measuredDurationMs > 0L) {
+        // Alle intensità basse ogni singolo passo sposta meno di un pixel: la somma dei passi
+        // fa zero e il campione esce inutilizzabile, mentre l'arco intero è largo una decina di
+        // pixel e si misura benissimo. Quindi si confronta anche la prima con l'ultima
+        // inquadratura, e si tiene quella delle due misure che ha davvero visto qualcosa.
+        // Il multi-step serve alle intensità alte, dove un movimento solo uscirebbe dal
+        // fotogramma e non ci sarebbe più niente da confrontare.
+        val wholeArc = WaypointImageVerifier.verify(origin, finalFrame)
+        val wholeArcUsable = wholeArc != null &&
+            wholeArc.inlierMatches >= MIN_RESPONSE_INLIERS &&
+            wholeArc.confidence >= MIN_RESPONSE_CONFIDENCE &&
+            hypot(wholeArc.shiftX, wholeArc.shiftY) > hypot(shiftX, shiftY)
+        val sample = if (wholeArcUsable) {
+            GimbalCalibrationSample(
+                intensityPercent = intensityPercent,
+                axis = axis,
+                command = command,
+                pulseMs = totalDurationMs,
+                shiftX = wholeArc!!.shiftX,
+                shiftY = wholeArc.shiftY,
+                inliers = wholeArc.inlierMatches,
+                confidence = wholeArc.confidence,
+                commandOverheadMs = if (validSegments > 0) overheadSumMs / validSegments else 0L,
+                settleMs = if (validSegments > 0) settleSumMs / validSegments else DEFAULT_SETTLE_FALLBACK_MS,
+            )
+        } else if (validSegments > 0 && measuredDurationMs > 0L) {
             GimbalCalibrationSample(
                 intensityPercent = intensityPercent,
                 axis = axis,
@@ -1059,7 +1083,14 @@ class GimbalCalibrator(
             // nuovo estremo: viene accettata solo dopo un movimento reale minimo.
             val acceptedHardwareLimit = hardwareLimit &&
                 (!requireTravel || movingPulses >= MIN_ENDSTOP_TRAVEL_PULSES)
+            // Il fine corsa per sola immagine richiede comunque di essersi mossi almeno un po'.
+            // Senza questa condizione bastavano tre confronti sbagliati di fila — e su una
+            // scena a motivo ripetitivo arrivano subito — per dichiarare un fine corsa al primo
+            // impulso, con la camera in mezzo alla corsa. La casa finiva calcolata sul limite.
+            // Chi è davvero già appoggiato al limite viene riconosciuto dal segnale hardware,
+            // che non ha bisogno di aver percorso nulla.
             val acceptedVisualStill = still &&
+                movingPulses >= MIN_VISUAL_ENDSTOP_TRAVEL_PULSES &&
                 (!requireTravel || movingPulses >= MIN_ENDSTOP_TRAVEL_PULSES)
             if (acceptedHardwareLimit) {
                 consecutiveStill = ENDSTOP_CONFIRMATIONS
@@ -1487,6 +1518,12 @@ class GimbalCalibrator(
         const val FINE_ENDSTOP_PULSE_MS = 280L
         const val MAX_FINE_ENDSTOP_PULSES = 90
         const val MIN_ENDSTOP_TRAVEL_PULSES = 6
+
+        /** Anche senza obbligo di attraversare la corsa, un fine corsa visivo va guadagnato. */
+        const val MIN_VISUAL_ENDSTOP_TRAVEL_PULSES = 3
+
+        /** Assestamento da usare quando nessun passo intermedio è stato misurabile. */
+        const val DEFAULT_SETTLE_FALLBACK_MS = 260L
         const val ENDSTOP_CONFIRMATIONS = 3
         const val ENDSTOP_LOG_EVERY_PULSES = 5
         const val MIN_ENDSTOP_INLIERS = 5

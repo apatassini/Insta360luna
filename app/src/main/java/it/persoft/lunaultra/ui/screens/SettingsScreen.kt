@@ -308,6 +308,32 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
 
         SectionCard(title = "Calibrazione gimbal", icon = LunaIcons.Center, accent = Luna.Pano) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Una calibrazione che fallisce dopo sette minuti deve dire perché, e deve
+                // dirlo dove si guarda: in cima, non in fondo fra i valori del profilo.
+                if (!calibrationState.running) {
+                    calibrationState.error?.let { reason ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, Luna.Rec, RoundedCornerShape(12.dp))
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                "CALIBRAZIONE NON SALVATA",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Luna.Rec,
+                            )
+                            Text(reason, style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                "Il profilo precedente è rimasto com'era. La Diagnostica ha il " +
+                                    "log completo di questo tentativo, miniature comprese.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Luna.OnSurfaceDim,
+                            )
+                        }
+                    }
+                }
                 if (calibrationState.running) {
                     val annotatedBitmap = remember(calibrationState.annotatedJpeg) {
                         calibrationState.annotatedJpeg?.let { bytes ->
@@ -440,7 +466,6 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     } else {
                         LabeledValue("Profilo attivo", "Non ancora calibrato")
                     }
-                    calibrationState.error?.let { Hint("Ultimo tentativo: $it") }
                     Button(
                         onClick = viewModel::startGimbalCalibration,
                         enabled = connected,
@@ -452,7 +477,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 }
                 Hint(
                     "Durata indicativa 4–7 minuti. Lascia la camera completamente libera di " +
-                        "ruotare: prima cerca sinistra/destra/basso/alto con impulsi al 20%, poi " +
+                        "ruotare: prima cerca sinistra/destra/basso/alto con impulsi al 40%, poi " +
                         "torna allo zero frontale. Inquadra una scena ferma e ricca di dettagli. Vengono misurate le " +
                         "intensità 1%, 5% e poi ogni 10% fino al 100%, sui due assi; il profilo precedente resta valido se la " +
                         "nuova prova viene interrotta o non è affidabile.",

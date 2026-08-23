@@ -226,10 +226,20 @@ object WaypointImageVerifier {
         }
         if (bestScore < MIN_DENSE_CORRELATION) return null
 
+        // Un motivo che si ripete — le doghe di un soffitto, una tapparella, una staccionata —
+        // combacia altrettanto bene spostato di un passo del motivo. La correlazione trova
+        // allora due picchi quasi uguali in posti diversi, e sceglierne uno è tirare a
+        // indovinare: la risposta esce "identica, 100%" mentre la camera si è mossa eccome.
+        // È così che una ricerca del fine corsa si è fermata al primo impulso, con la camera
+        // in piena corsa. Quando i due picchi non si distinguono, qui non si risponde.
+        if (secondScore > 0f && secondScore > bestScore * MAX_DENSE_PEAK_RATIO) return null
+
         val scoreConfidence = ((bestScore - MIN_DENSE_CORRELATION) /
             (1f - MIN_DENSE_CORRELATION)).coerceIn(0f, 1f)
         val separation = ((bestScore - secondScore).coerceAtLeast(0f) * 3.5f).coerceIn(0f, 1f)
-        val confidence = (scoreConfidence * 0.82f + separation * 0.18f).coerceIn(0f, 1f)
+        // La separazione fra i picchi pesa quanto il punteggio: un picco alto ma non isolato
+        // vale meno di un picco medio e solo.
+        val confidence = (scoreConfidence * 0.5f + separation * 0.5f).coerceIn(0f, 1f)
         val scaleX = reference.width.toFloat() / ref.width
         val scaleY = reference.height.toFloat() / ref.height
         val shiftX = bestDx * scaleX
@@ -482,6 +492,12 @@ object WaypointImageVerifier {
     private const val DENSE_BORDER = 2
     private const val DENSE_MIN_OVERLAP = 28
     private const val MAX_DENSE_SHIFT = 22
+
+    /**
+     * Quanto il secondo picco può avvicinarsi al primo prima che la misura diventi un'ipotesi.
+     * Su un motivo ripetitivo i due picchi sono gemelli e il rapporto sfiora 1.
+     */
+    private const val MAX_DENSE_PEAK_RATIO = 0.92f
     private const val MIN_DENSE_STD_DEV = 1.25f
     private const val MIN_DENSE_CORRELATION = 0.38f
     private const val MIN_DENSE_CONFIDENCE = 0.20f

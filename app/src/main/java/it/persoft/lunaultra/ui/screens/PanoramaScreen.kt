@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.stitch.StitchUiState
+import it.persoft.lunaultra.stitch.sphericalCoverage
 import it.persoft.lunaultra.timelapse.LunaOptics
 import it.persoft.lunaultra.timelapse.PanoramaPlan
 import it.persoft.lunaultra.timelapse.TimelapseSequence
@@ -44,6 +45,7 @@ import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.MetricRow
+import it.persoft.lunaultra.ui.components.StatusChip
 import it.persoft.lunaultra.ui.components.MetricTile
 import it.persoft.lunaultra.ui.components.NumberField
 import it.persoft.lunaultra.ui.components.ToggleRow
@@ -94,7 +96,75 @@ fun PanoramaScreen(viewModel: MainViewModel) {
             }
         }
 
-        SectionCard(title = "Quanto coprire", icon = LunaIcons.Panorama, accent = Luna.Pano) {
+        SectionCard(title = "Scatto sferico", icon = LunaIcons.Center, accent = Luna.Multi) {
+            ToggleRow(
+                title = "Prendi tutto quello che il gimbal raggiunge",
+                subtitle = "I gradi non li scegli tu: li detta la corsa misurata dalla " +
+                    "calibrazione. Sovrapposizione fissa al 20%, e il buco sotto viene chiuso.",
+                checked = sequence.panoramaSpherical,
+                onCheckedChange = viewModel::setPanoramaSpherical,
+            )
+            if (sequence.panoramaSpherical && calibration.isValid) {
+                val fov = LunaOptics.fieldOfView(settings.photo.zoomScale, sequence.panoramaAspect)
+                val coverage = sphericalCoverage(
+                    panMinimumDeg = calibration.panLimits.minimumDeg,
+                    panMaximumDeg = calibration.panLimits.maximumDeg,
+                    tiltMinimumDeg = calibration.tiltLimits.minimumDeg,
+                    tiltMaximumDeg = calibration.tiltLimits.maximumDeg,
+                    horizontalFovDegrees = fov.horizontalDegrees,
+                    verticalFovDegrees = fov.verticalDegrees,
+                )
+                MetricRow {
+                    MetricTile(
+                        value = "%.0f°".format(coverage.horizontalDegrees.coerceAtMost(360f)),
+                        caption = "attorno a te",
+                        valueColor = Luna.Multi,
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricTile(
+                        value = "%.0f°".format(coverage.verticalDegrees.coerceAtMost(180f)),
+                        caption = "dall'alto in basso",
+                        valueColor = Luna.Multi,
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricTile(
+                        value = if (coverage.closesTheCircle) "chiuso" else "%.0f°".format(coverage.missingHorizontalDegrees),
+                        caption = if (coverage.closesTheCircle) "il giro si chiude" else "che restano dietro",
+                        valueColor = if (coverage.closesTheCircle) Luna.Ok else Luna.Warn,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Hint(
+                    if (coverage.closesTheCircle) {
+                        "Il giro si chiude davvero. La corsa del pan è " +
+                            "${"%.0f".format(calibration.panLimits.spanDeg)}° su 360, ma un fotogramma non è una linea: " +
+                            "il primo scatto vede mezzo campo prima del suo centro e l'ultimo " +
+                            "mezzo campo dopo, e a questo zoom quel mezzo campo basta a coprire " +
+                            "il resto. Da 2× in su il campo si stringe e resta un settore fuori."
+                    } else {
+                        "A questo zoom il giro non si chiude: il campo dell'obiettivo è troppo " +
+                            "stretto per coprire quello che la corsa non raggiunge. Con lo zoom " +
+                            "a 1× i ${"%.0f".format(calibration.panLimits.spanDeg)}° di corsa più il campo chiudono il cerchio."
+                    },
+                )
+                Hint(
+                    "Sotto, dove il tilt finisce la corsa, il buco viene chiuso estendendo " +
+                        "l'ultimo anello buono: quei pixel sono inventati, non fotografati, e " +
+                        "il log dice quante righe sono.",
+                )
+            } else if (sequence.panoramaSpherical) {
+                Hint("Serve la calibrazione: i gradi dello scatto sferico vengono dai fine corsa misurati.")
+            }
+        }
+
+        SectionCard(
+            title = "Quanto coprire",
+            icon = LunaIcons.Panorama,
+            accent = Luna.Pano,
+            trailing = {
+                if (sequence.panoramaSpherical) StatusChip("decisa dalla sferica", Luna.OnSurfaceDim)
+            },
+        ) {
             val active = PanoramaPreset.matching(
                 sequence.panoramaHorizontalDegrees,
                 sequence.panoramaVerticalDegrees,

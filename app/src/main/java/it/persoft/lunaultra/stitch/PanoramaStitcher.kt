@@ -29,6 +29,8 @@ data class StitchReport(
     val coverageVerticalDegrees: Float,
     val refinements: List<String>,
     val worstCorrectionDegrees: Float,
+    /** Righe inventate in fondo per chiudere il buco sotto: zero se non ce n'era bisogno. */
+    val nadirPatchRows: Int = 0,
 )
 
 data class StitchOutcome(val bitmap: Bitmap, val report: StitchReport)
@@ -71,6 +73,8 @@ class PanoramaStitcher(
     suspend fun stitch(
         shots: List<PanoramaShot>,
         horizontalFovDegrees: Float,
+        /** Riempi il buco sotto: serve agli scatti sferici, dove il gimbal non arriva al nadir. */
+        fillNadir: Boolean = false,
     ): Result<StitchOutcome> = withContext(Dispatchers.Default) {
         runCatching {
             require(shots.size >= 2) { "Servono almeno due scatti per unire una panoramica" }
@@ -94,6 +98,12 @@ class PanoramaStitcher(
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
             val bitmap = compose(frames, placements, lens, canvas)
+            val patchedRows = if (fillNadir) {
+                onProgress(0.97f, "Chiudo il buco sotto")
+                fillNadirHole(bitmap)
+            } else {
+                0
+            }
 
             frames.forEach { it.bitmap.recycle() }
             onProgress(1f, "Panoramica pronta")
@@ -107,6 +117,7 @@ class PanoramaStitcher(
                     coverageVerticalDegrees = canvas.verticalDegrees,
                     refinements = refinement.notes,
                     worstCorrectionDegrees = refinement.worstCorrection,
+                    nadirPatchRows = patchedRows,
                 ),
             )
         }
@@ -388,6 +399,78 @@ class PanoramaStitcher(
     }
 
     /**
+     * Chiude il buco sotto, dove il gimbal non arriva.
+     *
+     * Sotto una certa inclinazione non c'è più corsa: il tilt si ferma, e quello che sta sotto
+     * la camera non viene fotografato da nessuno scatto. In una panoramica normale non importa,
+     * perché quella zona è fuori inquadratura; in uno scatto sferico è il pavimento, ed è il
+     * primo posto dove guarda chi apre l'immagine in un visore.
+     *
+     * Quello che si mette lì non è misurato: è inventato, e va detto. Il criterio è che sembri
+     * la continuazione di quello che c'è sopra invece di un buco nero. Ogni colonna eredita il
+     * colore dell'ultimo pixel buono che ha sopra, e più si scende più quel colore si mescola
+     * con la media dell'intero anello: al polo tutte le colonne convergono sullo stesso colore,
+     * che è l'unica cosa geometricamente sensata — un polo è un punto solo, e non può avere
+     * trecento colori diversi. Senza quella convergenza si otterrebbe una raggiera, che è
+     * proprio l'artefatto che si riconosce a colpo d'occhio nelle panoramiche rattoppate male.
+     *
+     * Restituisce quante righe ha inventato, così il rapporto può dirlo invece di far finta che
+     * la sfera fosse completa.
+     */
+    private fun fillNadirHole(bitmap: Bitmap): Int {
+        val width = bitmap.width
+        val height = bitmap.height
+        val row = IntArray(width)
+
+        // L'ultima riga piena è il bordo del buco: sotto, si inventa.
+        var boundary = -1
+        for (y in height - 1 downTo 0) {
+            bitmap.getPixels(row, 0, width, 0, y, width, 1)
+            if (row.count { it == EMPTY_PIXEL } <= width * MAX_EMPTY_FRACTION) {
+                boundary = y
+                break
+            }
+        }
+        if (boundary < 0 || boundary >= height - 1) return 0
+
+        bitmap.getPixels(row, 0, width, 0, boundary, width, 1)
+        val ring = row.copyOf()
+        var r = 0L
+        var g = 0L
+        var b = 0L
+        var counted = 0
+        ring.forEach { color ->
+            if (color == EMPTY_PIXEL) return@forEach
+            r += (color shr 16) and 0xFF
+            g += (color shr 8) and 0xFF
+            b += color and 0xFF
+            counted++
+        }
+        if (counted == 0) return 0
+        val meanR = (r / counted).toInt()
+        val meanG = (g / counted).toInt()
+        val meanB = (b / counted).toInt()
+
+        val patched = height - 1 - boundary
+        for (y in boundary + 1 until height) {
+            // Verso il fondo il colore della colonna cede il posto alla media dell'anello.
+            val toward = ((y - boundary).toFloat() / patched).coerceIn(0f, 1f)
+            for (x in 0 until width) {
+                val source = ring[x].takeIf { it != EMPTY_PIXEL } ?: EMPTY_PIXEL
+                val sr = if (source == EMPTY_PIXEL) meanR else (source shr 16) and 0xFF
+                val sg = if (source == EMPTY_PIXEL) meanG else (source shr 8) and 0xFF
+                val sb = if (source == EMPTY_PIXEL) meanB else source and 0xFF
+                val mixR = (sr + (meanR - sr) * toward).roundToInt().coerceIn(0, 255)
+                val mixG = (sg + (meanG - sg) * toward).roundToInt().coerceIn(0, 255)
+                val mixB = (sb + (meanB - sb) * toward).roundToInt().coerceIn(0, 255)
+                row[x] = (0xFF shl 24) or (mixR shl 16) or (mixG shl 8) or mixB
+            }
+            bitmap.setPixels(row, 0, width, 0, y, width, 1)
+        }
+        return patched
+    }
+
+    /**
      * Il fattore di luminosità di ogni fotogramma, riferito al primo.
      *
      * A esposizione automatica due scatti dello stesso posto non hanno la stessa luminosità: la
@@ -489,6 +572,12 @@ class PanoramaStitcher(
 
         /** Sotto questi punti in comune il confronto non dice niente di affidabile. */
         const val MIN_OVERLAP_SAMPLES = 40
+
+        /** Il nero pieno che [compose] lascia dove nessun fotogramma copre. */
+        const val EMPTY_PIXEL = 0xFF000000.toInt()
+
+        /** Una riga con più buchi di così è già dentro il foro, non sul suo bordo. */
+        const val MAX_EMPTY_FRACTION = 0.10f
     }
 }
 

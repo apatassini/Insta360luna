@@ -18,6 +18,7 @@ import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.stitch.StitchUiState
+import it.persoft.lunaultra.stitch.sphericalCoverage
 import it.persoft.lunaultra.preview.PreviewState
 import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaMessages
@@ -1008,13 +1009,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val seq = sequence.value
         val current = container.gimbal.position.value
         val zoom = settings.value.photo.zoomScale
+        // Nello scatto sferico i gradi non li sceglie chi scatta: li detta la corsa misurata
+        // dalla calibrazione, e il centro è il centro della corsa invece dell'inquadratura
+        // attuale — una sfera non ha un davanti, e partire da dove si guarda adesso
+        // sprecherebbe metà della corsa da un lato.
+        val fov = LunaOptics.fieldOfView(zoom, seq.panoramaAspect)
+        val spherical = sphericalCoverage(
+            panMinimumDeg = profile.panLimits.minimumDeg,
+            panMaximumDeg = profile.panLimits.maximumDeg,
+            tiltMinimumDeg = profile.tiltLimits.minimumDeg,
+            tiltMaximumDeg = profile.tiltLimits.maximumDeg,
+            horizontalFovDegrees = fov.horizontalDegrees,
+            verticalFovDegrees = fov.verticalDegrees,
+        )
         val result = runCatching {
             PanoramaPlanner.plan(
-                centerPan = current.pan,
-                centerTilt = current.tilt,
-                horizontalCoverage = seq.panoramaHorizontalDegrees,
-                verticalCoverage = seq.panoramaVerticalDegrees,
-                overlapPercent = seq.panoramaOverlapPercent,
+                centerPan = if (seq.panoramaSpherical) spherical.centerPanDegrees else current.pan,
+                centerTilt = if (seq.panoramaSpherical) spherical.centerTiltDegrees else current.tilt,
+                horizontalCoverage = if (seq.panoramaSpherical) {
+                    spherical.horizontalDegrees
+                } else {
+                    seq.panoramaHorizontalDegrees
+                },
+                verticalCoverage = if (seq.panoramaSpherical) {
+                    spherical.verticalDegrees
+                } else {
+                    seq.panoramaVerticalDegrees
+                },
+                overlapPercent = if (seq.panoramaSpherical) {
+                    SPHERICAL_OVERLAP_PERCENT
+                } else {
+                    seq.panoramaOverlapPercent
+                },
                 zoomScale = zoom,
                 aspect = seq.panoramaAspect,
                 panLimits = profile.panLimits,
@@ -1084,6 +1110,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Pianifica e parte: per chi scatta una panoramica, sono un gesto solo. */
+    /**
+     * La sovrapposizione dello scatto sferico, che non si tocca.
+     *
+     * Al 20% i fotogrammi si accavallano abbastanza da unirsi bene anche vicino ai poli, dove i
+     * meridiani si stringono e due scatti affiancati condividono molto meno di quanto dicano i
+     * gradi di longitudine che li separano. Più giù la giunzione in alto e in basso si apre.
+     */
+    private val SPHERICAL_OVERLAP_PERCENT = 20
+
     /** Stato dell'unione automatica, per il pannello della panoramica. */
     private val _stitchState = MutableStateFlow<StitchUiState>(StitchUiState.Idle)
     val stitchState: StateFlow<StitchUiState> = _stitchState
@@ -1094,6 +1129,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAutoStitchPanorama(enabled: Boolean) =
         container.sequenceStore.update { it.copy(autoStitchPanorama = enabled) }
+
+    fun setPanoramaSpherical(enabled: Boolean) {
+        container.sequenceStore.update { it.copy(panoramaSpherical = enabled) }
+        refreshPanoramaPreview()
+    }
 
     /**
      * Scatta la panoramica, e se l'unione automatica è accesa se ne ricorda l'inizio.
@@ -1140,6 +1180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 after = after,
                 angles = shots,
                 horizontalFovDegrees = fov.horizontalDegrees,
+                fillNadir = seq.panoramaSpherical,
                 onProgress = { fraction, message ->
                     _stitchState.value = StitchUiState.Working(fraction, message)
                 },

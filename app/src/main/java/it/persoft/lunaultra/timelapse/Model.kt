@@ -109,6 +109,15 @@ data class TimelapseSequence(
      * comunque sulla camera. L'unione avviene sul telefono e non tocca niente sulla scheda.
      */
     val autoStitchPanorama: Boolean = true,
+    /**
+     * Scatto sferico: tutta la corsa che il gimbal ha, con sovrapposizione fissa al 20%.
+     *
+     * Non è una copertura fra le altre: i gradi non li sceglie chi scatta, li detta la corsa
+     * misurata dalla calibrazione. E la sovrapposizione non si tocca — al 20% i fotogrammi si
+     * accavallano abbastanza da unirsi bene anche ai poli, dove i meridiani si stringono e due
+     * scatti affiancati si sovrappongono molto meno di quanto dicano i gradi.
+     */
+    val panoramaSpherical: Boolean = false,
     val panoramaAspect: PhotoFrameAspect = PhotoFrameAspect.FOUR_THREE,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)

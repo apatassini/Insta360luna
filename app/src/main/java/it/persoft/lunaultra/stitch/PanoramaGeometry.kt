@@ -142,15 +142,24 @@ class PanoramaCanvas(
             val maxPan = placements.maxOf { it.effectivePan } + halfH
             val minTilt = placements.minOf { it.effectiveTilt } - halfV
             val maxTilt = placements.maxOf { it.effectiveTilt } + halfV
-            val spanH = (maxPan - minPan).coerceAtLeast(1f)
-            val spanV = (maxTilt - minTilt).coerceAtLeast(1f)
+            // Oltre il giro completo la tela ricomincerebbe da capo: le colonne in più
+            // rifarebbero longitudini già disegnate, e la panoramica avrebbe un pezzo doppio.
+            // Succede davvero: a 1× i 292° di corsa più gli 81,7° di campo fanno 373,7.
+            val spanH = (maxPan - minPan).coerceIn(1f, FULL_TURN_DEGREES)
+            // Oltre i poli non c'è niente da disegnare: una latitudine di 153° non esiste, e
+            // lasciarla nella tela produrrebbe una fascia in cui la proiezione si ribalta. Con
+            // gli scatti sferici succede sempre, perché il fotogramma più alto guarda a 120° e
+            // il suo bordo superiore finirebbe ben oltre lo zenit.
+            val topTilt = min(maxTilt, POLE_DEGREES)
+            val bottomTilt = max(minTilt, -POLE_DEGREES)
+            val spanV = (topTilt - bottomTilt).coerceAtLeast(1f)
             // Il tetto vale sul lato più lungo: una panoramica bassa e larga e una alta e
             // stretta devono costare la stessa memoria.
             val longestSpan = max(spanH, spanV)
             val capped = min(requestedPixelsPerDegree, maximumLongSide / longestSpan)
             return PanoramaCanvas(
                 centerPanDegrees = (minPan + maxPan) / 2f,
-                centerTiltDegrees = (minTilt + maxTilt) / 2f,
+                centerTiltDegrees = (bottomTilt + topTilt) / 2f,
                 horizontalDegrees = spanH,
                 verticalDegrees = spanV,
                 pixelsPerDegree = capped.coerceAtLeast(MIN_PIXELS_PER_DEGREE),
@@ -159,8 +168,78 @@ class PanoramaCanvas(
 
         /** Sotto questo la panoramica non è più un'immagine, è una miniatura. */
         const val MIN_PIXELS_PER_DEGREE = 2f
+
+        /** Il polo: oltre non c'è sfera, e una tela che ci va oltre si ribalta su sé stessa. */
+        const val POLE_DEGREES = 90f
+
+        /** Il giro completo: una tela più larga ridisegnerebbe longitudini già fatte. */
+        const val FULL_TURN_DEGREES = 360f
     }
 }
+
+
+/**
+ * La copertura di uno scatto sferico: tutta la corsa che il gimbal ha davvero.
+ *
+ * Quanto ne esce dipende dall'obiettivo, ed è un conto che vale la pena fare invece di
+ * promettere una sfera. La corsa del pan è 292° su 360, ma un fotogramma non è una linea: il
+ * primo scatto vede mezzo campo *prima* del suo centro e l'ultimo mezzo campo *dopo*. A 1×,
+ * dove il campo è 81,7°, l'arco coperto è 292 + 81,7 = 373,7 — **il giro si chiude davvero**.
+ * Da 2× in su il campo si stringe e non basta più: a 2× ne restano fuori 22, a 12× sessanta.
+ *
+ * In verticale la corsa è 177° su 180, e il fotogramma più basso, guardando in giù dal limite,
+ * arriva quasi al nadir: quel poco che manca è il buco che va chiuso dopo l'unione.
+ *
+ * Il conto che conta è dove vanno i *centri* dei fotogrammi, non quanto copre il risultato. Il
+ * pianificatore ragiona in copertura, e la copertura è i centri più un campo visivo — mezzo per
+ * parte. Quindi per far arrivare i centri fino agli estremi della corsa si chiede una copertura
+ * pari alla corsa più un campo intero. Chiedere invece «copri 177°» lascerebbe i centri
+ * all'interno e la camera non guarderebbe mai davvero in basso, che è proprio il posto dove
+ * serve arrivare.
+ *
+ * Il margine tiene i centri dentro i limiti anche quando l'aritmetica in virgola mobile li
+ * porterebbe sul limite esatto: lì il pianificatore rifiuterebbe il piano per un millesimo.
+ */
+data class SphericalCoverage(
+    val centerPanDegrees: Float,
+    val centerTiltDegrees: Float,
+    val horizontalDegrees: Float,
+    val verticalDegrees: Float,
+) {
+    /** Quanto resta fuori dietro le spalle: zero quando il campo dell'obiettivo chiude il giro. */
+    val missingHorizontalDegrees: Float
+        get() = (PanoramaCanvas.FULL_TURN_DEGREES - horizontalDegrees).coerceAtLeast(0f)
+
+    /** Vero quando l'arco coperto arriva o supera il giro: succede a 1×, non oltre. */
+    val closesTheCircle: Boolean
+        get() = horizontalDegrees >= PanoramaCanvas.FULL_TURN_DEGREES
+}
+
+fun sphericalCoverage(
+    panMinimumDeg: Float,
+    panMaximumDeg: Float,
+    tiltMinimumDeg: Float,
+    tiltMaximumDeg: Float,
+    horizontalFovDegrees: Float,
+    verticalFovDegrees: Float,
+    marginDegrees: Float = SPHERICAL_MARGIN_DEG,
+): SphericalCoverage {
+    val panLow = panMinimumDeg + marginDegrees
+    val panHigh = panMaximumDeg - marginDegrees
+    val tiltLow = tiltMinimumDeg + marginDegrees
+    val tiltHigh = tiltMaximumDeg - marginDegrees
+    val panCenterSpan = (panHigh - panLow).coerceAtLeast(0f)
+    val tiltCenterSpan = (tiltHigh - tiltLow).coerceAtLeast(0f)
+    return SphericalCoverage(
+        centerPanDegrees = (panLow + panHigh) / 2f,
+        centerTiltDegrees = (tiltLow + tiltHigh) / 2f,
+        horizontalDegrees = panCenterSpan + horizontalFovDegrees,
+        verticalDegrees = tiltCenterSpan + verticalFovDegrees,
+    )
+}
+
+/** Un paio di gradi di margine: i centri restano dentro la corsa senza sfiorarne il limite. */
+const val SPHERICAL_MARGIN_DEG = 2f
 
 /**
  * Da una direzione della tela al pixel del fotogramma che la guarda.

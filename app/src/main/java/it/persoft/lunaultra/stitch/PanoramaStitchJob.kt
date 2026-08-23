@@ -57,6 +57,7 @@ class PanoramaStitchJob(
         after: List<MediaItem>,
         angles: List<ShotAngle>,
         horizontalFovDegrees: Float,
+        fillNadir: Boolean = false,
         onProgress: (Float, String) -> Unit,
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
@@ -85,7 +86,7 @@ class PanoramaStitchJob(
             val stitcher = PanoramaStitcher { fraction, message ->
                 onProgress(DOWNLOAD_SHARE + (1f - DOWNLOAD_SHARE) * fraction, message)
             }
-            val outcome = stitcher.stitch(shots, horizontalFovDegrees).getOrThrow()
+            val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir).getOrThrow()
             val name = save(outcome.bitmap)
             outcome.bitmap.recycle()
 
@@ -100,6 +101,12 @@ class PanoramaStitchJob(
                             outcome.report.coverageVerticalDegrees,
                         ),
                     )
+                    if (outcome.report.nadirPatchRows > 0) {
+                        appendLine(
+                            "Buco sotto chiuso: %d righe inventate a partire dall'ultimo anello buono."
+                                .format(outcome.report.nadirPatchRows),
+                        )
+                    }
                     outcome.report.refinements.forEach { appendLine(it) }
                     append(
                         "Correzione massima dell'allineamento: %.2f°"

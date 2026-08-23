@@ -5,6 +5,21 @@ import android.media.MediaFormat
 import android.view.Surface
 import it.persoft.lunaultra.net.EventLog
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
+
+/** Corregge il preview anamorfizzato 1440x720 della Luna quando MediaCodec perde il SAR 8:9. */
+internal fun correctedPreviewAspectRatio(width: Int, height: Int, sarWidth: Int, sarHeight: Int): Float {
+    val safeHeight = height.coerceAtLeast(1)
+    val safeSarWidth = sarWidth.coerceAtLeast(1)
+    val safeSarHeight = sarHeight.coerceAtLeast(1)
+    val codedRatio = width.toFloat() / safeHeight
+    val codecDeclaredSquarePixels = safeSarWidth == 1 && safeSarHeight == 1
+    return if (codecDeclaredSquarePixels && abs(codedRatio - 2f) <= 0.03f) {
+        16f / 9f
+    } else {
+        width.toFloat() * safeSarWidth / (safeHeight.toFloat() * safeSarHeight)
+    }
+}
 
 /**
  * Decodifica lo stream elementare dell'anteprima su una [Surface].
@@ -166,7 +181,7 @@ class VideoDecoder(private val log: EventLog) {
         val sarHeight = format.intOrNull(SAR_HEIGHT_KEY)?.coerceAtLeast(1) ?: 1
         displayWidth = width
         displayHeight = height
-        displayAspectRatio = width.toFloat() * sarWidth / (height.toFloat() * sarHeight)
+        displayAspectRatio = correctedPreviewAspectRatio(width, height, sarWidth, sarHeight)
         log.info(
             "Anteprima: formato visibile ${width}×${height}, rapporto " +
                 "%.3f".format(displayAspectRatio),

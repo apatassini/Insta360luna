@@ -428,6 +428,13 @@ class LunaCommands(
 
     suspend fun gimbalStop(): Result<Unit> = gimbalVelocity(0f, 0f)
 
+    /** Riporta entrambi gli assi allo zero fisico memorizzato dal firmware della Luna. */
+    suspend fun gimbalBackCenter(): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.GIMBAL_CONTROL,
+            LunaMessages.gimbalBackCenter(),
+        ).map { }
+
     /**
      * Imposta la velocità fisica del gimbal e aggiorna il contesto usato dalla camera.
      * Sono i due comandi consecutivi osservati da Insta360Linker; non è una semplice scala UI.

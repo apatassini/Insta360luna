@@ -7,8 +7,11 @@ import android.graphics.Color
 import android.graphics.Paint
 import java.io.ByteArrayOutputStream
 import java.util.Random
+import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 enum class PositionVerdict(val label: String) {
     CORRECT("POSIZIONE CORRETTA"),
@@ -72,11 +75,12 @@ object WaypointImageVerifier {
         val curFeatures = describe(curGray)
         val candidates = match(refFeatures, curFeatures)
 
+        val dense = denseTranslation(refGray, curGray, refFeatures.size, curFeatures.size)
         if (refFeatures.size < MIN_FEATURES || curFeatures.size < MIN_FEATURES) {
-            return emptyVerification(refFeatures.size, curFeatures.size, candidates.size, PositionVerdict.NO_FEATURES)
+            return dense ?: emptyVerification(refFeatures.size, curFeatures.size, candidates.size, PositionVerdict.NO_FEATURES)
         }
         if (candidates.size < MIN_MATCHES) {
-            return emptyVerification(refFeatures.size, curFeatures.size, candidates.size, PositionVerdict.WRONG)
+            return dense ?: emptyVerification(refFeatures.size, curFeatures.size, candidates.size, PositionVerdict.WRONG)
         }
 
         val consensus = translationConsensus(candidates)
@@ -92,7 +96,7 @@ object WaypointImageVerifier {
             else -> PositionVerdict.WRONG
         }
         val inliers = consensus.inliers.toSet()
-        return ImageVerification(
+        val sparse = ImageVerification(
             referenceFeatures = refFeatures.size,
             currentFeatures = curFeatures.size,
             candidateMatches = candidates.size,
@@ -111,6 +115,11 @@ object WaypointImageVerifier {
                 )
             },
         )
+        return if (sparse.confidence >= MIN_CONFIDENCE || dense == null || sparse.confidence >= dense.confidence) {
+            sparse
+        } else {
+            dense
+        }
     }
 
     /** Miniatura reale con i punti verdi del consenso e gli scarti rossi. */
@@ -180,6 +189,150 @@ object WaypointImageVerifier {
     private data class Match(val reference: Feature, val current: Feature, val distance: Int)
     private data class Consensus(val dx: Float, val dy: Float, val inliers: List<Match>)
     private data class Corner(val x: Int, val y: Int, val score: Double)
+
+    /**
+     * Fallback per cielo, pareti e superfici con pochi angoli: confronta tutta la luminanza
+     * ridotta tramite correlazione normalizzata. Le nuvole deboli che non superano la soglia
+     * Harris restano comunque una tessitura sufficiente; un'immagine davvero piatta viene
+     * rifiutata misurandone la deviazione standard.
+     */
+    private fun denseTranslation(
+        reference: GrayImage,
+        current: GrayImage,
+        referenceFeatureCount: Int,
+        currentFeatureCount: Int,
+    ): ImageVerification? {
+        val ref = DenseImage.from(reference)
+        val cur = DenseImage.from(current)
+        if (ref.width != cur.width || ref.height != cur.height) return null
+        if (min(ref.standardDeviation, cur.standardDeviation) < MIN_DENSE_STD_DEV) return null
+
+        var bestScore = -1f
+        var secondScore = -1f
+        var bestDx = 0
+        var bestDy = 0
+        for (dy in -MAX_DENSE_SHIFT..MAX_DENSE_SHIFT) {
+            for (dx in -MAX_DENSE_SHIFT..MAX_DENSE_SHIFT) {
+                val score = denseCorrelation(ref, cur, dx, dy)
+                if (score > bestScore) {
+                    secondScore = bestScore
+                    bestScore = score
+                    bestDx = dx
+                    bestDy = dy
+                } else if (score > secondScore && abs(dx - bestDx) + abs(dy - bestDy) > 2) {
+                    secondScore = score
+                }
+            }
+        }
+        if (bestScore < MIN_DENSE_CORRELATION) return null
+
+        val scoreConfidence = ((bestScore - MIN_DENSE_CORRELATION) /
+            (1f - MIN_DENSE_CORRELATION)).coerceIn(0f, 1f)
+        val separation = ((bestScore - secondScore).coerceAtLeast(0f) * 3.5f).coerceIn(0f, 1f)
+        val confidence = (scoreConfidence * 0.82f + separation * 0.18f).coerceIn(0f, 1f)
+        val scaleX = reference.width.toFloat() / ref.width
+        val scaleY = reference.height.toFloat() / ref.height
+        val shiftX = bestDx * scaleX
+        val shiftY = bestDy * scaleY
+        val displacement = hypot(shiftX, shiftY)
+        val verdict = when {
+            confidence < MIN_DENSE_CONFIDENCE -> PositionVerdict.UNCERTAIN
+            displacement <= CORRECT_RADIUS_PX -> PositionVerdict.CORRECT
+            displacement <= DENSE_OVERLAP_RADIUS_PX -> PositionVerdict.SHIFTED
+            else -> PositionVerdict.WRONG
+        }
+        val points = denseControlPoints(reference.width, reference.height, shiftX, shiftY)
+        return ImageVerification(
+            referenceFeatures = referenceFeatureCount,
+            currentFeatures = currentFeatureCount,
+            candidateMatches = points.size,
+            inlierMatches = points.size,
+            shiftX = shiftX,
+            shiftY = shiftY,
+            confidence = confidence,
+            verdict = verdict,
+            controlPoints = points,
+        )
+    }
+
+    private data class DenseImage(
+        val width: Int,
+        val height: Int,
+        val pixels: FloatArray,
+        val standardDeviation: Float,
+    ) {
+        operator fun get(x: Int, y: Int): Float = pixels[y * width + x]
+
+        companion object {
+            fun from(source: GrayImage): DenseImage {
+                val width = DENSE_SIZE
+                val height = DENSE_SIZE
+                val pixels = FloatArray(width * height)
+                var sum = 0f
+                var sumSquares = 0f
+                for (y in 0 until height) for (x in 0 until width) {
+                    val sourceX = (x * source.width / width).coerceIn(0, source.width - 1)
+                    val sourceY = (y * source.height / height).coerceIn(0, source.height - 1)
+                    val value = source[sourceX, sourceY].toFloat()
+                    pixels[y * width + x] = value
+                    sum += value
+                    sumSquares += value * value
+                }
+                val count = pixels.size.coerceAtLeast(1)
+                val mean = sum / count
+                val variance = (sumSquares / count - mean * mean).coerceAtLeast(0f)
+                return DenseImage(width, height, pixels, sqrt(variance))
+            }
+        }
+    }
+
+    private fun denseCorrelation(reference: DenseImage, current: DenseImage, dx: Int, dy: Int): Float {
+        val startX = max(DENSE_BORDER, max(DENSE_BORDER, -dx + DENSE_BORDER))
+        val endX = min(reference.width - DENSE_BORDER, current.width - dx - DENSE_BORDER)
+        val startY = max(DENSE_BORDER, max(DENSE_BORDER, -dy + DENSE_BORDER))
+        val endY = min(reference.height - DENSE_BORDER, current.height - dy - DENSE_BORDER)
+        if (endX - startX < DENSE_MIN_OVERLAP || endY - startY < DENSE_MIN_OVERLAP) return -1f
+
+        var sumA = 0.0
+        var sumB = 0.0
+        var sumAA = 0.0
+        var sumBB = 0.0
+        var sumAB = 0.0
+        var count = 0
+        for (y in startY until endY) for (x in startX until endX) {
+            val a = reference[x, y].toDouble()
+            val b = current[x + dx, y + dy].toDouble()
+            sumA += a
+            sumB += b
+            sumAA += a * a
+            sumBB += b * b
+            sumAB += a * b
+            count++
+        }
+        if (count <= 0) return -1f
+        val covariance = sumAB - sumA * sumB / count
+        val varianceA = sumAA - sumA * sumA / count
+        val varianceB = sumBB - sumB * sumB / count
+        val denominator = sqrt((varianceA * varianceB).coerceAtLeast(0.0))
+        if (denominator < 1.0e-6) return -1f
+        val overlap = count.toFloat() / ((reference.width - DENSE_BORDER * 2) *
+            (reference.height - DENSE_BORDER * 2)).coerceAtLeast(1)
+        return (covariance / denominator).toFloat().coerceIn(-1f, 1f) * (0.82f + overlap * 0.18f)
+    }
+
+    private fun denseControlPoints(width: Int, height: Int, shiftX: Float, shiftY: Float): List<ControlPoint> {
+        val points = ArrayList<ControlPoint>()
+        for (row in 1..4) for (column in 1..5) {
+            val x = width * column / 6f
+            val y = height * row / 5f
+            val currentX = x + shiftX
+            val currentY = y + shiftY
+            if (currentX in 0f..width.toFloat() && currentY in 0f..height.toFloat()) {
+                points += ControlPoint(x, y, currentX, currentY, true)
+            }
+        }
+        return points
+    }
 
     private fun describe(image: GrayImage): List<Feature> = detectCorners(image).map { corner ->
         val bits = LongArray(DESCRIPTOR_LONGS)
@@ -325,4 +478,12 @@ object WaypointImageVerifier {
     private const val MIN_CONFIDENCE = 0.48f
     private const val HARRIS_K = 0.04
     private const val HARRIS_MIN_SCORE = 5.0e7
+    private const val DENSE_SIZE = 64
+    private const val DENSE_BORDER = 2
+    private const val DENSE_MIN_OVERLAP = 28
+    private const val MAX_DENSE_SHIFT = 22
+    private const val MIN_DENSE_STD_DEV = 1.25f
+    private const val MIN_DENSE_CORRELATION = 0.38f
+    private const val MIN_DENSE_CONFIDENCE = 0.20f
+    private const val DENSE_OVERLAP_RADIUS_PX = 96f
 }

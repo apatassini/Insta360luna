@@ -72,6 +72,11 @@ class LunaMessagesTest {
     }
 
     @Test
+    fun `il ricentraggio gimbal usa la vera azione hardware`() {
+        assertEquals("0802", Hex.encode(LunaMessages.gimbalBackCenter(), separator = "").lowercase())
+    }
+
+    @Test
     fun `la velocita hardware gimbal usa i pacchetti catturati`() {
         val set = Hex.encode(LunaMessages.setGimbalSpeed(2), separator = "").lowercase()
         val refresh = Hex.encode(LunaMessages.refreshGimbalSpeed(), separator = "").lowercase()

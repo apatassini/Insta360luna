@@ -266,6 +266,12 @@ object LunaMessages {
             .toByteArray()
     }
 
+    /** `GIMBAL_ACTION_BACK_CENTER = 2`: lo stesso zero hardware del doppio clic fisico. */
+    fun gimbalBackCenter(): ByteArray =
+        ProtoWriter()
+            .int32(1, 2)
+            .toByteArray()
+
     /** Scrittura del livello hardware del gimbal: 1 lento, 2 medio, 3 veloce. */
     fun setGimbalSpeed(level: Int): ByteArray {
         require(level in 1..3) { "Livello gimbal non valido: $level" }

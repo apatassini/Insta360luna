@@ -603,8 +603,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun zeroPosition() {
-        container.gimbal.setEstimated(0f, 0f)
-        showMessage("Posizione corrente impostata come 0°/0°")
+        viewModelScope.launch {
+            container.gimbal.recenter()
+                .onSuccess {
+                    container.gimbal.setEstimated(0f, 0f)
+                    showMessage("Gimbal ricentrato sullo zero hardware")
+                }
+                .onFailure { showMessage("Ricentraggio non riuscito: ${it.message}") }
+        }
     }
 
     fun goToWaypoint(waypoint: Waypoint, seconds: Float = 3f) {

@@ -148,6 +148,18 @@ class GimbalController(
         }
     }
 
+    /** Usa lo zero meccanico del firmware; non simula il ritorno integrando impulsi. */
+    suspend fun recenter(): Result<Unit> {
+        stop()
+        val result = commands.gimbalBackCenter()
+        if (result.isSuccess) {
+            appliedPanPercent = 0f
+            appliedTiltPercent = 0f
+            appliedSinceNanos = System.nanoTime()
+        }
+        return result
+    }
+
     /**
      * Porta il gimbal verso [targetPan]/[targetTilt] nell'arco di [stepSeconds], calcolando la
      * velocità necessaria a coprire l'errore residuo nel tempo del tick.

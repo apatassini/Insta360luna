@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.ui.viewfinder
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,6 +51,7 @@ fun ViewfinderTopBar(
     connection: ConnectionState,
     mode: CaptureMode,
     badgeDetail: String?,
+    onOpenModeSheet: () -> Unit,
     previewActive: Boolean,
     gridVisible: Boolean,
     fillScreen: Boolean,
@@ -93,7 +95,15 @@ fun ViewfinderTopBar(
         )
 
         // Il distintivo può restringersi: su schermi stretti è lui a cedere spazio, non le icone.
-        ModeBadge(mode = mode, detail = badgeDetail, modifier = Modifier.weight(1f, fill = false))
+        // Il distintivo non è più solo un'etichetta: è il modo di cambiare modalità. Sta
+        // accanto al Wi-Fi, dove si guarda già per sapere se la camera risponde.
+        ModeBadge(
+            mode = mode,
+            detail = badgeDetail,
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .clickable(onClick = onOpenModeSheet),
+        )
 
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
             HudIconButton(
@@ -207,14 +217,15 @@ private fun ModeBadge(mode: CaptureMode, detail: String?, modifier: Modifier = M
 /**
  * La colonna dei numeri, in alto a sinistra sull'immagine.
  *
- * Sono le tre cose che fanno fallire una ripresa lunga — spazio, batteria, gimbal pronto o no —
- * e stanno sull'anteprima perché è lì che si guarda mentre si riprende.
+ * Sono le due cose che fanno fallire una ripresa lunga — spazio e batteria — e stanno
+ * sull'anteprima perché è lì che si guarda mentre si riprende. Il gimbal non è fra queste: era
+ * una pastiglia che diceva sempre la stessa cosa, e una pastiglia che non cambia mai è un
+ * pezzo di inquadratura in meno, non un'informazione.
  */
 @Composable
 fun StatColumn(
     freeSpace: Long?,
     batteryPercent: Int?,
-    gimbalReady: Boolean,
     recordingLabel: String?,
     modifier: Modifier = Modifier,
 ) {
@@ -234,11 +245,6 @@ fun StatColumn(
                 else -> Luna.Pano
             },
             value = batteryPercent?.let { "$it%" } ?: "—",
-        )
-        StatRow(
-            icon = LunaIcons.Joystick,
-            tint = if (gimbalReady) Luna.Pano else Luna.Warn,
-            value = if (gimbalReady) "gimbal pronto" else "gimbal ignoto",
         )
     }
 }

@@ -194,6 +194,7 @@ fun ModeSheet(
     selected: CaptureMode,
     sequenceReady: Boolean,
     onSelect: (CaptureMode) -> Unit,
+    onOpenPanorama: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -215,6 +216,48 @@ fun ModeSheet(
                 modifier = Modifier.size(20.dp).clickable(onClick = onDismiss),
             )
         }
+        // La panoramica a più scatti sta qui, con le modalità foto, e non sepolta fra le
+        // automazioni del gimbal: chi la cerca la cerca fra i modi di scattare, non fra i
+        // percorsi. È l'unica voce che apre un pannello invece di cambiare modalità, perché
+        // prima di scattare bisogna dirle quanti gradi coprire.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Luna.Pano.copy(alpha = 0.10f), RoundedCornerShape(14.dp))
+                .clickable {
+                    onOpenPanorama()
+                    onDismiss()
+                }
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier.size(34.dp).background(Luna.Pano.copy(alpha = 0.18f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = LunaIcons.Panorama,
+                    contentDescription = null,
+                    tint = Luna.Pano,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "Panoramica a più scatti",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.White,
+                )
+                Text(
+                    text = "Gradi in orizzontale e in verticale, sovrapposizione e obiettivo: " +
+                        "l'app calcola la griglia degli scatti e la percorre.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Luna.OnSurfaceDim,
+                )
+            }
+        }
+
         CaptureMode.entries.forEach { mode ->
             val usable = !mode.usesSequence || sequenceReady
             Row(

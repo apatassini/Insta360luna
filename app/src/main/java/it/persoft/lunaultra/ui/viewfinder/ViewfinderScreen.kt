@@ -171,7 +171,6 @@ fun ViewfinderScreen(
                 StatColumn(
                     freeSpace = status.freeSpaceBytes,
                     batteryPercent = status.batteryPercent,
-                    gimbalReady = true,
                     recordingLabel = if (recording) formatClock(elapsedSeconds) else null,
                     modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp),
                 )
@@ -305,8 +304,9 @@ fun ViewfinderScreen(
                     selected = captureMode,
                     sequenceReady = sequenceReady,
                     onSelect = viewModel::setCaptureMode,
+                    onOpenPanorama = { onOpenPanel(Panel.SEQUENCE) },
                     onDismiss = { modeSheetOpen = false },
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
                 )
             }
         }
@@ -320,6 +320,11 @@ fun ViewfinderScreen(
                     .padding(top = topInset),
             ) {
                 ViewfinderTopBar(
+                    onOpenModeSheet = {
+                        modeSheetOpen = !modeSheetOpen
+                        photoSheetOpen = false
+                        videoSheetOpen = false
+                    },
                     connection = connection,
                     mode = captureMode,
                     badgeDetail = badgeDetailFor(captureMode, sequence.waypoints.size, status),
@@ -343,7 +348,6 @@ fun ViewfinderScreen(
             val captureBar: @Composable () -> Unit = {
                 CaptureBar(
                     selected = captureMode,
-                    onSelect = viewModel::setCaptureMode,
                     active = shutterActive,
                     progress = shutterProgress,
                     shutterReady = shutterReady,
@@ -363,11 +367,6 @@ fun ViewfinderScreen(
                     },
                     onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
                     onOpenGallery = { onOpenPanel(Panel.GALLERY) },
-                    onOpenModeSheet = {
-                        modeSheetOpen = !modeSheetOpen
-                        photoSheetOpen = false
-                        videoSheetOpen = false
-                    },
                     vertical = landscape,
                 )
             }

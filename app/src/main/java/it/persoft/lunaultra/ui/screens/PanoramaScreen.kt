@@ -1,10 +1,12 @@
 package it.persoft.lunaultra.ui.screens
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -24,14 +26,22 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
+import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.timelapse.LunaOptics
+import it.persoft.lunaultra.timelapse.PanoramaPlan
+import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.PanoramaPreset
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
+import it.persoft.lunaultra.ui.components.MetricRow
+import it.persoft.lunaultra.ui.components.MetricTile
 import it.persoft.lunaultra.ui.components.NumberField
 import it.persoft.lunaultra.ui.components.SectionCard
 import it.persoft.lunaultra.ui.theme.Luna
@@ -176,15 +186,38 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                     },
                 )
             } else {
-                LabeledValue("Griglia", "${current.columns} colonne × ${current.rows} righe")
-                LabeledValue("Scatti", current.totalShots.toString())
-                LabeledValue(
-                    "Copertura reale",
-                    "%.0f° × %.0f°".format(
-                        current.horizontalCenterSpan + current.fieldOfView.horizontalDegrees,
-                        current.verticalCenterSpan + current.fieldOfView.verticalDegrees,
-                    ),
+                val realHorizontal = current.horizontalCenterSpan + current.fieldOfView.horizontalDegrees
+                val realVertical = current.verticalCenterSpan + current.fieldOfView.verticalDegrees
+                MetricRow {
+                    MetricTile(
+                        value = current.totalShots.toString(),
+                        caption = "scatti",
+                        valueColor = Luna.Pano,
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricTile(
+                        value = "${current.columns}×${current.rows}",
+                        caption = "colonne × righe",
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricTile(
+                        value = panoramaDuration(current, calibration, sequence.settleSeconds),
+                        caption = "durata stimata",
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                // La griglia disegnata dice in un colpo d'occhio quello che tre numeri
+                // lasciano immaginare: la forma della panoramica e quanto si sovrappongono i
+                // fotogrammi. Una sovrapposizione troppo magra si vede prima di scattare.
+                PanoramaGridPreview(
+                    columns = current.columns,
+                    rows = current.rows,
+                    frameWidthFraction = (current.fieldOfView.horizontalDegrees / realHorizontal)
+                        .coerceIn(0.05f, 1f),
+                    frameHeightFraction = (current.fieldOfView.verticalDegrees / realVertical)
+                        .coerceIn(0.05f, 1f),
                 )
+                LabeledValue("Copertura reale", "%.0f° × %.0f°".format(realHorizontal, realVertical))
                 current.warning?.let { Hint(it) }
                 Button(
                     onClick = viewModel::shootPanorama,
@@ -202,4 +235,73 @@ fun PanoramaScreen(viewModel: MainViewModel) {
             }
         }
     }
+}
+
+/**
+ * La griglia degli scatti disegnata: i fotogrammi al loro posto, con la loro sovrapposizione.
+ *
+ * Tre numeri — colonne, righe, gradi — lasciano immaginare la forma. Il disegno la mostra: se
+ * la panoramica viene larga e bassa si vede, e si vede anche quanto si accavallano i
+ * fotogrammi, che è la cosa che decide se l'unione riuscirà. Una sovrapposizione troppo magra
+ * si riconosce a occhio prima di scattare, non dopo aver guardato le foto.
+ */
+@Composable
+private fun PanoramaGridPreview(
+    columns: Int,
+    rows: Int,
+    frameWidthFraction: Float,
+    frameHeightFraction: Float,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Luna.Bg),
+    ) {
+        val frameWidth = size.width * frameWidthFraction
+        val frameHeight = size.height * frameHeightFraction
+        // I centri sono equidistanti fra il primo e l'ultimo fotogramma, come nel piano vero.
+        val spanX = size.width - frameWidth
+        val spanY = size.height - frameHeight
+        for (row in 0 until rows) {
+            val top = if (rows <= 1) spanY / 2f else spanY * row / (rows - 1)
+            for (column in 0 until columns) {
+                val left = if (columns <= 1) spanX / 2f else spanX * column / (columns - 1)
+                drawRect(
+                    color = Luna.Pano.copy(alpha = 0.12f),
+                    topLeft = Offset(left, top),
+                    size = Size(frameWidth, frameHeight),
+                )
+                drawRect(
+                    color = Luna.Pano.copy(alpha = 0.55f),
+                    topLeft = Offset(left, top),
+                    size = Size(frameWidth, frameHeight),
+                    style = Stroke(width = 1.5f),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Quanto durerà la panoramica, in una stima onesta.
+ *
+ * Ogni scatto costa lo spostamento fino alla posizione successiva, l'assestamento perché
+ * l'immagine non venga mossa, e il tempo dell'otturatore. Lo spostamento si ricava dalla curva
+ * misurata: senza profilo valido non si finge di saperlo e si risponde con un trattino. Il
+ * tempo dello scatto è la stessa costante che usa la sequenza, così le due stime concordano.
+ */
+private fun panoramaDuration(
+    plan: PanoramaPlan,
+    profile: GimbalCalibrationProfile,
+    settleSeconds: Float,
+): String {
+    if (!profile.isValid || plan.totalShots <= 1) return "—"
+    val rate = maxOf(profile.maxAngularRate(panAxis = true), 1f)
+    val stepDegrees = if (plan.columns > 1) plan.horizontalCenterSpan / (plan.columns - 1) else 0f
+    val perShot = stepDegrees / rate + settleSeconds + TimelapseSequence.ESTIMATED_SHOT_SECONDS
+    val seconds = (perShot * plan.totalShots).roundToInt()
+    return if (seconds < 60) "${seconds}s" else "%d:%02d".format(seconds / 60, seconds % 60)
 }

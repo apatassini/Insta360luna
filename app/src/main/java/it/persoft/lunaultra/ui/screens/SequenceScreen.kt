@@ -52,6 +52,8 @@ import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
+import it.persoft.lunaultra.ui.components.MetricRow
+import it.persoft.lunaultra.ui.components.MetricTile
 import it.persoft.lunaultra.ui.components.NumberField
 import it.persoft.lunaultra.ui.components.SectionCard
 import it.persoft.lunaultra.ui.components.ToggleRow
@@ -280,21 +282,44 @@ fun SequenceScreen(viewModel: MainViewModel) {
                     )
                 }
 
-                LabeledValue(
-                    label = "Solo movimento",
-                    value = "${sequence.effectiveTotalSeconds().roundToInt()} s",
-                    valueColor = Luna.Lapse,
-                )
-                if (sequence.mode.movesContinuously && sequence.controlRecording) {
-                    LabeledValue(
-                        label = "Registrazione prevista",
-                        value = "${sequence.estimatedRecordingSeconds().roundToInt()} s",
-                        valueColor = wheel.color,
+                // I tre numeri che decidono se la sequenza vale la pena, dove si guarda: quanto
+                // dura, quanti punti tocca, quanto ne esce. In fondo a un elenco di campi si
+                // perdono; come tessere si vedono senza cercarli.
+                MetricRow {
+                    MetricTile(
+                        value = formatSeconds(sequence.effectiveTotalSeconds()),
+                        caption = "solo movimento",
+                        valueColor = Luna.Lapse,
+                        modifier = Modifier.weight(1f),
                     )
+                    MetricTile(
+                        value = "${sequence.waypoints.size}",
+                        caption = if (sequence.legCount == 1) "punti · 1 tratto" else "punti · ${sequence.legCount} tratti",
+                        modifier = Modifier.weight(1f),
+                    )
+                    when {
+                        sequence.mode == ShootingMode.FOTO -> MetricTile(
+                            value = "${sequence.totalShots()}",
+                            caption = "scatti previsti",
+                            valueColor = Luna.Photo,
+                            modifier = Modifier.weight(1f),
+                        )
+                        sequence.mode.movesContinuously && sequence.controlRecording -> MetricTile(
+                            value = formatSeconds(sequence.estimatedRecordingSeconds()),
+                            caption = "registrazione prevista",
+                            valueColor = wheel.color,
+                            modifier = Modifier.weight(1f),
+                        )
+                        else -> MetricTile(
+                            value = "${sequence.estimatedShots()}",
+                            caption = "scatti dalla camera",
+                            valueColor = Luna.Lapse,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
                 when (sequence.mode) {
                     ShootingMode.TIMELAPSE_CAMERA -> {
-                        LabeledValue("Scatti stimati dalla camera", sequence.estimatedShots().toString())
                         Hint(
                             "In questa modalità l'intervallo lo usa la camera. Se non accetta il " +
                                 "comando va impostato dal suo menu: il log lo dice.",
@@ -647,4 +672,10 @@ private fun WaypointCompass(pan: Float, tilt: Float, color: Color, modifier: Mod
             strokeWidth = 2.dp.toPx(),
         )
     }
+}
+
+/** Secondi in una forma leggibile: sotto il minuto i secondi, sopra minuti e secondi. */
+private fun formatSeconds(seconds: Float): String {
+    val total = seconds.roundToInt().coerceAtLeast(0)
+    return if (total < 60) "${total}s" else "%d:%02d".format(total / 60, total % 60)
 }

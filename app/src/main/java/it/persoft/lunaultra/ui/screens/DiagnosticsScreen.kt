@@ -42,6 +42,8 @@ import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
 import it.persoft.lunaultra.ui.components.SectionCard
+import it.persoft.lunaultra.ui.theme.Luna
+import it.persoft.lunaultra.ui.theme.LunaIcons
 
 /**
  * Diagnostica: è qui che si chiude l'unico buco rimasto del protocollo, il numero del comando
@@ -73,7 +75,7 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
             ) { Text("Pulisci log") }
         }
 
-        SectionCard(title = "Connessione") {
+        SectionCard(title = "Connessione", icon = LunaIcons.Connected, accent = Luna.Ok) {
             var host by remember(settings.host) { mutableStateOf(settings.host) }
             var port by remember(settings.port) { mutableStateOf(settings.port.toString()) }
             OutlinedTextField(
@@ -102,7 +104,7 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
 
         // La sequenza che porta al comando del gimbal, in ordine. Le prove sono numerate e già
         // compilate: non c'è niente da scrivere a mano.
-        SectionCard(title = "Trovare il comando del gimbal") {
+        SectionCard(title = "Trovare il comando del gimbal", icon = LunaIcons.Joystick, accent = Luna.Path) {
             Text(
                 text = "Il numero del comando che muove il gimbal non è pubblico: i due progetti " +
                     "che esistono su questa camera sono fermi sullo stesso punto. Lo cerchiamo " +
@@ -134,7 +136,7 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
 
         GimbalTuningCard(viewModel)
 
-        SectionCard(title = "Invio manuale") {
+        SectionCard(title = "Invio manuale", icon = LunaIcons.Share, accent = Luna.Amber) {
             var code by remember { mutableStateOf("") }
             var payload by remember { mutableStateOf("") }
             NumberField(
@@ -156,7 +158,7 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
             ) { Text("Invia") }
         }
 
-        SectionCard(title = "Log") {
+        SectionCard(title = "Log", icon = LunaIcons.Diagnostics, accent = Luna.Accent) {
             Text(
                 text = "Ogni comando inviato e ogni risposta ricevuta, con i byte grezzi e i campi " +
                     "protobuf decodificati. Per waypoint e sequenze include anche le miniature e " +
@@ -231,7 +233,7 @@ private fun GimbalCodeCard(viewModel: MainViewModel) {
     val settings by viewModel.settings.collectAsState()
     val gimbal = settings.gimbal
 
-    SectionCard(title = "Protocollo gimbal") {
+    SectionCard(title = "Protocollo gimbal", icon = LunaIcons.Info, accent = Luna.Accent) {
         Text(
             text = "In uso PHONE_COMMAND_GIMBAL_CONTROL 226 (0x00E2), con assi e payload " +
                 "verificati sulle catture Luna Ultra pubblicate in Insta360Linker.",
@@ -265,7 +267,7 @@ private fun GimbalActionCard(viewModel: MainViewModel) {
     var from by remember { mutableStateOf("4") }
     var to by remember { mutableStateOf("12") }
 
-    SectionCard(title = "Azioni del gimbal") {
+    SectionCard(title = "Azioni del gimbal", icon = LunaIcons.Center, accent = Luna.Path) {
         Text(
             text = "Il comando 226 porta nel campo 1 un'azione. Conosciute: 1 movimento, " +
                 "2 ricentra il lato corrente, 3 fronte/selfie. Prova le altre con l'anteprima " +
@@ -317,7 +319,7 @@ private fun GimbalActionCard(viewModel: MainViewModel) {
 
 @Composable
 private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.ProbeUiState) {
-    SectionCard(title = "Scanner dei codici") {
+    SectionCard(title = "Scanner dei codici", icon = LunaIcons.Refresh, accent = Luna.Multi) {
         Text(
             text = "La camera distingue \"comando inesistente\" da \"argomenti sbagliati\". " +
                 "Inviando un corpo vuoto, una risposta \"argomenti sbagliati\" dice che il comando " +
@@ -502,7 +504,7 @@ private fun HuntCard(viewModel: MainViewModel) {
     var code by remember { mutableStateOf("241") }
     var selector by remember { mutableStateOf("3") }
 
-    SectionCard(title = "2 · Caccia il comando") {
+    SectionCard(title = "2 · Caccia il comando", icon = LunaIcons.Flag, accent = Luna.Multi) {
         Text(
             text = "Codice e campo sono già impostati sul lead migliore: 241 con campo 1 = 3, " +
                 "l'unico valore che la camera prova a eseguire. Premi e basta.",
@@ -574,7 +576,7 @@ private fun ShapeCard(viewModel: MainViewModel) {
     var maxValue by remember { mutableStateOf("63") }
     var prefix by remember { mutableStateOf("") }
 
-    SectionCard(title = "Forma del messaggio") {
+    SectionCard(title = "Forma del messaggio", icon = LunaIcons.Info, accent = Luna.Amber) {
         Text(
             text = "Prova un campo alla volta su un codice che la scansione ha trovato. Un corpo " +
                 "che smette di essere rifiutato ha indovinato un campo vero.",
@@ -687,7 +689,7 @@ private fun MonitorCard(viewModel: MainViewModel) {
     val monitor by viewModel.monitor.collectAsState()
     var codes by remember { mutableStateOf("160,162,245,239,240") }
 
-    SectionCard(title = "Ascolto di più codici") {
+    SectionCard(title = "Ascolto di più codici", icon = LunaIcons.Diagnostics, accent = Luna.Multi) {
         Text(
             text = "Interroga a rotazione tutti i codici indicati e conta quante volte la " +
                 "risposta cambia. Avvia, poi muovi il gimbal a mano: quello che sta leggendo " +
@@ -742,7 +744,7 @@ private fun GimbalTuningCard(viewModel: MainViewModel) {
     val settings by viewModel.settings.collectAsState()
     val gimbal = settings.gimbal
 
-    SectionCard(title = "Taratura gimbal") {
+    SectionCard(title = "Taratura gimbal", icon = LunaIcons.Speed, accent = Luna.Pano) {
         Text(
             text = "Il messaggio e la rotazione degli assi sono fissi. Qui restano solo " +
                 "l'intensità manuale, la cadenza e la stima dei gradi percorsi.",

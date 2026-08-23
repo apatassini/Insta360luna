@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
@@ -127,13 +129,31 @@ private fun PanelHost(
                     size = 42.dp,
                 )
                 if (panel != Panel.GALLERY) {
-                    Icon(
-                        imageVector = panel.icon,
-                        contentDescription = null,
-                        tint = Luna.Accent,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Text(text = panel.title, style = MaterialTheme.typography.titleLarge)
+                    // L'icona dentro il suo cerchio colorato, come nelle sezioni: aprendo un
+                    // pannello si riconosce dove si è dal colore prima ancora di leggere.
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(panel.accent.copy(alpha = 0.16f), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = panel.icon,
+                            contentDescription = null,
+                            tint = panel.accent,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        Text(text = panel.title, style = MaterialTheme.typography.titleLarge)
+                        if (panel.subtitle.isNotEmpty()) {
+                            Text(
+                                text = panel.subtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Luna.OnSurfaceDim,
+                            )
+                        }
+                    }
                 }
             }
             Box(modifier = Modifier.weight(1f)) { content() }

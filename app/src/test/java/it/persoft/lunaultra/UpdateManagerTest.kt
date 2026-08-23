@@ -39,12 +39,9 @@ class UpdateManagerTest {
      */
     @Test
     fun `il tag della release segue il branch della build`() {
-        assertEquals(
-            "apk-codex-automatic-luna-photo-controls-v2",
-            UpdateManager.releaseTag("codex/automatic-luna-photo-controls-v2"),
-        )
         assertEquals("apk-main", UpdateManager.releaseTag("main"))
         assertEquals("apk-a-b-c", UpdateManager.releaseTag("refs/heads/a/b/c"))
+        assertEquals("apk-prova-x", UpdateManager.releaseTag("prova/x"))
     }
 
     @Test

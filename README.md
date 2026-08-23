@@ -255,6 +255,11 @@ Il workflow `.github/workflows/android.yml` compila a ogni push e pubblica l'APK
 artefatto della run (`luna-timelapse-debug`) e come release scaricabile. Non serve nulla
 installato in locale.
 
+**Il repository ha un ramo solo, `main`.** L'app è una: rami paralleli qui non servivano a
+isolare lavoro indipendente, servivano solo a moltiplicare le release e a far cercare
+l'aggiornamento nel posto sbagliato. Il lavoro si fa su `main` e la release da installare è
+sempre `apk-main`.
+
 **La firma è fissa e sta nel repository** (`app/debug.keystore`). Senza, ogni run della CI parte
 da zero e genera una chiave di debug nuova: l'APK esce firmato con un certificato diverso ogni
 volta e Android rifiuta l'aggiornamento con «il pacchetto è in conflitto con un pacchetto
@@ -278,17 +283,20 @@ Ultra di installare app da questa origine; Android richiede comunque la conferma
 installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
 sistema. Se GitHub non è raggiungibile, il controllo non blocca la connessione alla camera.
 
-**Quale release.** Quella del branch che ha prodotto l'APK installato: il workflow pubblica su
-`apk-<branch>` con le barre sostituite da trattini, e l'app ricompone lo stesso nome partendo da
-`BuildConfig.GIT_BRANCH`. Non è più un nome fisso nel sorgente — con un nome fisso ogni ramo
-nuovo spariva dal radar dell'app già installata, che continuava a interrogare la release del ramo
-precedente e riferiva *app aggiornata* in buona fede.
+**Quale release.** L'app ha **un ramo solo, `main`**, e la sua release è `apk-main`: si installa
+da lì e si aggiorna da lì, senza scelte da fare.
 
-Il ramo si cambia da **Impostazioni → Aggiornamenti**, che mostra anche la build installata e il
-branch effettivamente interrogato. Campo vuoto significa "quello da cui vengo". Serve a passare
-al lavoro di un altro ramo senza reinstallare l'APK a mano: il primo salto va comunque fatto
-installando una volta dal link della release, perché l'APK già sul telefono porta dentro il ramo
-con cui è stato compilato.
+Il nome non è però scritto a mano nel sorgente. Il workflow pubblica su `apk-<branch>` con le
+barre sostituite da trattini, e l'app ricompone lo stesso nome partendo da
+`BuildConfig.GIT_BRANCH`, cioè dal ramo che ha prodotto l'APK installato. Con un nome fisso nel
+codice bastava lavorare su un ramo diverso perché l'app già sul telefono continuasse a
+interrogare la release di quello vecchio e riferisse *app aggiornata* in buona fede — è successo,
+ed è il motivo per cui adesso il ramo viaggia dentro l'APK.
+
+Resta un campo **Impostazioni → Aggiornamenti**, che mostra la build installata e il ramo
+interrogato e permette di puntare altrove. Vuoto significa "quello da cui vengo", ed è il caso
+normale: serve solo se un giorno si vuole provare una build fuori da `main` senza reinstallare a
+mano.
 
 ### In locale
 

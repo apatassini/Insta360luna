@@ -120,11 +120,10 @@ class UpdateManager(context: Context) {
             "https://api.github.com/repos/apatassini/Insta360luna/releases/tags/"
 
         /**
-         * Branch usato quando l'APK non sa da dove viene (compilazione locale, o impostazione
-         * lasciata vuota su una build vecchia). È l'ultimo ramo pubblicato prima che questa
-         * scelta diventasse automatica.
+         * Branch usato quando l'APK non sa da dove viene: compilazione locale, o impostazione
+         * lasciata vuota. L'app ha un ramo solo, e questo è il suo nome.
          */
-        internal const val FALLBACK_BRANCH = "codex/automatic-luna-photo-controls-v2"
+        internal const val FALLBACK_BRANCH = "main"
 
         /**
          * Il workflow pubblica su `apk-<branch>` con le barre sostituite da trattini: qui si

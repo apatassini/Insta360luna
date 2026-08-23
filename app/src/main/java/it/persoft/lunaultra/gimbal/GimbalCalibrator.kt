@@ -101,6 +101,19 @@ class GimbalCalibrator(
 
     private var job: Job? = null
 
+    /**
+     * L'inquadratura da cui la calibrazione parte e a cui torna sempre.
+     *
+     * Non è lo zero hardware, ed è deliberato: quello zero guarda dove guarda il corpo camera,
+     * che è quasi sempre verso chi la sta usando. Otto minuti di misure passati a inquadrare
+     * persone che si muovono non danno solo fastidio — rovinano il confronto fra fotogrammi,
+     * che è lo strumento con cui la calibrazione misura. La casa è dove l'ha puntata chi
+     * calibra: la si sceglie ferma, e ci si torna.
+     */
+    private var homePan = 0f
+    private var homeTilt = 0f
+    private var homeFrame: ByteArray? = null
+
     fun start(cameraModel: String, firmware: String) {
         if (job?.isActive == true) return
         job = scope.launch {
@@ -121,8 +134,22 @@ class GimbalCalibrator(
         )
         log.info("CALIBRAZIONE GIMBAL · AVVIO", "Profilo precedente conservato fino al completamento della nuova misura.")
         try {
-            recenterHardware("Ricentraggio iniziale", 0, 2)
+            // Nessun ricentraggio d'avvio: la posizione in cui la camera si trova adesso è la
+            // casa, e le coordinate del modello partono da lì. Ricentrare qui butterebbe via
+            // l'unica informazione che l'app non può ricostruire da sola — dove l'utente ha
+            // deciso di guardare.
+            gimbal.stop()
+            gimbal.setEstimated(0f, 0f)
+            homePan = 0f
+            homeTilt = 0f
             val firstFrame = awaitFrame("Avvio: attendo un fotogramma verificabile…")
+            homeFrame = firstFrame
+            log.info(
+                "CALIBRAZIONE · CASA",
+                "Parto dall'inquadratura attuale e ci torno dopo ogni fase. Tienila ferma: " +
+                    "è il riferimento con cui vengono misurati tutti gli spostamenti.",
+                imageJpeg = firstFrame,
+            )
             val firstCheck = WaypointImageVerifier.verify(firstFrame, firstFrame)
             if (firstCheck == null || firstCheck.confidence < MIN_SCENE_CONFIDENCE) {
                 throw IllegalStateException("La scena e completamente uniforme: inquadra almeno una nube, un bordo o un oggetto fermo")
@@ -151,7 +178,8 @@ class GimbalCalibrator(
                 phaseStartPercent = 2,
                 phaseEndPercent = 14,
             )
-            recenterHardware("Zero hardware dopo il pan", 14, 17)
+            keepHomeInsideLimits(panLimits, GimbalCalibrationSample.AXIS_PAN)
+            returnHome("Ritorno all'inquadratura di partenza dopo il pan", 14, 17)
             val tiltLimits = calibrateAxisLimits(
                 axis = GimbalCalibrationSample.AXIS_TILT,
                 minimumDeg = OFFICIAL_TILT_MIN_DEG,
@@ -159,7 +187,8 @@ class GimbalCalibrator(
                 phaseStartPercent = 17,
                 phaseEndPercent = 27,
             )
-            recenterHardware("Zero hardware dopo il tilt", 27, 30)
+            keepHomeInsideLimits(tiltLimits, GimbalCalibrationSample.AXIS_TILT)
+            returnHome("Ritorno all'inquadratura di partenza dopo il tilt", 27, 30)
 
             _state.value = _state.value.copy(
                 overallPercent = 30,
@@ -242,13 +271,10 @@ class GimbalCalibrator(
                             }
                         }
                     }
-                    // Ogni intensita riparte dallo zero vero: eventuali piccoli errori della
-                    // coppia andata/ritorno non possono accumularsi sulle prove successive.
-                    gimbal.recenter().getOrElse {
-                        throw IllegalStateException("Ricentraggio fra le intensita non riuscito: ${it.message}", it)
-                    }
-                    waitForHardwareCenter()
-                    gimbal.setEstimated(0f, 0f)
+                    // Ogni intensità riparte dalla casa: gli errori della coppia andata/ritorno
+                    // non si accumulano, e l'inquadratura resta quella scelta da chi calibra
+                    // invece di scivolare verso lo zero hardware a ogni giro.
+                    returnHome("Ritorno a casa fra le intensità", _state.value.overallPercent, _state.value.overallPercent)
                 }
 
             val profile = GimbalCalibrationBuilder.build(
@@ -266,6 +292,10 @@ class GimbalCalibrator(
             }
             validateMotionModel(profile, firstFrame)
             store.update { profile }
+            // La validazione lavora sullo zero hardware, che è dove guarda il corpo camera:
+            // finirla lì significherebbe lasciare la camera puntata dove non serve. Il profilo
+            // ora è salvato, quindi il ritorno usa la curva appena misurata.
+            returnHome("Ritorno all'inquadratura di partenza", 99, 100)
             log.info(
                 "CALIBRAZIONE GIMBAL · COMPLETATA",
                 buildString {
@@ -453,12 +483,14 @@ class GimbalCalibrator(
      * Collaudo del modello prima del salvataggio. Per il pan destro esegue esplicitamente
      * il caso richiesto: 0° -> 200° teorici -> ultimi 35° circa -> notifica di fine corsa.
      *
-     * Il riferimento visivo dello zero viene ripreso qui, non ereditato dall'avvio: fra la
-     * prima inquadratura e questo punto passano otto minuti, e in otto minuti la scena reale
-     * cambia da sola — le persone si spostano, la luce gira, il vento muove le foglie. Con un
-     * riferimento vecchio la ripetibilità dello zero misura il mondo, non il gimbal.
+     * Il riferimento visivo dello zero viene ripreso qui, non ereditato dall'avvio, per due
+     * motivi. Il primo: fra la prima inquadratura e questo punto passano otto minuti, e in otto
+     * minuti la scena cambia da sola — le persone si spostano, la luce gira, il vento muove le
+     * foglie; con un riferimento vecchio la ripetibilità dello zero misura il mondo, non il
+     * gimbal. Il secondo: la prima inquadratura è la **casa**, cioè dove la camera è stata
+     * puntata, mentre i collaudi partono dallo zero hardware. Sono due posti diversi.
      */
-    private suspend fun validateMotionModel(profile: GimbalCalibrationProfile, startReference: ByteArray) {
+    private suspend fun validateMotionModel(profile: GimbalCalibrationProfile, startReference: ByteArray?) {
         data class Target(val axis: String, val endpoint: Float, val checkpoint: Float)
         val targets = listOf(
             Target(GimbalCalibrationSample.AXIS_PAN, profile.panLimits.maximumDeg, 200f),
@@ -472,9 +504,15 @@ class GimbalCalibrator(
             message = "Verifico che gli impulsi previsti coincidano coi quattro fine corsa",
         )
 
+        log.info(
+            "CALIBRAZIONE · VALIDAZIONE",
+            "Questa fase lavora sullo zero hardware, non sulla casa: le coordinate del modello " +
+                "sono ancorate ai fine corsa e i quattro collaudi partono da lì. Sono un paio di " +
+                "minuti, poi la camera torna all'inquadratura di partenza.",
+        )
         recenterHardware("Zero di riferimento della validazione", 90, 90)
         val zeroReference = awaitFrame("Attendo l'immagine dello zero di riferimento")
-        describeSceneDrift(startReference, zeroReference)
+        describeValidationZero(startReference, zeroReference)
 
         val zeroChecks = mutableListOf<ZeroCheck>()
         targets.forEachIndexed { index, target ->
@@ -671,22 +709,23 @@ class GimbalCalibrator(
     }
 
     /**
-     * Confronto informativo fra la prima inquadratura e lo zero della validazione.
+     * Registra dove guarda lo zero hardware rispetto alla casa.
      *
-     * Non giudica niente: serve a rispondere, leggendo il log, alla domanda "ma la camera
-     * guardava ancora dalla stessa parte?" senza doverla dedurre dalle miniature.
+     * Non è un controllo: le due inquadrature *devono* essere diverse, perché sono due posti
+     * diversi. Serve a rendere leggibile il log — quando fra sei mesi si riguarderà questa
+     * calibrazione, la domanda sarà "ma cosa stava inquadrando?", e la risposta è qui.
      */
-    private fun describeSceneDrift(startReference: ByteArray, validationReference: ByteArray) {
-        val verification = WaypointImageVerifier.verify(startReference, validationReference)
+    private fun describeValidationZero(homeReference: ByteArray?, validationReference: ByteArray) {
+        val verification = homeReference?.let { WaypointImageVerifier.verify(it, validationReference) }
+        val sameScene = verification != null && controlPointPercent(verification) >= ZERO_MIN_INLIER_PERCENT
         val detail = buildString {
-            appendLine("Confronto fra la prima inquadratura e lo zero di adesso, solo informativo.")
-            appendLine(verification?.describe() ?: "Le due immagini non sono confrontabili.")
+            appendLine("Questa è l'inquadratura dello zero hardware, il riferimento dei quattro collaudi.")
             append(
-                if (verification == null || controlPointPercent(verification) < ZERO_MIN_INLIER_PERCENT) {
-                    "Scena diversa da quella di partenza: qualcosa si è mosso, oppure lo zero " +
-                        "hardware non è dove era all'avvio. La validazione userà questa immagine."
+                if (sameScene) {
+                    "Coincide con la casa: la camera era già puntata sullo zero del suo corpo."
                 } else {
-                    "Stessa scena della partenza: lo zero hardware guarda ancora là."
+                    "È un'altra scena rispetto alla casa, come previsto: lo zero hardware guarda " +
+                        "dove guarda il corpo camera, non dove è stata puntata."
                 },
             )
         }
@@ -753,11 +792,7 @@ class GimbalCalibrator(
             phaseEndPercent = phaseStartPercent + (phaseEndPercent - phaseStartPercent) / 3,
             requireTravel = false,
         )
-        val positionAtNegative = gimbal.position.value
-        gimbal.setEstimated(
-            pan = if (axis == GimbalCalibrationSample.AXIS_PAN) minimumDeg else positionAtNegative.pan,
-            tilt = if (axis == GimbalCalibrationSample.AXIS_TILT) minimumDeg else positionAtNegative.tilt,
-        )
+        anchorFrame(axis, minimumDeg)
         log.info(
             "CALIBRAZIONE · FINE CORSA ${directionLabel(axis, -1f).uppercase()}",
             "Rilevato dopo ${negative.totalPulses} impulsi · coordinate fissate a %.1f°".format(minimumDeg),
@@ -772,11 +807,7 @@ class GimbalCalibrator(
             phaseEndPercent = phaseEndPercent,
             requireTravel = true,
         )
-        val positionAtPositive = gimbal.position.value
-        gimbal.setEstimated(
-            pan = if (axis == GimbalCalibrationSample.AXIS_PAN) maximumDeg else positionAtPositive.pan,
-            tilt = if (axis == GimbalCalibrationSample.AXIS_TILT) maximumDeg else positionAtPositive.tilt,
-        )
+        anchorFrame(axis, maximumDeg)
         val limits = GimbalAxisLimits(
             minimumDeg = minimumDeg,
             maximumDeg = maximumDeg,
@@ -982,6 +1013,145 @@ class GimbalCalibrator(
         )
     }
 
+    /**
+     * Un fine corsa raggiunto ridefinisce le coordinate: quel punto *è* il limite dichiarato.
+     *
+     * La casa non si muove nello spazio, ma cambia numero — e va traslata dello stesso scarto,
+     * altrimenti il ritorno a casa punterebbe a un angolo che non esiste più. È l'unico posto
+     * in cui il sistema di riferimento del modello viene riscritto.
+     */
+    private fun anchorFrame(axis: String, anchorDeg: Float) {
+        val panAxis = axis == GimbalCalibrationSample.AXIS_PAN
+        val current = gimbal.position.value
+        val shift = anchorDeg - (if (panAxis) current.pan else current.tilt)
+        if (panAxis) homePan += shift else homeTilt += shift
+        gimbal.setEstimated(
+            pan = if (panAxis) anchorDeg else current.pan,
+            tilt = if (panAxis) current.tilt else anchorDeg,
+        )
+    }
+
+    /**
+     * Sposta la casa se è troppo vicina a un fine corsa per contenere gli archi di misura.
+     *
+     * Le prove della curva sono archi di ~45° attorno alla casa: se la casa sta a 20° dal
+     * limite, l'arco ci sbatte contro e la misura esce falsata senza che nulla lo segnali.
+     * Meglio spostarsi del minimo indispensabile e dirlo, che misurare contro un muro.
+     */
+    private fun keepHomeInsideLimits(limits: GimbalAxisLimits, axis: String) {
+        val panAxis = axis == GimbalCalibrationSample.AXIS_PAN
+        val margin = TARGET_RESPONSE_ARC_DEG + HOME_LIMIT_MARGIN_DEG
+        val low = limits.minimumDeg + margin
+        val high = limits.maximumDeg - margin
+        if (low >= high) return
+        val current = if (panAxis) homePan else homeTilt
+        val safe = current.coerceIn(low, high)
+        if (abs(safe - current) < 0.5f) return
+        if (panAxis) homePan = safe else homeTilt = safe
+        // La miniatura di casa non vale più: guarda dove la casa non è più. Azzerandola, il
+        // ritorno si affida alle coordinate e poi riprende l'immagine da capo.
+        homeFrame = null
+        log.warn(
+            "CALIBRAZIONE · CASA SPOSTATA SULL'ASSE ${axisLabel(axis).uppercase()}",
+            "Era a %.0f°, troppo vicina al fine corsa per un arco di %.0f°: la porto a %.0f°. "
+                .format(current, TARGET_RESPONSE_ARC_DEG, safe) +
+                "L'inquadratura di riferimento cambia di conseguenza.",
+        )
+    }
+
+    /**
+     * Torna all'inquadratura di partenza: prima con le coordinate, poi con l'immagine.
+     *
+     * Le coordinate da sole accumulano errore lungo otto minuti di impulsi; l'immagine da sola
+     * non sa in che direzione muoversi finché non ha un profilo. Insieme funzionano: il modello
+     * porta vicino, il confronto con la miniatura di casa chiude gli ultimi pixel. Se il
+     * confronto non è affidabile — scena cambiata, poca luce — ci si ferma alle coordinate e
+     * lo si scrive, invece di inseguire una correzione basata su punti che non corrispondono.
+     */
+    private suspend fun returnHome(label: String, phaseStartPercent: Int, phaseEndPercent: Int) {
+        _state.value = _state.value.copy(
+            phaseLabel = label,
+            overallPercent = phaseStartPercent,
+            axisLabel = "entrambi",
+            directionLabel = "casa",
+            message = "Torno a pan %.0f° · tilt %.0f°".format(homePan, homeTilt),
+            verificationLabel = "RITORNO ALL'INQUADRATURA DI PARTENZA",
+        )
+        gimbal.moveToPosition(homePan, homeTilt, minimumSeconds = 0f)
+            .getOrElse { throw IllegalStateException("Ritorno all'inquadratura di partenza non riuscito: ${it.message}", it) }
+        delay(HOME_SETTLE_MS)
+
+        val arrived = awaitFrame("Verifico il ritorno all'inquadratura di partenza")
+        val reference = homeFrame
+        if (reference == null) {
+            // Prima casa, o casa appena spostata: questa inquadratura diventa il riferimento.
+            homeFrame = arrived
+        }
+        var verification = if (reference != null) WaypointImageVerifier.verify(reference, arrived) else null
+        var attempts = 0
+        while (reference != null && attempts < MAX_HOME_CORRECTIONS) {
+            val check = verification ?: break
+            if (check.displacementPixels <= HOME_RADIUS_PX) break
+            val usable = check.inlierMatches >= ZERO_MIN_INLIERS &&
+                check.confidence >= ZERO_MIN_CONFIDENCE &&
+                controlPointPercent(check) >= ZERO_MIN_INLIER_PERCENT
+            if (!usable) break
+            val profile = store.state.value.takeIf(GimbalCalibrationProfile::isValid)
+            val panPulse = correctionSign(
+                check.shiftX,
+                profile?.imageRateAt(HOME_CORRECTION_INTENSITY_PERCENT.toFloat(), panAxis = true),
+            ) * HOME_CORRECTION_INTENSITY_PERCENT / 100f
+            val tiltPulse = correctionSign(
+                -check.shiftY,
+                profile?.imageRateAt(HOME_CORRECTION_INTENSITY_PERCENT.toFloat(), panAxis = false),
+            ) * HOME_CORRECTION_INTENSITY_PERCENT / 100f
+            gimbal.correctionPulse(panPulse, tiltPulse, HOME_CORRECTION_PULSE_MS)
+            delay(HOME_SETTLE_MS)
+            verification = WaypointImageVerifier.verify(
+                reference,
+                awaitFrame("Verifico il ritorno all'inquadratura di partenza"),
+            )
+            attempts++
+        }
+        val residual = verification
+        gimbal.setEstimated(homePan, homeTilt)
+        _state.value = _state.value.copy(
+            overallPercent = phaseEndPercent,
+            theoreticalPan = homePan,
+            theoreticalTilt = homeTilt,
+            shiftX = residual?.shiftX ?: 0f,
+            shiftY = residual?.shiftY ?: 0f,
+            verificationLabel = when {
+                residual == null -> "CASA · SOLO COORDINATE"
+                residual.displacementPixels <= HOME_RADIUS_PX -> "INQUADRATURA DI PARTENZA RITROVATA"
+                else -> "CASA · SCARTO RESIDUO %.0f PX".format(residual.displacementPixels)
+            },
+        )
+        log.info(
+            "CALIBRAZIONE · $label",
+            buildString {
+                appendLine("Coordinate di casa: pan %.1f° · tilt %.1f°".format(homePan, homeTilt))
+                appendLine("Ritocchi visivi: $attempts/$MAX_HOME_CORRECTIONS")
+                append(residual?.describe() ?: "Nessun riferimento visivo: questa inquadratura diventa la casa.")
+            },
+            imageJpeg = preview.captureThumbnailJpeg(),
+        )
+    }
+
+    /**
+     * Verso del comando che riduce l'errore in pixel.
+     *
+     * Con un profilo valido il verso è quello misurato sulla camera; senza, si usa il segno
+     * dell'errore. È la stessa regola della correzione visiva dei waypoint, e per la stessa
+     * ragione: il verso degli assi non si presume, o la correzione raddoppia l'errore.
+     */
+    private fun correctionSign(errorPixels: Float, measuredPositiveRate: Float?): Float {
+        if (abs(errorPixels) < 0.5f) return 0f
+        val rate = measuredPositiveRate ?: return kotlin.math.sign(errorPixels)
+        if (abs(rate) < 0.5f) return kotlin.math.sign(errorPixels)
+        return -kotlin.math.sign(errorPixels) * kotlin.math.sign(rate)
+    }
+
     /** Richiama `GIMBAL_ACTION_BACK_CENTER`: lo zero e deciso dal firmware, non dal cronometro. */
     private suspend fun recenterHardware(
         label: String,
@@ -1171,5 +1341,15 @@ class GimbalCalibrator(
         const val ZERO_MIN_CONFIDENCE = 0.45f
         const val ZERO_MIN_INLIERS = 10
         const val ZERO_MIN_INLIER_PERCENT = 45
+
+        // Ritorno alla casa: quanto vicino basta, quanti ritocchi al massimo, con che impulso.
+        const val HOME_RADIUS_PX = 6f
+        const val MAX_HOME_CORRECTIONS = 4
+        const val HOME_CORRECTION_INTENSITY_PERCENT = 10
+        const val HOME_CORRECTION_PULSE_MS = 160L
+        const val HOME_SETTLE_MS = 500L
+
+        /** Margine oltre l'arco di misura, perché la casa non finisca appiccicata al limite. */
+        const val HOME_LIMIT_MARGIN_DEG = 10f
     }
 }

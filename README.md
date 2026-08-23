@@ -593,6 +593,25 @@ rifare i waypoint, non di rifare gli otto minuti di misure.
 Se la ripetibilità serve davvero, la calibrazione va fatta inquadrando qualcosa di **fermo**:
 niente persone, niente traffico, niente rami al vento.
 
+**La calibrazione non ricentra più all'avvio, e torna sempre a casa.** «Casa» è l'inquadratura in
+cui la camera si trova quando si preme *Calibra*: la scegli tu, la scegli ferma. Prima la
+procedura ricentrava subito sullo zero hardware e ci tornava dopo ogni fase — e siccome quello
+zero guarda dove guarda il corpo camera, cioè quasi sempre verso chi sta usando la camera, gli
+otto minuti di misure finivano puntati sulle persone in movimento. Che è il posto peggiore: il
+confronto fra fotogrammi è lo strumento con cui la calibrazione misura, e su una scena che si
+muove quello strumento non funziona.
+
+Adesso la casa è il riferimento: dopo i fine corsa del pan, dopo quelli del tilt, fra
+un'intensità e l'altra e alla fine, la camera ci torna. Il ritorno usa prima le coordinate e poi
+l'immagine — il modello porta vicino, il confronto con la miniatura di casa chiude gli ultimi
+pixel; se il confronto non è affidabile ci si ferma alle coordinate e il log lo dice. Se la casa
+è troppo vicina a un fine corsa per contenere gli archi di misura da 45°, viene spostata del
+minimo indispensabile e il log lo segnala.
+
+Restano un paio di minuti sullo zero hardware: sono i quattro collaudi finali, che verificano le
+coordinate contro i fine corsa e per definizione partono da lì. Finiti quelli, la camera torna a
+casa.
+
 L'interpolazione fra due waypoint segue le formule della specifica:
 
 ```text

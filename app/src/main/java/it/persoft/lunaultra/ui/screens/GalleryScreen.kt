@@ -106,10 +106,17 @@ fun GalleryScreen(viewModel: MainViewModel) {
             ) {
                 GalleryFilter.entries.forEachIndexed { index, entry ->
                     val accent = if (entry == GalleryFilter.PREFERITI) Luna.Photo else Luna.Path
+                    // Il numero sul filtro evita di doverlo premere per scoprire che è vuoto.
+                    val count = when (entry) {
+                        GalleryFilter.TUTTO -> gallery.items.size
+                        GalleryFilter.FOTO -> gallery.photos
+                        GalleryFilter.VIDEO -> gallery.videos
+                        GalleryFilter.PREFERITI -> gallery.items.count { it.path in favorites }
+                    }
                     FilterChip(
                         selected = filterIndex == index,
                         onClick = { filterIndex = index },
-                        label = { Text(entry.label) },
+                        label = { Text(if (count > 0) "${entry.label} $count" else entry.label) },
                         leadingIcon = if (entry == GalleryFilter.PREFERITI) {
                             { Icon(LunaIcons.Star, contentDescription = null, modifier = Modifier.size(15.dp)) }
                         } else {
@@ -181,6 +188,40 @@ fun GalleryScreen(viewModel: MainViewModel) {
                     ) {
                         Icon(LunaIcons.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Text("  Riprova")
+                    }
+                }
+
+                // Un filtro che nasconde tutto lascerebbe una griglia vuota senza spiegazione:
+                // sembra che la camera non abbia niente, mentre è solo il filtro.
+                items.isEmpty() -> Column(
+                    modifier = Modifier.fillMaxSize().padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        imageVector = if (filter == GalleryFilter.PREFERITI) LunaIcons.StarOutline else LunaIcons.Gallery,
+                        contentDescription = null,
+                        tint = Luna.OnSurfaceDim,
+                        modifier = Modifier.size(48.dp),
+                    )
+                    Text(
+                        text = when (filter) {
+                            GalleryFilter.PREFERITI ->
+                                "Nessun preferito. Tieni premuta la stella su una foto per aggiungerla."
+                            GalleryFilter.VIDEO -> "Nessun video fra i ${gallery.items.size} file sulla camera."
+                            GalleryFilter.FOTO -> "Nessuna foto fra i ${gallery.items.size} file sulla camera."
+                            GalleryFilter.TUTTO -> "Nessun file"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Luna.OnSurfaceDim,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    OutlinedButton(
+                        onClick = { filterIndex = GalleryFilter.TUTTO.ordinal },
+                        modifier = Modifier.padding(top = 16.dp),
+                    ) {
+                        Text("Mostra tutto")
                     }
                 }
 

@@ -211,6 +211,15 @@ private fun ModeBadge(mode: CaptureMode, detail: String?, modifier: Modifier = M
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        // Da quando la ghiera in fondo non c'è più, questo è l'unico modo di cambiare
+        // modalità. Un riquadro colorato però sembra un'etichetta, e le etichette non si
+        // premono: la freccetta è ciò che dice che si apre qualcosa.
+        Icon(
+            imageVector = LunaIcons.Down,
+            contentDescription = null,
+            tint = mode.color.copy(alpha = 0.8f),
+            modifier = Modifier.size(14.dp),
+        )
     }
 }
 

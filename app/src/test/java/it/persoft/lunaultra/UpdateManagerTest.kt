@@ -32,6 +32,37 @@ class UpdateManagerTest {
         assertEquals(digest, release.sha256)
     }
 
+    /**
+     * Il workflow pubblica su `apk-<branch>` con le barre sostituite da trattini. Se i due
+     * calcoli divergono l'app non trova nulla e dice "app aggiornata" in buona fede: è
+     * esattamente il modo in cui un branch nuovo spariva dal radar.
+     */
+    @Test
+    fun `il tag della release segue il branch della build`() {
+        assertEquals(
+            "apk-codex-automatic-luna-photo-controls-v2",
+            UpdateManager.releaseTag("codex/automatic-luna-photo-controls-v2"),
+        )
+        assertEquals("apk-main", UpdateManager.releaseTag("main"))
+        assertEquals("apk-a-b-c", UpdateManager.releaseTag("refs/heads/a/b/c"))
+    }
+
+    @Test
+    fun `senza branch si ricade sull ultimo ramo pubblicato`() {
+        val fallback = "apk-" + UpdateManager.FALLBACK_BRANCH.replace('/', '-')
+        assertEquals(fallback, UpdateManager.releaseTag(""))
+        assertEquals(fallback, UpdateManager.releaseTag("   "))
+        assertEquals(fallback, UpdateManager.releaseTag("local"))
+    }
+
+    @Test
+    fun `l indirizzo della release e quello dei tag di questo repository`() {
+        assertEquals(
+            "https://api.github.com/repos/apatassini/Insta360luna/releases/tags/apk-main",
+            UpdateManager.releaseApi("main"),
+        )
+    }
+
     @Test
     fun `il confronto commit accetta anche sha abbreviati ma non la build locale`() {
         assertTrue(UpdateManager.sameCommit("0123456789abcdef", "0123456789abcdef"))

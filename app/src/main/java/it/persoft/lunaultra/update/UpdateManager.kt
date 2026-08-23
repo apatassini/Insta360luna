@@ -19,14 +19,25 @@ data class DownloadedUpdate(
     val commitSha: String,
 )
 
-/** Controlla la release mobile del branch e scarica l'APK soltanto quando il commit cambia. */
+/**
+ * Controlla la release mobile del branch e scarica l'APK soltanto quando il commit cambia.
+ *
+ * Il branch non è scritto nel codice: arriva da `BuildConfig.GIT_BRANCH`, cioè dal ramo che ha
+ * prodotto l'APK installato, e resta sostituibile dalle impostazioni. Con un nome fisso nel
+ * sorgente ogni ramo nuovo spariva dal radar dell'app già installata, che continuava a
+ * interrogare la release del ramo precedente e riferiva "app aggiornata" in buona fede.
+ */
 class UpdateManager(context: Context) {
 
     private val appContext = context.applicationContext
-    suspend fun downloadIfAvailable(currentCommit: String = BuildConfig.GIT_SHA): Result<DownloadedUpdate?> =
+
+    suspend fun downloadIfAvailable(
+        currentCommit: String = BuildConfig.GIT_SHA,
+        branch: String = BuildConfig.GIT_BRANCH,
+    ): Result<DownloadedUpdate?> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val release = parseRelease(readText(RELEASE_API))
+                val release = parseRelease(readText(releaseApi(branch)))
                 if (sameCommit(release.commitSha, currentCommit)) return@runCatching null
 
                 val directory = File(appContext.cacheDir, "updates").apply { mkdirs() }
@@ -105,9 +116,29 @@ class UpdateManager(context: Context) {
     companion object {
         private val JSON = Json { ignoreUnknownKeys = true }
 
-        internal const val RELEASE_API =
-            "https://api.github.com/repos/apatassini/Insta360luna/releases/tags/" +
-                "apk-codex-automatic-luna-photo-controls-v2"
+        private const val RELEASES_BY_TAG =
+            "https://api.github.com/repos/apatassini/Insta360luna/releases/tags/"
+
+        /**
+         * Branch usato quando l'APK non sa da dove viene (compilazione locale, o impostazione
+         * lasciata vuota su una build vecchia). È l'ultimo ramo pubblicato prima che questa
+         * scelta diventasse automatica.
+         */
+        internal const val FALLBACK_BRANCH = "codex/automatic-luna-photo-controls-v2"
+
+        /**
+         * Il workflow pubblica su `apk-<branch>` con le barre sostituite da trattini: qui si
+         * rifà lo stesso calcolo, ed è l'unico punto in cui i due devono restare d'accordo.
+         */
+        internal fun releaseTag(branch: String): String {
+            val name = branch.trim().removePrefix("refs/heads/")
+                .takeIf { it.isNotEmpty() && it != "local" }
+                ?: FALLBACK_BRANCH
+            return "apk-" + name.replace('/', '-')
+        }
+
+        internal fun releaseApi(branch: String): String = RELEASES_BY_TAG + releaseTag(branch)
+
         internal const val MAX_APK_BYTES = 100L * 1024L * 1024L
         internal const val CONNECT_TIMEOUT_MS = 8_000
         internal const val READ_TIMEOUT_MS = 30_000

@@ -13,6 +13,16 @@ plugins {
 val buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toIntOrNull() ?: 0
 val gitSha = System.getenv("GITHUB_SHA") ?: "local"
 
+/**
+ * Branch da cui esce questa build.
+ *
+ * L'aggiornamento automatico legge la release del branch, e il nome della release lo decide il
+ * workflow a partire da qui. Compilarlo dentro l'APK e' cio' che permette a una build di
+ * cercare gli aggiornamenti del proprio branch invece che di uno fisso scritto nel codice: con
+ * un branch fisso, ogni ramo nuovo esce da sotto i piedi all'app gia' installata.
+ */
+val gitBranch = System.getenv("GITHUB_REF_NAME") ?: "local"
+
 android {
     namespace = "it.persoft.lunaultra"
     compileSdk = 35
@@ -24,6 +34,7 @@ android {
         versionCode = 1 + buildNumber
         versionName = "0.2.$buildNumber"
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("String", "GIT_BRANCH", "\"$gitBranch\"")
     }
 
     /**

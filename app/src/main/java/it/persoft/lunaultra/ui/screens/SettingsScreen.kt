@@ -43,6 +43,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
+import it.persoft.lunaultra.BuildConfig
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
@@ -494,6 +495,29 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 Hint(
                     "Viene creato un HTML con testo, miniature e punti di controllo incorporati. " +
                         "Il log dell'app viene azzerato soltanto dopo che il file è stato salvato correttamente.",
+                )
+            }
+        }
+
+        SectionCard(title = "Aggiornamenti", icon = LunaIcons.Download, accent = Luna.Ok) {
+            var branch by remember(settings.updateBranch) { mutableStateOf(settings.updateBranch) }
+            val effective = settings.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LabeledValue("Build installata", "${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_SHA.take(12)}")
+                LabeledValue("Branch controllato", effective)
+                OutlinedTextField(
+                    value = branch,
+                    onValueChange = { branch = it; viewModel.setUpdateBranch(it) },
+                    label = { Text("Branch degli aggiornamenti") },
+                    placeholder = { Text(BuildConfig.GIT_BRANCH) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Hint(
+                    "Vuoto significa il branch che ha prodotto questo APK. All'avvio l'app legge " +
+                        "la release di quel branch e propone l'aggiornamento se il commit è " +
+                        "cambiato: cambiando questo campo si passa al lavoro di un altro ramo " +
+                        "senza reinstallare l'APK a mano.",
                 )
             }
         }

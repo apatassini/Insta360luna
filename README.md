@@ -278,6 +278,18 @@ Ultra di installare app da questa origine; Android richiede comunque la conferma
 installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
 sistema. Se GitHub non è raggiungibile, il controllo non blocca la connessione alla camera.
 
+**Quale release.** Quella del branch che ha prodotto l'APK installato: il workflow pubblica su
+`apk-<branch>` con le barre sostituite da trattini, e l'app ricompone lo stesso nome partendo da
+`BuildConfig.GIT_BRANCH`. Non è più un nome fisso nel sorgente — con un nome fisso ogni ramo
+nuovo spariva dal radar dell'app già installata, che continuava a interrogare la release del ramo
+precedente e riferiva *app aggiornata* in buona fede.
+
+Il ramo si cambia da **Impostazioni → Aggiornamenti**, che mostra anche la build installata e il
+branch effettivamente interrogato. Campo vuoto significa "quello da cui vengo". Serve a passare
+al lavoro di un altro ramo senza reinstallare l'APK a mano: il primo salto va comunque fatto
+installando una volta dal link della release, perché l'APK già sul telefono porta dentro il ramo
+con cui è stato compilato.
+
 ### In locale
 
 Requisiti: JDK 17, Android SDK (compileSdk 35).

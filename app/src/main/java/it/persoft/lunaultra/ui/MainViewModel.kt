@@ -297,13 +297,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateCheckStarted = true
         viewModelScope.launch {
             showMessage("Controllo aggiornamenti…")
-            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA)
+            val branch = settings.value.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
+            container.log.info(
+                "AGGIORNAMENTI",
+                "Cerco la release del branch \"$branch\" (build corrente: ${BuildConfig.GIT_SHA.take(12)}).",
+            )
+            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA, branch)
                 .onSuccess { update ->
                     if (update != null) {
                         showMessage("Aggiornamento scaricato: conferma l'installazione")
                         onReadyToInstall(update.apk)
                     } else {
-                        showMessage("App aggiornata · premi Connetti quando vuoi")
+                        showMessage("App aggiornata ($branch) · premi Connetti quando vuoi")
                     }
                 }
                 .onFailure {
@@ -667,6 +672,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             showMessage("Azione $action inviata · confronta le due miniature nel log")
         }
+    }
+
+    /** Cambia il ramo di cui cercare gli aggiornamenti; vuoto = quello che ha prodotto l'APK. */
+    fun setUpdateBranch(branch: String) {
+        container.settingsStore.update { it.copy(updateBranch = branch.trim()) }
     }
 
     /** Scrive il codice dell'azione selfie trovata con la prova qui sopra. */

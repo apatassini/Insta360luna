@@ -112,6 +112,15 @@ data class AppSettings(
      */
     val cameraWifiPassword: String = "",
 
+    /**
+     * Branch di cui cercare gli aggiornamenti, se diverso da quello che ha prodotto l'APK.
+     *
+     * Vuoto significa "quello da cui vengo": è il caso normale. Serve a saltare da un ramo
+     * all'altro dal telefono, senza dover reinstallare a mano l'APK del ramo nuovo — che è
+     * esattamente quello che toccava fare quando il ramo era scritto nel codice.
+     */
+    val updateBranch: String = "",
+
     /** L'app ufficiale ripete l'handshake ogni 3 secondi come keep-alive. */
     val keepAliveSeconds: Int = 3,
     val requestTimeoutMs: Long = 3_000,

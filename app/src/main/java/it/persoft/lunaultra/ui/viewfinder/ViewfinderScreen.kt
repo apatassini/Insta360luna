@@ -33,7 +33,6 @@ import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.ui.MainViewModel
-import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.ui.Panel
 import it.persoft.lunaultra.ui.components.HudPill
 import it.persoft.lunaultra.ui.components.PreviewSurface
@@ -191,6 +190,18 @@ fun ViewfinderScreen(
                         icon = LunaIcons.Panorama,
                         color = captureMode.color,
                         onClick = viewModel::togglePanoAspect,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 70.dp),
+                    )
+                } else if (captureMode.pathBehaviour != null && sequence.waypoints.size >= 2) {
+                    // Con dei punti memorizzati questa riga serve alla durata del percorso, che
+                    // è il numero che si aggiusta fra una passata e l'altra. L'informazione
+                    // della modalità torna appena i punti non ci sono più.
+                    PathDock(
+                        waypointCount = sequence.waypoints.size,
+                        totalSeconds = sequence.effectiveTotalSeconds(),
+                        accent = captureMode.color,
+                        onNudge = viewModel::nudgeTotalDuration,
+                        onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
                         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 70.dp),
                     )
                 } else {
@@ -385,26 +396,6 @@ fun ViewfinderScreen(
                 )
             }
 
-            // Il percorso e la sua durata, sull'immagine e sopra i comandi: compare solo quando
-            // i punti ci sono, e allora è la cosa che si aggiusta fra una passata e l'altra.
-            val pathDock: @Composable () -> Unit = {
-                PathDock(
-                    waypointCount = sequence.waypoints.size,
-                    totalSeconds = sequence.effectiveTotalSeconds(),
-                    perLegSeconds = !sequence.useTotalDuration,
-                    behaviourLabel = captureMode.pathBehaviour?.let { behaviour ->
-                        when (behaviour) {
-                            ShootingMode.VIDEO -> "registra percorrendoli"
-                            ShootingMode.FOTO -> "scatta a ogni punto"
-                            ShootingMode.TIMELAPSE_CAMERA -> "timelapse lungo il percorso"
-                        }
-                    },
-                    accent = captureMode.color,
-                    onNudge = viewModel::nudgeTotalDuration,
-                    onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
-                )
-            }
-
             if (landscape) {
                 Box(
                     modifier = Modifier
@@ -415,29 +406,15 @@ fun ViewfinderScreen(
                 ) {
                     captureBar()
                 }
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(start = 12.dp, bottom = 12.dp + bottomInset),
-                ) {
-                    pathDock()
-                }
             } else {
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                        .fillMaxWidth()
+                        .background(Luna.Band)
+                        .padding(bottom = bottomInset),
                 ) {
-                    Box(modifier = Modifier.padding(bottom = 8.dp)) { pathDock() }
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Luna.Band)
-                            .padding(bottom = bottomInset),
-                    ) {
-                        captureBar()
-                    }
+                    captureBar()
                 }
             }
         } else if (run.running) {

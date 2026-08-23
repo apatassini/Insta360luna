@@ -219,6 +219,15 @@ fun ViewfinderScreen(
                         .align(Alignment.BottomEnd)
                         .padding(end = 12.dp, bottom = 10.dp),
                 )
+
+                ZoomDock(
+                    selected = settings.photo.zoomScale,
+                    enabled = connected && !run.running,
+                    onSelect = viewModel::setPhotoZoom,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 12.dp, bottom = 14.dp),
+                )
             }
 
             val note = previewNote(preview.active, preview.framesDecoded, preview.message)

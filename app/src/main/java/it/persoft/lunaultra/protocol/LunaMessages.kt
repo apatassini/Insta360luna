@@ -111,6 +111,16 @@ object LunaMessages {
             .toByteArray()
     }
 
+    /** Lo zoom è un double e deve essere applicato al function mode attualmente selezionato. */
+    fun setZoomScale(scale: Int, functionMode: Int): ByteArray =
+        ProtoWriter()
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.ZOOM_SCALE)
+            .message(2) {
+                double(LunaProtocolCodes.PhotographyOptionsField.ZOOM_SCALE, scale.toDouble())
+            }
+            .int32(3, functionMode)
+            .toByteArray()
+
     /**
      * Imposta la combinazione risoluzione/FPS della registrazione. Nel protocollo non sono due
      * valori indipendenti: entrambi vivono nell'enum `VideoResolution` del campo 31.

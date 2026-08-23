@@ -1,11 +1,14 @@
 package it.persoft.lunaultra
 
 import it.persoft.lunaultra.camera.CameraMode
+import it.persoft.lunaultra.camera.CameraStatus
 import it.persoft.lunaultra.data.PhotoSettings
 import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.protocol.ProtoField
 import it.persoft.lunaultra.protocol.ProtoReader
+import it.persoft.lunaultra.ui.viewfinder.CaptureMode
+import it.persoft.lunaultra.ui.viewfinder.badgeDetailFor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -20,6 +23,17 @@ import org.junit.Test
  * quel che le arriva senza lamentarsi.
  */
 class CaptureModeTest {
+
+    @Test
+    fun `lo stato tecnico not capture non sporca il distintivo del mirino`() {
+        assertNull(
+            badgeDetailFor(
+                mode = CaptureMode.VIDEO,
+                waypoints = 0,
+                status = CameraStatus(captureMode = "NOT_CAPTURING", recording = false),
+            ),
+        )
+    }
 
     /**
      * `TakePicture.Mode.NORMAL` vale 0. Il valore 1 appartiene a `CaptureMode` (dove è il
@@ -100,6 +114,19 @@ class CaptureModeTest {
         assertEquals(6_500, reader.intOrNull(2, 39))
         assertEquals(3f, reader.floatOrNull(2, 53)!!, 0.001f)
         assertEquals(LunaProtocolCodes.FunctionMode.NORMAL_IMAGE, reader.intOrNull(3))
+    }
+
+    @Test
+    fun `lo zoom video usa il function mode attivo e il campo double`() {
+        val body = LunaMessages.setZoomScale(
+            scale = 3,
+            functionMode = LunaProtocolCodes.FunctionMode.NORMAL_VIDEO,
+        )
+        val reader = ProtoReader(body)
+
+        assertEquals(LunaProtocolCodes.PhotographyOptionType.ZOOM_SCALE, reader.intOrNull(1))
+        assertEquals(3f, reader.floatOrNull(2, LunaProtocolCodes.PhotographyOptionsField.ZOOM_SCALE)!!, 0.001f)
+        assertEquals(LunaProtocolCodes.FunctionMode.NORMAL_VIDEO, reader.intOrNull(3))
     }
 
     @Test

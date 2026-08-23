@@ -209,6 +209,13 @@ class LunaCommands(
             LunaMessages.setPhotoControls(value, mode.functionMode),
         ).map { }
 
+    /** Vale per foto e video: cambia il function mode, non il formato del messaggio. */
+    suspend fun setZoomScale(scale: Int, mode: CameraMode): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setZoomScale(scale, mode.functionMode),
+        ).map { }
+
     suspend fun applyVideoSettings(value: VideoSettings, mode: CameraMode): Result<Unit> {
         session.request(
             LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,

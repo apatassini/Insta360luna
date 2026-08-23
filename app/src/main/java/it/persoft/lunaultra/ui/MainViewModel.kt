@@ -997,6 +997,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val current = settings.value.video.copy(profileCode = selected.code)
             container.commands.applyVideoSettings(videoSettingsForMode(current, mode.cameraMode), mode.cameraMode)
                 .onFailure { container.log.warn("Formato video non accettato: ${it.message}") }
+            container.commands.setZoomScale(settings.value.photo.zoomScale, mode.cameraMode)
+                .onFailure { container.log.warn("Zoom non accettato: ${it.message}") }
         }
         return applied
     }
@@ -1007,8 +1009,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.commands.fetchCameraMode()
                 .onSuccess { cameraMode ->
                     if (cameraMode == null) return@onSuccess
-                    if (_captureMode.value.cameraMode == cameraMode) return@onSuccess
-                    _captureMode.value = CaptureMode.forCamera(cameraMode)
+                    if (_captureMode.value.cameraMode != cameraMode) {
+                        _captureMode.value = CaptureMode.forCamera(cameraMode)
+                    }
+                    // La scala è un'impostazione persistente dell'app: riallinea la camera
+                    // appena connessa anche se questa era rimasta su uno zoom diverso.
+                    container.commands.setZoomScale(settings.value.photo.zoomScale, cameraMode)
+                        .onFailure { container.log.warn("Zoom iniziale non accettato: ${it.message}") }
                 }
                 .onFailure { container.log.warn("Modalità della camera non leggibile: ${it.message}") }
         }
@@ -1064,8 +1071,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         it.copy(whiteBalanceKelvin = if (kelvin == 0) 0 else kelvin.coerceIn(2_000, 10_000))
     }
 
-    fun setPhotoZoom(scale: Int) = updatePhotoSettings {
-        it.copy(zoomScale = scale.takeIf { value -> value in listOf(1, 2, 3, 6, 12) } ?: 1)
+    fun setPhotoZoom(scale: Int) {
+        val zoom = scale.takeIf { it in listOf(1, 2, 3, 6, 12) } ?: 1
+        container.settingsStore.update { it.copy(photo = it.photo.copy(zoomScale = zoom)) }
+        if (connectionState.value != ConnectionState.CONNECTED) return
+        viewModelScope.launch {
+            container.commands.setZoomScale(zoom, _captureMode.value.cameraMode)
+                .onSuccess { showMessage("Zoom ${zoom}×") }
+                .onFailure { showMessage("Zoom non accettato: ${it.message}") }
+        }
     }
 
     private fun updatePhotoSettings(transform: (PhotoSettings) -> PhotoSettings) {

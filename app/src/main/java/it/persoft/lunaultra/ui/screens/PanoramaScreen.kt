@@ -38,6 +38,7 @@ import it.persoft.lunaultra.timelapse.PanoramaPlan
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.PanoramaPreset
 import it.persoft.lunaultra.ui.MainViewModel
+import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.MetricRow
@@ -224,8 +225,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                     enabled = connected && !run.running,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Icon(LunaIcons.Panorama, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Text("  Scatta la panoramica (${current.totalShots} foto)")
+                    ButtonLabel(LunaIcons.Panorama, "Scatta ${current.totalShots} foto")
                 }
                 Hint(
                     "Parte dall'inquadratura attuale, che diventa il centro della panoramica. " +

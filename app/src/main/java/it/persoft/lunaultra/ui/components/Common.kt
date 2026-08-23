@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -34,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.ui.theme.Luna
@@ -337,42 +341,75 @@ fun StatusChip(
  *
  * La forma della curva è l'informazione: se sale regolare va bene, se ha un gradino o un
  * avvallamento c'è qualcosa da guardare — ed è esattamente il caso del comando 100, che su
- * questa camera muove meno del 90. In un elenco di numeri quel gradino va cercato; in un
- * grafico salta all'occhio senza leggere niente.
+ * questa camera muove un sesto del 90. In un elenco di numeri quel gradino va cercato; in un
+ * grafico salta all'occhio senza leggere niente, e infatti la barra che scende si colora
+ * diversamente perché non ci sia dubbio su quale sia.
+ *
+ * L'area delle barre e la riga delle etichette sono due zone distinte, e la barra si misura
+ * dentro la sua. Facendo altrimenti — barra in frazione dell'altezza totale, etichetta sotto —
+ * le barre alte sforano di quanto è alta l'etichetta, e finiscono per scavalcarla.
  */
 @Composable
 fun CurveBars(
     values: List<Pair<Int, Float>>,
     modifier: Modifier = Modifier,
     color: Color = Luna.Accent,
-    height: Dp = 64.dp,
+    height: Dp = 72.dp,
 ) {
     if (values.isEmpty()) return
-    val maximum = values.maxOf { it.second }.takeIf { it > 0f } ?: return
+    val ordered = values.sortedBy { it.first }
+    val maximum = ordered.maxOf { it.second }.takeIf { it > 0f } ?: return
+    // Con dodici barre le etichette si toccherebbero: si scrivono la prima, l'ultima e una sì
+    // e una no. Gli estremi sono quelli che si vogliono leggere sempre.
+    val labelEvery = if (ordered.size > 8) 2 else 1
     Row(
         modifier = modifier.fillMaxWidth().height(height),
         horizontalArrangement = Arrangement.spacedBy(3.dp),
-        verticalAlignment = Alignment.Bottom,
     ) {
-        values.sortedBy { it.first }.forEach { (intensity, value) ->
+        ordered.forEachIndexed { index, (intensity, value) ->
+            val previous = ordered.getOrNull(index - 1)?.second
+            val slower = previous != null && value < previous
             Column(
                 modifier = Modifier.weight(1f),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Bottom,
             ) {
                 Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight((value / maximum).coerceIn(0.04f, 1f))
-                        .background(color.copy(alpha = 0.75f), RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)),
-                )
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.BottomCenter,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight((value / maximum).coerceIn(0.03f, 1f))
+                            .background(
+                                if (slower) Luna.Warn.copy(alpha = 0.85f) else color.copy(alpha = 0.75f),
+                                RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp),
+                            ),
+                    )
+                }
+                val showLabel = index == 0 || index == ordered.lastIndex || index % labelEvery == 0
                 Text(
-                    text = "$intensity",
+                    text = if (showLabel) "$intensity" else "",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Luna.OnSurfaceDim,
+                    color = if (slower) Luna.Warn else Luna.OnSurfaceDim,
                     maxLines = 1,
                 )
             }
         }
     }
+}
+
+/**
+ * Contenuto di un pulsante con icona: l'icona, lo spazio giusto, e la scritta.
+ *
+ * Prima lo spazio era due caratteri dentro il testo — `Text("  Aggiorna")` — e su un pulsante
+ * stretto quei due spazi non bastano: l'icona finisce addosso alla parola. Lo spazio fra icona
+ * e testo di un pulsante ha una misura sua in Material, ed è quella che va usata. La scritta si
+ * accorcia con i puntini invece di andare sotto l'icona quando il pulsante è più stretto di lei.
+ */
+@Composable
+fun RowScope.ButtonLabel(icon: ImageVector, label: String) {
+    Icon(icon, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+    Text(text = label, maxLines = 1, overflow = TextOverflow.Ellipsis)
 }

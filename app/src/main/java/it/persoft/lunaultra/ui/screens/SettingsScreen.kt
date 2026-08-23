@@ -39,6 +39,7 @@ import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.BuildConfig
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.UpdateUiState
+import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
@@ -135,20 +136,17 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         onClick = { if (connected) viewModel.disconnect() else viewModel.connect() },
                         modifier = Modifier.weight(1f),
                     ) {
-                        Icon(
-                            imageVector = if (connected) LunaIcons.Disconnected else LunaIcons.Connected,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
+                        ButtonLabel(
+                            icon = if (connected) LunaIcons.Disconnected else LunaIcons.Connected,
+                            label = if (connected) "Disconnetti" else "Connetti",
                         )
-                        Text(text = if (connected) "  Disconnetti" else "  Connetti")
                     }
                     OutlinedButton(
                         onClick = viewModel::refreshStatus,
                         enabled = connected,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Icon(LunaIcons.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("  Aggiorna")
+                        ButtonLabel(LunaIcons.Refresh, "Aggiorna")
                     }
                 }
                 LabeledValue(
@@ -371,8 +369,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     enabled = logEntries.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Icon(LunaIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Text("  Salva log nella cartella Download")
+                    ButtonLabel(LunaIcons.Download, "Salva il log nei Download")
                 }
                 Hint(
                     "Viene creato un HTML con testo, miniature e punti di controllo incorporati. " +
@@ -401,8 +398,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     enabled = updateState !is UpdateUiState.Checking && updateState !is UpdateUiState.Downloading,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Icon(LunaIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Text("  Verifica aggiornamenti")
+                    ButtonLabel(LunaIcons.Download, "Verifica aggiornamenti")
                 }
                 when (val state = updateState) {
                     is UpdateUiState.Checking -> {

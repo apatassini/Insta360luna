@@ -50,6 +50,7 @@ import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.ui.MainViewModel
+import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.MetricRow
@@ -134,8 +135,7 @@ fun SequenceScreen(viewModel: MainViewModel) {
                     onClick = viewModel::clearWaypoints,
                     enabled = sequence.waypoints.isNotEmpty(),
                 ) {
-                    Icon(LunaIcons.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("  Svuota")
+                    ButtonLabel(LunaIcons.Delete, "Svuota")
                 }
             },
         ) {

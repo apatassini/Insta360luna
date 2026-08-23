@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.ui.MainViewModel
+import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
@@ -131,8 +132,7 @@ fun GalleryScreen(viewModel: MainViewModel) {
                 }
                 Box(modifier = Modifier.weight(1f))
                 TextButton(onClick = { viewModel.refreshGallery(force = true) }, enabled = !gallery.loading) {
-                    Icon(LunaIcons.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("  Aggiorna")
+                    ButtonLabel(LunaIcons.Refresh, "Aggiorna")
                 }
             }
 
@@ -186,8 +186,7 @@ fun GalleryScreen(viewModel: MainViewModel) {
                         onClick = { viewModel.refreshGallery(force = true) },
                         modifier = Modifier.padding(top = 16.dp),
                     ) {
-                        Icon(LunaIcons.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("  Riprova")
+                        ButtonLabel(LunaIcons.Refresh, "Riprova")
                     }
                 }
 
@@ -263,12 +262,10 @@ fun GalleryScreen(viewModel: MainViewModel) {
                 ) {
                     OutlinedButton(onClick = viewModel::clearSelection) { Text("Annulla") }
                     OutlinedButton(onClick = viewModel::selectAll) {
-                        Icon(LunaIcons.SelectAll, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("  Tutti")
+                        ButtonLabel(LunaIcons.SelectAll, "Tutti")
                     }
                     Button(onClick = viewModel::downloadSelected, modifier = Modifier.weight(1f)) {
-                        Icon(LunaIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("  Scarica ${gallery.selected.size}")
+                        ButtonLabel(LunaIcons.Download, "Scarica ${gallery.selected.size}")
                     }
                 }
             } else if (gallery.queueTotal > 0) {
@@ -292,8 +289,7 @@ fun GalleryScreen(viewModel: MainViewModel) {
             } else if (filter == GalleryFilter.PREFERITI && items.isNotEmpty()) {
                 Row(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                     Button(onClick = viewModel::downloadFavorites, modifier = Modifier.fillMaxWidth()) {
-                        Icon(LunaIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("  Scarica i ${items.size} preferiti")
+                        ButtonLabel(LunaIcons.Download, "Scarica i ${items.size} preferiti")
                     }
                 }
             }

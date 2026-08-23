@@ -320,8 +320,10 @@ class TimelapseEngine(
                     message = "In posizione per lo scatto ${taken + 1}/$planned",
                 )
 
-                moveTo(targetPan, targetTilt, moveSeconds)
-                gimbal.stop()
+                // Fra fotografie conta ridurre il tempo morto: il dominante viaggia al 100%.
+                // L'intervallo configurato resta il ritmo degli scatti, non la velocità del gimbal.
+                gimbal.moveToPositionAtMaximum(targetPan, targetTilt)
+                    .getOrElse { throw IllegalStateException("Spostamento fotografico non riuscito: ${it.message}", it) }
 
                 // Il gimbal deve essere davvero fermo prima dello scatto.
                 delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
@@ -454,21 +456,20 @@ class TimelapseEngine(
                 }
             }
 
-            val measured = calibration.value.takeIf(GimbalCalibrationProfile::isValid)
-                ?.level(settings.value.gimbal.hardwareSpeedLevel)
+            val profile = calibration.value.takeIf(GimbalCalibrationProfile::isValid)
             // Con un profilo valido non si presume più il verso: è quello misurato sulla camera.
             // Il comando deve produrre nell'immagine lo spostamento opposto all'errore rilevato.
             val panPulse = correctionAxis(
                 errorPixels = verification.shiftX,
-                measuredPositiveRate = measured?.panImagePixelsPerSecond,
+                measuredPositiveRate = profile?.imageRateAt(100f, panAxis = true),
                 fallbackSignedError = verification.shiftX,
             )
             val tiltPulse = correctionAxis(
                 errorPixels = verification.shiftY,
-                measuredPositiveRate = measured?.tiltImagePixelsPerSecond,
+                measuredPositiveRate = profile?.imageRateAt(100f, panAxis = false),
                 fallbackSignedError = -verification.shiftY,
             )
-            val pulseMs = correctionPulseMs(verification, panPulse, tiltPulse, measured)
+            val pulseMs = correctionPulseMs(verification, panPulse, tiltPulse, profile)
             _state.value = _state.value.copy(
                 phase = RunPhase.RUNNING,
                 message = "Correzione visiva ${target.name} · ${attempt + 1}/$MAX_VISUAL_ATTEMPTS",
@@ -542,14 +543,16 @@ class TimelapseEngine(
         verification: ImageVerification,
         panPulse: Float,
         tiltPulse: Float,
-        measured: it.persoft.lunaultra.data.GimbalLevelCalibration?,
+        profile: GimbalCalibrationProfile?,
     ): Long {
-        if (measured != null) {
-            val panMs = if (abs(panPulse) > 0f && abs(measured.panImagePixelsPerSecond) >= GimbalCalibrationProfile.MIN_RATE) {
-                abs(verification.shiftX) / (abs(measured.panImagePixelsPerSecond) * abs(panPulse)) * 1000f
+        if (profile != null) {
+            val panRate = abs(profile.imageRateAt(abs(panPulse) * 100f, panAxis = true))
+            val tiltRate = abs(profile.imageRateAt(abs(tiltPulse) * 100f, panAxis = false))
+            val panMs = if (abs(panPulse) > 0f && panRate >= GimbalCalibrationProfile.MIN_RATE) {
+                abs(verification.shiftX) / panRate * 1000f
             } else 0f
-            val tiltMs = if (abs(tiltPulse) > 0f && abs(measured.tiltImagePixelsPerSecond) >= GimbalCalibrationProfile.MIN_RATE) {
-                abs(verification.shiftY) / (abs(measured.tiltImagePixelsPerSecond) * abs(tiltPulse)) * 1000f
+            val tiltMs = if (abs(tiltPulse) > 0f && tiltRate >= GimbalCalibrationProfile.MIN_RATE) {
+                abs(verification.shiftY) / tiltRate * 1000f
             } else 0f
             return max(panMs, tiltMs).toLong().coerceIn(MIN_CORRECTION_PULSE_MS, MAX_CORRECTION_PULSE_MS)
         }

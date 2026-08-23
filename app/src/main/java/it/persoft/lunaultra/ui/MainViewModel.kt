@@ -253,9 +253,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun observeForegroundService() {
         viewModelScope.launch {
-            combine(connectionState, _recordingSinceMs, runState, _status) { connection, recordingSince, run, status ->
+            combine(
+                connectionState,
+                _recordingSinceMs,
+                runState,
+                _status,
+                gimbalCalibrationState,
+            ) { connection, recordingSince, run, status, calibration ->
                 when {
                     connection != ConnectionState.CONNECTED -> null
+                    calibration.running -> if (calibration.pausedForPreview) {
+                        "Calibrazione gimbal in pausa — riapri l'app per l'anteprima"
+                    } else {
+                        "Calibrazione gimbal — ${(calibration.progress * 100).toInt()}%"
+                    }
                     run.running ->
                         "Sequenza in corso — tratto ${run.legIndex + 1}/${run.legCount.coerceAtLeast(1)}"
 
@@ -470,9 +481,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ) {
                     container.commands.parsePtz(frame)?.let { container.gimbal.onCameraPosition(it) }
                 }
-                container.commands.gimbalSpeedFromNotification(frame)?.let { level ->
-                    updateGimbal { it.copy(hardwareSpeedLevel = level) }
-                }
+                // La notifica L/M/V viene registrata in Diagnostica ma non modifica più la UI:
+                // le prove reali mostrano che i tre livelli producono lo stesso movimento.
                 recordSighting(frame.code, frame.describePayload(), Hex.encode(frame.payload, limit = 32))
             }
         }
@@ -539,22 +549,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         container.gimbal.setJog(pan, tilt)
     }
 
-    fun setManualSpeed(percent: Int) =
-        updateGimbal { it.copy(manualSpeedPercent = percent.coerceIn(1, 100)) }
+    fun setManualSpeed(percent: Int) {
+        val value = percent.coerceIn(1, 100)
+        val preset = when (value) { 25 -> 1; 50 -> 2; 75 -> 3; else -> 0 }
+        updateGimbal { it.copy(manualSpeedPercent = value, hardwareSpeedLevel = preset) }
+    }
 
     fun setGimbalHardwareSpeed(level: Int) {
-        if (connectionState.value != ConnectionState.CONNECTED) {
-            showMessage("Connettiti alla camera per cambiare la velocità del gimbal")
-            return
-        }
-        viewModelScope.launch {
-            container.commands.setGimbalHardwareSpeed(level)
-                .onSuccess {
-                    updateGimbal { it.copy(hardwareSpeedLevel = level) }
-                    showMessage("Velocità gimbal: ${gimbalSpeedLabel(level)}")
-                }
-                .onFailure { showMessage("Velocità gimbal non applicata: ${it.message}") }
-        }
+        val percent = when (level) { 1 -> 25; 2 -> 50; else -> 75 }
+        updateGimbal { it.copy(hardwareSpeedLevel = level, manualSpeedPercent = percent) }
+        showMessage("Intensità joystick: $percent% (${gimbalSpeedLabel(level)})")
     }
 
     fun startGimbalCalibration() {
@@ -569,7 +573,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         container.calibrator.start(
             cameraModel = status.value.model.orEmpty(),
             firmware = status.value.firmware.orEmpty(),
-            originalHardwareLevel = settings.value.gimbal.hardwareSpeedLevel,
         )
         showMessage("Calibrazione avviata · non muovere camera o scena")
     }

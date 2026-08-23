@@ -62,7 +62,7 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val probe = CodeProbe(session, log)
     val preview = PreviewController(session, commands, settingsStore.state, wifiBinder, log, scope)
     val gimbal = GimbalController(commands, settingsStore.state, calibrationStore.state, log, scope)
-    val calibrator = GimbalCalibrator(commands, gimbal, preview, calibrationStore, log, scope)
+    val calibrator = GimbalCalibrator(gimbal, preview, calibrationStore, log, scope)
     val engine = TimelapseEngine(commands, gimbal, preview, settingsStore.state, calibrationStore.state, log, scope)
     val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log)
 

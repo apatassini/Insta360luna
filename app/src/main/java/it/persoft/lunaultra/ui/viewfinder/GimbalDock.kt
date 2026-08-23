@@ -162,8 +162,8 @@ private fun GimbalOptions(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Velocità", style = MaterialTheme.typography.labelSmall, color = Luna.OnSurfaceDim)
-            listOf(1 to "L", 2 to "M", 3 to "V").forEach { (level, label) ->
+            Text("Preset", style = MaterialTheme.typography.labelSmall, color = Luna.OnSurfaceDim)
+            listOf(1 to "25", 2 to "50", 3 to "75").forEach { (level, label) ->
                 FilterChip(
                     selected = hardwareSpeedLevel == level,
                     onClick = { onHardwareSpeedChange(level) },

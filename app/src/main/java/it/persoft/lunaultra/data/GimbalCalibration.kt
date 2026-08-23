@@ -2,11 +2,11 @@ package it.persoft.lunaultra.data
 
 import kotlinx.serialization.Serializable
 import kotlin.math.abs
+import kotlin.math.sign
 
-/** Misura elementare raccolta durante un impulso della calibrazione. */
 @Serializable
 data class GimbalCalibrationSample(
-    val hardwareLevel: Int,
+    val intensityPercent: Int,
     val axis: String,
     val command: Float,
     val pulseMs: Long,
@@ -18,13 +18,14 @@ data class GimbalCalibrationSample(
     val settleMs: Long,
 ) {
     val axisShift: Float get() = if (axis == AXIS_PAN) shiftX else shiftY
-    val normalizedPixelsPerSecond: Float
+    /** Velocità dell'immagine prodotta dal comando positivo alla stessa intensità. */
+    val signedPixelsPerSecond: Float
         get() = if (command == 0f || pulseMs <= 0L) 0f
-        else axisShift / (pulseMs / 1000f) / command
+        else axisShift / (pulseMs / 1000f) * sign(command)
 
     val usable: Boolean
-        get() = hardwareLevel in 1..3 && axis in setOf(AXIS_PAN, AXIS_TILT) &&
-            abs(axisShift) >= 1.5f && inliers >= 5 && confidence >= 0.30f
+        get() = intensityPercent in 1..100 && axis in setOf(AXIS_PAN, AXIS_TILT) &&
+            abs(axisShift) >= 1.25f && inliers >= 5 && confidence >= 0.30f
 
     companion object {
         const val AXIS_PAN = "pan"
@@ -32,24 +33,19 @@ data class GimbalCalibrationSample(
     }
 }
 
-/** Risposta visiva misurata per uno dei tre livelli fisici L/M/V della camera. */
 @Serializable
-data class GimbalLevelCalibration(
-    val hardwareLevel: Int,
-    /** Spostamento orizzontale dell'immagine prodotto da un comando pan logico positivo. */
+data class GimbalResponsePoint(
+    val intensityPercent: Int,
     val panImagePixelsPerSecond: Float,
-    /** Spostamento verticale dell'immagine prodotto da un comando tilt logico positivo. */
     val tiltImagePixelsPerSecond: Float,
-    /** Rapporto rispetto al livello Veloce, usato dal dead reckoning. */
-    val panSpeedScale: Float,
-    val tiltSpeedScale: Float,
     val validPanSamples: Int,
     val validTiltSamples: Int,
 )
 
 /**
- * Profilo hardware persistente. Viene scritto in `gimbal_calibration.json` e resta valido fra
- * riavvii e aggiornamenti dell'app; una prova incompleta non sostituisce mai il profilo buono.
+ * Curva hardware persistente. L/M/V non entrano nel modello: il log mostra che il relativo
+ * comando può andare in timeout e le prove fisiche indicano la stessa velocità. La variabile
+ * affidabile è l'intensità 1..100 inviata direttamente al comando gimbal 226.
  */
 @Serializable
 data class GimbalCalibrationProfile(
@@ -61,30 +57,81 @@ data class GimbalCalibrationProfile(
     val settleMs: Long = DEFAULT_SETTLE_MS,
     val validSamples: Int = 0,
     val totalSamples: Int = 0,
-    val levels: List<GimbalLevelCalibration> = emptyList(),
+    val responsePoints: List<GimbalResponsePoint> = emptyList(),
 ) {
     val isValid: Boolean
-        get() = calibratedAtMs > 0L && levels.size == 3 && levels.all {
-            abs(it.panImagePixelsPerSecond) >= MIN_RATE &&
-                abs(it.tiltImagePixelsPerSecond) >= MIN_RATE &&
-                it.validPanSamples >= MIN_SAMPLES_PER_AXIS &&
-                it.validTiltSamples >= MIN_SAMPLES_PER_AXIS
-        }
+        get() = schemaVersion == CURRENT_SCHEMA && calibratedAtMs > 0L &&
+            responsePoints.size >= MIN_VALID_POINTS &&
+            responsePoints.any { it.intensityPercent <= 10 } &&
+            responsePoints.any { it.intensityPercent == 100 } &&
+            responsePoints.all {
+                abs(it.panImagePixelsPerSecond) >= MIN_RATE &&
+                    abs(it.tiltImagePixelsPerSecond) >= MIN_RATE &&
+                    it.validPanSamples >= MIN_SAMPLES_PER_AXIS &&
+                    it.validTiltSamples >= MIN_SAMPLES_PER_AXIS
+            }
 
     val qualityPercent: Int
         get() = if (totalSamples <= 0) 0 else (validSamples * 100 / totalSamples).coerceIn(0, 100)
 
-    fun level(level: Int): GimbalLevelCalibration? = levels.firstOrNull { it.hardwareLevel == level }
+    /** Velocità immagine firmata del comando positivo, interpolata fra i punti misurati. */
+    fun imageRateAt(intensityPercent: Float, panAxis: Boolean): Float {
+        val points = responsePoints.sortedBy(GimbalResponsePoint::intensityPercent)
+        if (points.isEmpty() || intensityPercent <= 0f) return 0f
+        val requested = intensityPercent.coerceIn(0f, 100f)
+        val upper = points.firstOrNull { it.intensityPercent >= requested }
+        val lower = points.lastOrNull { it.intensityPercent <= requested }
+        if (lower == null) {
+            val first = points.first()
+            return rate(first, panAxis) * requested / first.intensityPercent.coerceAtLeast(1)
+        }
+        if (upper == null || upper.intensityPercent == lower.intensityPercent) return rate(lower, panAxis)
+        val t = (requested - lower.intensityPercent) / (upper.intensityPercent - lower.intensityPercent)
+        return rate(lower, panAxis) + (rate(upper, panAxis) - rate(lower, panAxis)) * t
+    }
+
+    /** Frazione della velocità massima realmente prodotta da un comando [-1, 1]. */
+    fun motionFraction(command: Float, panAxis: Boolean): Float {
+        if (!isValid || command == 0f) return command
+        val full = abs(imageRateAt(100f, panAxis))
+        if (full < MIN_RATE) return command
+        val measured = abs(imageRateAt(abs(command) * 100f, panAxis)) / full
+        return measured.coerceIn(0f, 1f) * sign(command)
+    }
+
+    /** Inversa della curva: trasforma la velocità richiesta nell'intensità da inviare. */
+    fun commandForMotionFraction(desiredFraction: Float, panAxis: Boolean): Float {
+        if (!isValid || desiredFraction == 0f) return desiredFraction.coerceIn(-1f, 1f)
+        val desired = abs(desiredFraction).coerceIn(0f, 1f)
+        val full = abs(imageRateAt(100f, panAxis))
+        if (full < MIN_RATE) return desiredFraction.coerceIn(-1f, 1f)
+        val targetRate = desired * full
+        val points = listOf(GimbalResponsePoint(0, 0f, 0f, 0, 0)) +
+            responsePoints.sortedBy(GimbalResponsePoint::intensityPercent)
+        val upperIndex = points.indexOfFirst { abs(rate(it, panAxis)) >= targetRate }
+        if (upperIndex < 0) return sign(desiredFraction)
+        if (upperIndex == 0) return 0f
+        val upper = points[upperIndex]
+        val lower = points[upperIndex - 1]
+        val lowRate = abs(rate(lower, panAxis))
+        val highRate = abs(rate(upper, panAxis))
+        val t = if (highRate - lowRate < 0.001f) 1f else (targetRate - lowRate) / (highRate - lowRate)
+        val percent = lower.intensityPercent + (upper.intensityPercent - lower.intensityPercent) * t
+        return (percent / 100f).coerceIn(0.01f, 1f) * sign(desiredFraction)
+    }
+
+    private fun rate(point: GimbalResponsePoint, panAxis: Boolean): Float =
+        if (panAxis) point.panImagePixelsPerSecond else point.tiltImagePixelsPerSecond
 
     companion object {
-        const val CURRENT_SCHEMA = 1
+        const val CURRENT_SCHEMA = 2
         const val DEFAULT_SETTLE_MS = 260L
-        const val MIN_SAMPLES_PER_AXIS = 4
-        const val MIN_RATE = 3f
+        const val MIN_SAMPLES_PER_AXIS = 2
+        const val MIN_VALID_POINTS = 8
+        const val MIN_RATE = 0.35f
     }
 }
 
-/** Aggregazione deterministica e testabile delle misure grezze. */
 object GimbalCalibrationBuilder {
     fun build(
         samples: List<GimbalCalibrationSample>,
@@ -93,28 +140,18 @@ object GimbalCalibrationBuilder {
         calibratedAtMs: Long = System.currentTimeMillis(),
     ): GimbalCalibrationProfile {
         val usable = samples.filter(GimbalCalibrationSample::usable)
-        val rawRates = (1..3).associateWith { level ->
-            val pan = usable.filter { it.hardwareLevel == level && it.axis == GimbalCalibrationSample.AXIS_PAN }
-            val tilt = usable.filter { it.hardwareLevel == level && it.axis == GimbalCalibrationSample.AXIS_TILT }
-            RawLevel(
-                panRate = median(pan.map { it.normalizedPixelsPerSecond }),
-                tiltRate = median(tilt.map { it.normalizedPixelsPerSecond }),
-                panCount = pan.size,
-                tiltCount = tilt.size,
+        val points = samples.map(GimbalCalibrationSample::intensityPercent).distinct().sorted().map { intensity ->
+            val pan = usable.filter { it.intensityPercent == intensity && it.axis == GimbalCalibrationSample.AXIS_PAN }
+            val tilt = usable.filter { it.intensityPercent == intensity && it.axis == GimbalCalibrationSample.AXIS_TILT }
+            GimbalResponsePoint(
+                intensityPercent = intensity,
+                panImagePixelsPerSecond = median(pan.map(GimbalCalibrationSample::signedPixelsPerSecond)),
+                tiltImagePixelsPerSecond = median(tilt.map(GimbalCalibrationSample::signedPixelsPerSecond)),
+                validPanSamples = pan.size,
+                validTiltSamples = tilt.size,
             )
-        }
-        val fast = rawRates.getValue(3)
-        val levels = rawRates.map { (level, raw) ->
-            GimbalLevelCalibration(
-                hardwareLevel = level,
-                panImagePixelsPerSecond = raw.panRate,
-                tiltImagePixelsPerSecond = raw.tiltRate,
-                panSpeedScale = ratio(raw.panRate, fast.panRate),
-                tiltSpeedScale = ratio(raw.tiltRate, fast.tiltRate),
-                validPanSamples = raw.panCount,
-                validTiltSamples = raw.tiltCount,
-            )
-        }
+        }.filter { it.validPanSamples > 0 && it.validTiltSamples > 0 }
+
         return GimbalCalibrationProfile(
             calibratedAtMs = calibratedAtMs,
             cameraModel = cameraModel,
@@ -125,15 +162,9 @@ object GimbalCalibrationBuilder {
                 .takeIf { usable.isNotEmpty() } ?: GimbalCalibrationProfile.DEFAULT_SETTLE_MS,
             validSamples = usable.size,
             totalSamples = samples.size,
-            levels = levels,
+            responsePoints = points,
         )
     }
-
-    private data class RawLevel(val panRate: Float, val tiltRate: Float, val panCount: Int, val tiltCount: Int)
-
-    private fun ratio(value: Float, reference: Float): Float =
-        if (abs(value) < GimbalCalibrationProfile.MIN_RATE || abs(reference) < GimbalCalibrationProfile.MIN_RATE) 1f
-        else (abs(value) / abs(reference)).coerceIn(0.1f, 1.5f)
 
     private fun median(values: List<Float>): Float {
         if (values.isEmpty()) return 0f

@@ -34,7 +34,7 @@ data class GimbalSettings(
     val manualSpeedPercent: Int = 40,
     /** Insta360Linker usa un tick di 25 ms; 40 Hz mantiene lo stesso ritmo. */
     val commandRateHz: Int = 40,
-    /** Velocità del gimbal memorizzata nella camera: 1 lenta, 2 media, 3 veloce. */
+    /** Preset UI: 0=personalizzato, 1=25%, 2=50%, 3=75%; non è inviato alla camera. */
     val hardwareSpeedLevel: Int = 3,
     /** Usa le miniature dei waypoint per correggere visivamente partenza e arrivi. */
     val visualWaypointCorrection: Boolean = true,

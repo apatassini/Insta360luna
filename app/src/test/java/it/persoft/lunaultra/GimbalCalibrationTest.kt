@@ -9,42 +9,42 @@ import org.junit.Test
 
 class GimbalCalibrationTest {
     @Test
-    fun `builds signed response and L M V scales`() {
+    fun `builds and interpolates the 1 to 100 percent response curve`() {
+        val intensities = listOf(1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
         val samples = buildList {
-            val panRates = mapOf(1 to -30f, 2 to -60f, 3 to -120f)
-            val tiltRates = mapOf(1 to 20f, 2 to 40f, 3 to 80f)
-            for (level in 1..3) {
-                repeat(3) {
-                    listOf(0.2f, -0.2f).forEach { command ->
-                        add(sample(level, GimbalCalibrationSample.AXIS_PAN, command, panRates.getValue(level)))
-                        add(sample(level, GimbalCalibrationSample.AXIS_TILT, command, tiltRates.getValue(level)))
+            intensities.forEach { intensity ->
+                repeat(2) {
+                    listOf(1f, -1f).forEach { direction ->
+                        val command = intensity / 100f * direction
+                        // Curva intenzionalmente non lineare: il 50% produce il 40% del moto.
+                        val motion = intensity / 100f * (0.6f + intensity / 250f)
+                        add(sample(intensity, GimbalCalibrationSample.AXIS_PAN, command, -120f * motion))
+                        add(sample(intensity, GimbalCalibrationSample.AXIS_TILT, command, 80f * motion))
                     }
                 }
             }
         }
 
-        val profile = GimbalCalibrationBuilder.build(
-            samples = samples,
-            cameraModel = "Luna Ultra",
-            firmware = "1.2.3",
-            calibratedAtMs = 1234L,
-        )
+        val profile = GimbalCalibrationBuilder.build(samples, "Luna Ultra", "1.0.288", 1234L)
 
         assertTrue(profile.isValid)
+        assertEquals(12, profile.responsePoints.size)
         assertEquals(100, profile.qualityPercent)
+        assertTrue(profile.imageRateAt(50f, true) < 0f)
+        assertTrue(profile.imageRateAt(50f, false) > 0f)
+        assertEquals(0.4f, profile.motionFraction(0.5f, panAxis = true), 0.03f)
+        assertEquals(0.5f, profile.commandForMotionFraction(0.4f, panAxis = true), 0.04f)
         assertEquals(35L, profile.responseOverheadMs)
         assertEquals(300L, profile.settleMs)
-        assertEquals(-120f, profile.level(3)!!.panImagePixelsPerSecond, 0.01f)
-        assertEquals(80f, profile.level(3)!!.tiltImagePixelsPerSecond, 0.01f)
-        assertEquals(0.25f, profile.level(1)!!.panSpeedScale, 0.01f)
-        assertEquals(0.5f, profile.level(2)!!.tiltSpeedScale, 0.01f)
-        assertEquals(1f, profile.level(3)!!.panSpeedScale, 0.01f)
     }
 
     @Test
-    fun `does not validate an incomplete calibration`() {
+    fun `rejects an incomplete curve without low speed and 100 percent`() {
         val profile = GimbalCalibrationBuilder.build(
-            samples = listOf(sample(3, GimbalCalibrationSample.AXIS_PAN, 0.2f, -100f)),
+            samples = listOf(
+                sample(50, GimbalCalibrationSample.AXIS_PAN, 0.5f, -40f),
+                sample(50, GimbalCalibrationSample.AXIS_TILT, 0.5f, 30f),
+            ),
             cameraModel = "Luna Ultra",
             firmware = "",
             calibratedAtMs = 1234L,
@@ -52,13 +52,14 @@ class GimbalCalibrationTest {
         assertFalse(profile.isValid)
     }
 
-    private fun sample(level: Int, axis: String, command: Float, signedRate: Float): GimbalCalibrationSample {
-        val shift = signedRate * command * 0.5f
+    private fun sample(intensity: Int, axis: String, command: Float, signedRateAtIntensity: Float): GimbalCalibrationSample {
+        val pulseSeconds = if (intensity <= 1) 4f else 1f
+        val shift = signedRateAtIntensity * pulseSeconds * kotlin.math.sign(command)
         return GimbalCalibrationSample(
-            hardwareLevel = level,
+            intensityPercent = intensity,
             axis = axis,
             command = command,
-            pulseMs = 500L,
+            pulseMs = (pulseSeconds * 1000).toLong(),
             shiftX = if (axis == GimbalCalibrationSample.AXIS_PAN) shift else 0f,
             shiftY = if (axis == GimbalCalibrationSample.AXIS_TILT) shift else 0f,
             inliers = 12,

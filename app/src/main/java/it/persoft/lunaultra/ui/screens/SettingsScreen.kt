@@ -1,6 +1,10 @@
 package it.persoft.lunaultra.ui.screens
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -10,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -24,9 +29,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -222,9 +231,9 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     valueLabel = "${gimbal.manualSpeedPercent}%",
                     icon = LunaIcons.Speed,
                 )
-                Text("Velocità hardware del gimbal")
+                Text("Preset intensità joystick")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    listOf(1 to "Lenta", 2 to "Media", 3 to "Veloce").forEach { (level, label) ->
+                    listOf(1 to "Bassa 25%", 2 to "Media 50%", 3 to "Alta 75%").forEach { (level, label) ->
                         FilterChip(
                             selected = gimbal.hardwareSpeedLevel == level,
                             onClick = { viewModel.setGimbalHardwareSpeed(level) },
@@ -237,7 +246,10 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         )
                     }
                 }
-                Hint("Questi tre livelli vengono scritti nella camera; non sono una semplice scala grafica.")
+                Hint(
+                    "Sono scorciatoie del cursore, non livelli hardware: dal log e dalle prove " +
+                        "L/M/V risultano equivalenti. Le sequenze usano invece la curva calibrata 1–100%.",
+                )
                 ToggleRow(
                     title = "Correzione visiva automatica",
                     subtitle = "Allinea Punto 1 e arrivi confrontando i punti di controllo delle miniature",
@@ -296,6 +308,11 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
         SectionCard(title = "Calibrazione gimbal", icon = LunaIcons.Center, accent = Luna.Pano) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (calibrationState.running) {
+                    val annotatedBitmap = remember(calibrationState.annotatedJpeg) {
+                        calibrationState.annotatedJpeg?.let { bytes ->
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        }
+                    }
                     Text(calibrationState.message)
                     LinearProgressIndicator(
                         progress = { calibrationState.progress },
@@ -305,6 +322,68 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "Avanzamento",
                         "${calibrationState.completedSteps}/${calibrationState.totalSteps} · ${(calibrationState.progress * 100).roundToInt()}%",
                     )
+                    if (calibrationState.pausedForPreview) {
+                        Hint(
+                            "Calibrazione in pausa, non interrotta. Il servizio mantiene camera, " +
+                                "Wi-Fi e misure; riaprendo l'app riprende dal passaggio corrente.",
+                        )
+                    }
+                    LabeledValue(
+                        "Passaggio corrente",
+                        "${calibrationState.intensityPercent}% · ${calibrationState.axisLabel} · ${calibrationState.directionLabel}",
+                    )
+                    LabeledValue("Durata impulso", "${calibrationState.pulseMs} ms")
+                    LabeledValue(
+                        "Coordinate teoriche",
+                        "pan %.2f° · tilt %.2f°".format(
+                            calibrationState.theoreticalPan,
+                            calibrationState.theoreticalTilt,
+                        ),
+                    )
+                    Text(calibrationState.verificationLabel)
+                    LabeledValue(
+                        "Spostamento immagine",
+                        "Δx %+.1f px · Δy %+.1f px".format(calibrationState.shiftX, calibrationState.shiftY),
+                    )
+                    LabeledValue(
+                        "Punti di controllo corretti",
+                        "${calibrationState.inlierMatches}/${calibrationState.candidateMatches} · ${calibrationState.controlPointsPercent}%",
+                        valueColor = when {
+                            calibrationState.controlPointsPercent >= 70 -> Luna.Ok
+                            calibrationState.controlPointsPercent >= 45 -> Luna.Warn
+                            else -> Luna.Rec
+                        },
+                    )
+                    LabeledValue(
+                        "Posizionamento corretto",
+                        "${calibrationState.positioningPercent}%",
+                        valueColor = when {
+                            calibrationState.positioningPercent >= 75 -> Luna.Ok
+                            calibrationState.positioningPercent >= 50 -> Luna.Warn
+                            else -> Luna.Rec
+                        },
+                    )
+                    LinearProgressIndicator(
+                        progress = { calibrationState.positioningPercent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    LabeledValue(
+                        "Campioni validi",
+                        "${calibrationState.validSamples}/${calibrationState.completedSteps.coerceAtLeast(1)}",
+                    )
+                    annotatedBitmap?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Punti di controllo della calibrazione",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .border(1.dp, Luna.GlassBorder, RoundedCornerShape(14.dp)),
+                        )
+                        Hint("Verde = punti coerenti con il movimento · rosso = corrispondenze scartate.")
+                    }
                     OutlinedButton(
                         onClick = viewModel::cancelGimbalCalibration,
                         modifier = Modifier.fillMaxWidth(),
@@ -320,12 +399,14 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         )
                         LabeledValue("Qualità misure", "${calibration.qualityPercent}% · ${calibration.validSamples}/${calibration.totalSamples}")
                         LabeledValue("Ritardo / assestamento", "${calibration.responseOverheadMs} ms / ${calibration.settleMs} ms")
-                        calibration.levels.sortedBy { it.hardwareLevel }.forEach { level ->
+                        calibration.responsePoints.filter {
+                            it.intensityPercent in setOf(1, 10, 50, 100)
+                        }.sortedBy { it.intensityPercent }.forEach { point ->
                             LabeledValue(
-                                when (level.hardwareLevel) { 1 -> "Lenta"; 2 -> "Media"; else -> "Veloce" },
+                                "Intensità ${point.intensityPercent}%",
                                 "pan %+.0f px/s · tilt %+.0f px/s".format(
-                                    level.panImagePixelsPerSecond,
-                                    level.tiltImagePixelsPerSecond,
+                                    point.panImagePixelsPerSecond,
+                                    point.tiltImagePixelsPerSecond,
                                 ),
                             )
                         }
@@ -343,9 +424,9 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     }
                 }
                 Hint(
-                    "Durata circa 2 minuti. Lascia la camera libera di ruotare, inquadra una " +
-                        "scena ferma e ricca di dettagli e non toccarla. Vengono misurati Lenta, " +
-                        "Media e Veloce sui due assi; il profilo precedente resta valido se la " +
+                    "Durata circa 3 minuti. Lascia la camera libera di ruotare, inquadra una " +
+                        "scena ferma e ricca di dettagli e non toccarla. Vengono misurate le " +
+                        "intensità 1%, 5% e poi ogni 10% fino al 100%, sui due assi; il profilo precedente resta valido se la " +
                         "nuova prova viene interrotta o non è affidabile.",
                 )
                 if (calibration.isValid) {

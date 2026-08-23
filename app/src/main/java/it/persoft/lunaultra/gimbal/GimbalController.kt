@@ -60,6 +60,10 @@ class GimbalController(
     private var appliedTiltPercent = 0f
     private var appliedSinceNanos = 0L
 
+    /** Accumulatori per velocità medie inferiori all'1%, non rappresentabili dal protocollo. */
+    private var panDutyAccumulator = 0f
+    private var tiltDutyAccumulator = 0f
+
     /** Aggiorna la stima con un dato reale letto dalla camera. */
     fun onCameraPosition(state: PtzState) {
         _position.value = state
@@ -154,26 +158,28 @@ class GimbalController(
      */
     suspend fun driveTo(targetPan: Float, targetTilt: Float, stepSeconds: Float): Result<Unit> {
         integrateAppliedUntilNow()
-        val speeds = effectiveSpeeds()
+        val cfg = settings.value.gimbal
         val current = _position.value
         val dt = stepSeconds.coerceAtLeast(0.02f)
-        val panSpeed = clampSpeed((targetPan - current.pan) / dt, speeds.pan)
-        val tiltSpeed = clampSpeed((targetTilt - current.tilt) / dt, speeds.tilt)
-        val panPercent = if (speeds.pan > 0f) panSpeed / speeds.pan else 0f
-        val tiltPercent = if (speeds.tilt > 0f) tiltSpeed / speeds.tilt else 0f
-        return sendVelocity(panPercent, tiltPercent)
+        val panSpeed = clampSpeed((targetPan - current.pan) / dt, cfg.maxPanSpeedDegPerSec)
+        val tiltSpeed = clampSpeed((targetTilt - current.tilt) / dt, cfg.maxTiltSpeedDegPerSec)
+        val panFraction = if (cfg.maxPanSpeedDegPerSec > 0f) panSpeed / cfg.maxPanSpeedDegPerSec else 0f
+        val tiltFraction = if (cfg.maxTiltSpeedDegPerSec > 0f) tiltSpeed / cfg.maxTiltSpeedDegPerSec else 0f
+        val panCommand = commandForRequestedFraction(panFraction, panAxis = true)
+        val tiltCommand = commandForRequestedFraction(tiltFraction, panAxis = false)
+        return sendVelocity(panCommand, tiltCommand)
     }
 
     /** Tempo minimo stimato per raggiungere un punto, considerando entrambi gli assi. */
     fun estimatedTravelSeconds(targetPan: Float, targetTilt: Float): Float {
         integrateAppliedUntilNow()
-        val speeds = effectiveSpeeds()
+        val cfg = settings.value.gimbal
         val current = _position.value
-        val panSeconds = if (speeds.pan > 0f) {
-            abs(targetPan - current.pan) / speeds.pan
+        val panSeconds = if (cfg.maxPanSpeedDegPerSec > 0f) {
+            abs(targetPan - current.pan) / cfg.maxPanSpeedDegPerSec
         } else 0f
-        val tiltSeconds = if (speeds.tilt > 0f) {
-            abs(targetTilt - current.tilt) / speeds.tilt
+        val tiltSeconds = if (cfg.maxTiltSpeedDegPerSec > 0f) {
+            abs(targetTilt - current.tilt) / cfg.maxTiltSpeedDegPerSec
         } else 0f
         return max(panSeconds, tiltSeconds)
     }
@@ -209,6 +215,42 @@ class GimbalController(
     }
 
     /**
+     * Spostamento fra fotografie: usa il 100% sull'asse ancora lontano e lo ferma appena entra
+     * nella tolleranza. Riduce al minimo il tempo fra due scatti; video e timelapse continuano
+     * invece a ricavare dalla durata la velocità più bassa sufficiente.
+     */
+    suspend fun moveToPositionAtMaximum(targetPan: Float, targetTilt: Float): Result<Unit> {
+        stop()
+        val cfg = settings.value.gimbal
+        val periodMs = (1000L / cfg.commandRateHz.coerceIn(1, 50)).coerceAtLeast(20L)
+        val panTolerance = (cfg.maxPanSpeedDegPerSec * periodMs / 1000f).coerceAtLeast(0.35f)
+        val tiltTolerance = (cfg.maxTiltSpeedDegPerSec * periodMs / 1000f).coerceAtLeast(0.35f)
+        val timeoutMs = ((estimatedTravelSeconds(targetPan, targetTilt) * 1_600f) + 1_200f)
+            .toLong().coerceAtLeast(1_500L)
+        val startedAt = System.nanoTime()
+        while ((System.nanoTime() - startedAt) / 1_000_000L < timeoutMs) {
+            integrateAppliedUntilNow()
+            val current = _position.value
+            val panError = targetPan - current.pan
+            val tiltError = targetTilt - current.tilt
+            val panCommand = if (abs(panError) <= panTolerance) 0f else sign(panError)
+            val tiltCommand = if (abs(tiltError) <= tiltTolerance) 0f else sign(tiltError)
+            if (panCommand == 0f && tiltCommand == 0f) {
+                stop()
+                return Result.success(Unit)
+            }
+            val sent = sendVelocity(panCommand, tiltCommand)
+            if (sent.isFailure) {
+                stop()
+                return sent
+            }
+            delay(periodMs)
+        }
+        stop()
+        return Result.failure(IllegalStateException("Tempo massimo di spostamento fotografico superato"))
+    }
+
+    /**
      * Piccolo impulso a velocità controllata usato dal riallineamento fotografico.
      *
      * Non passa dalla velocità della levetta manuale: la correzione deve essere ripetibile e
@@ -220,14 +262,31 @@ class GimbalController(
         tiltPercent: Float,
         durationMs: Long,
     ): Result<Unit> {
+        return velocityPulse(panPercent, tiltPercent, durationMs, VISUAL_MAX_SPEED, 600L)
+    }
+
+    /** Impulso esteso 1..100% usato esclusivamente per costruire la curva di calibrazione. */
+    suspend fun calibrationPulse(
+        panPercent: Float,
+        tiltPercent: Float,
+        durationMs: Long,
+    ): Result<Unit> = velocityPulse(panPercent, tiltPercent, durationMs, 1f, 5_000L)
+
+    private suspend fun velocityPulse(
+        panPercent: Float,
+        tiltPercent: Float,
+        durationMs: Long,
+        maxCommand: Float,
+        maxDurationMs: Long,
+    ): Result<Unit> {
         stop()
-        val duration = durationMs.coerceIn(60L, 600L)
+        val duration = durationMs.coerceIn(60L, maxDurationMs)
         val periodMs = (1000L / settings.value.gimbal.commandRateHz.coerceIn(1, 50)).coerceAtLeast(20L)
         val startedAt = System.nanoTime()
         do {
             val sent = sendVelocity(
-                panPercent.coerceIn(-VISUAL_MAX_SPEED, VISUAL_MAX_SPEED),
-                tiltPercent.coerceIn(-VISUAL_MAX_SPEED, VISUAL_MAX_SPEED),
+                panPercent.coerceIn(-maxCommand, maxCommand),
+                tiltPercent.coerceIn(-maxCommand, maxCommand),
             )
             if (sent.isFailure) {
                 stop()
@@ -255,14 +314,42 @@ class GimbalController(
         return if (abs(requested) > max) max * sign(requested) else requested
     }
 
+    /**
+     * Il comando camera è intero: 0%, 1%, 2%… Per richieste inferiori all'1% usa pulse-density
+     * modulation fra 1% e stop, ottenendo sul lungo periodo la velocità media richiesta.
+     */
+    private fun commandForRequestedFraction(desiredFraction: Float, panAxis: Boolean): Float {
+        if (desiredFraction == 0f) {
+            if (panAxis) panDutyAccumulator = 0f else tiltDutyAccumulator = 0f
+            return 0f
+        }
+        val profile = calibration.value
+        if (!profile.isValid) return desiredFraction.coerceIn(-1f, 1f)
+        val minimumMotion = abs(profile.motionFraction(MIN_PROTOCOL_COMMAND, panAxis))
+        if (minimumMotion <= 0f || abs(desiredFraction) >= minimumMotion) {
+            return profile.commandForMotionFraction(desiredFraction, panAxis)
+        }
+        val increment = (abs(desiredFraction) / minimumMotion).coerceIn(0f, 1f)
+        val accumulated = (if (panAxis) panDutyAccumulator else tiltDutyAccumulator) + increment
+        return if (accumulated >= 1f) {
+            if (panAxis) panDutyAccumulator = accumulated - 1f else tiltDutyAccumulator = accumulated - 1f
+            MIN_PROTOCOL_COMMAND * sign(desiredFraction)
+        } else {
+            if (panAxis) panDutyAccumulator = accumulated else tiltDutyAccumulator = accumulated
+            0f
+        }
+    }
+
     /** Dead reckoning: integra la velocità comandata nella posizione stimata. */
     private fun integrate(panPercent: Float, tiltPercent: Float, dtSeconds: Float) {
         val cfg = settings.value.gimbal
-        val speeds = effectiveSpeeds()
+        val profile = calibration.value
         val current = _position.value
-        val pan = (current.pan + panPercent * speeds.pan * dtSeconds)
+        val panMotion = profile.motionFraction(panPercent, panAxis = true)
+        val tiltMotion = profile.motionFraction(tiltPercent, panAxis = false)
+        val pan = (current.pan + panMotion * cfg.maxPanSpeedDegPerSec * dtSeconds)
             .coerceIn(cfg.panMinDeg, cfg.panMaxDeg)
-        val tilt = (current.tilt + tiltPercent * speeds.tilt * dtSeconds)
+        val tilt = (current.tilt + tiltMotion * cfg.maxTiltSpeedDegPerSec * dtSeconds)
             .coerceIn(cfg.tiltMinDeg, cfg.tiltMaxDeg)
         // Il flag fromCamera resta a false: verrà rialzato dal prossimo dato reale della camera.
         _position.value = current.copy(
@@ -290,22 +377,6 @@ class GimbalController(
         appliedSinceNanos = nowNanos
     }
 
-    /**
-     * I valori in gradi/s restano il riferimento del livello Veloce; la calibrazione misura
-     * quanto Lenta e Media rispondono davvero rispetto a quello e corregge tutta l'integrazione.
-     */
-    private fun effectiveSpeeds(): EffectiveSpeeds {
-        val cfg = settings.value.gimbal
-        val measured = calibration.value.takeIf(GimbalCalibrationProfile::isValid)
-            ?.level(cfg.hardwareSpeedLevel)
-        return EffectiveSpeeds(
-            pan = cfg.maxPanSpeedDegPerSec * (measured?.panSpeedScale ?: 1f),
-            tilt = cfg.maxTiltSpeedDegPerSec * (measured?.tiltSpeedScale ?: 1f),
-        )
-    }
-
-    private data class EffectiveSpeeds(val pan: Float, val tilt: Float)
-
     companion object {
         const val STOP_VECTOR_REPETITIONS = 4
         const val STOP_VECTOR_INTERVAL_MS = 25L
@@ -314,5 +385,6 @@ class GimbalController(
         private const val POSITION_SETTLE_MARGIN_SECONDS = 0.35f
         private const val MAX_POSITION_STEPS = 3_600
         private const val VISUAL_MAX_SPEED = 0.35f
+        private const val MIN_PROTOCOL_COMMAND = 0.01f
     }
 }

@@ -218,7 +218,6 @@ fun ViewfinderScreen(
                     selfieEngaged = selfieEngaged,
                     onBootZero = viewModel::returnToBootZero,
                     onCaptureWaypoint = viewModel::captureWaypoint,
-                    onRemoveLastWaypoint = viewModel::removeLastWaypoint,
                     compact = landscape,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
@@ -362,6 +361,7 @@ fun ViewfinderScreen(
                     onShutter = viewModel::onShutter,
                     waypointCount = sequence.waypoints.size,
                     onCaptureWaypoint = viewModel::captureWaypoint,
+                    onRemoveLastWaypoint = viewModel::removeLastWaypoint,
                     onOpenCameraSettings = {
                         if (captureMode.cameraMode.isPhoto) {
                             photoSheetOpen = !photoSheetOpen

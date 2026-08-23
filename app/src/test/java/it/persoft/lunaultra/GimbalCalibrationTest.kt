@@ -2,6 +2,7 @@ package it.persoft.lunaultra
 
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
 import it.persoft.lunaultra.data.GimbalCalibrationSample
+import it.persoft.lunaultra.data.GimbalAxisLimits
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -25,7 +26,14 @@ class GimbalCalibrationTest {
             }
         }
 
-        val profile = GimbalCalibrationBuilder.build(samples, "Luna Ultra", "1.0.288", 1234L)
+        val profile = GimbalCalibrationBuilder.build(
+            samples,
+            "Luna Ultra",
+            "1.0.288",
+            1234L,
+            panLimits = limits(-57f, 235f, 48f),
+            tiltLimits = limits(-57f, 120f, 31f),
+        )
 
         assertTrue(profile.isValid)
         assertEquals(12, profile.responsePoints.size)
@@ -36,6 +44,7 @@ class GimbalCalibrationTest {
         assertEquals(0.5f, profile.commandForMotionFraction(0.4f, panAxis = true), 0.04f)
         assertEquals(35L, profile.responseOverheadMs)
         assertEquals(300L, profile.settleMs)
+        assertTrue(profile.maxAngularRate(panAxis = true) > 0f)
     }
 
     @Test
@@ -68,4 +77,13 @@ class GimbalCalibrationTest {
             settleMs = 300L,
         )
     }
+
+    private fun limits(min: Float, max: Float, seconds: Float) = GimbalAxisLimits(
+        minimumDeg = min,
+        maximumDeg = max,
+        sweepIntensityPercent = 20,
+        travelSecondsAtSweepIntensity = seconds,
+        movingPulses = 24,
+        endpointConfidencePercent = 90,
+    )
 }

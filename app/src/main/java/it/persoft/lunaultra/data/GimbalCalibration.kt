@@ -2,6 +2,7 @@ package it.persoft.lunaultra.data
 
 import kotlinx.serialization.Serializable
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.sign
 
 @Serializable
@@ -43,6 +44,29 @@ data class GimbalResponsePoint(
 )
 
 /**
+ * Estremi realmente raggiungibili di un asse e tempo misurato per attraversarli al 20%.
+ *
+ * I gradi seguono il sistema pubblicato da Insta360: lo zero è l'inquadratura frontale
+ * dell'avvio, non il punto medio meccanico. Questo spiega perché la Luna ha poca corsa a
+ * sinistra dello zero e molta più corsa a destra.
+ */
+@Serializable
+data class GimbalAxisLimits(
+    val minimumDeg: Float = 0f,
+    val maximumDeg: Float = 0f,
+    val sweepIntensityPercent: Int = 20,
+    val travelSecondsAtSweepIntensity: Float = 0f,
+    val movingPulses: Int = 0,
+    val endpointConfidencePercent: Int = 0,
+) {
+    val spanDeg: Float get() = maximumDeg - minimumDeg
+    val isValid: Boolean
+        get() = minimumDeg < 0f && maximumDeg > 0f && spanDeg > 30f &&
+            sweepIntensityPercent in 1..100 && travelSecondsAtSweepIntensity > 0.5f &&
+            movingPulses > 0 && endpointConfidencePercent >= 50
+}
+
+/**
  * Curva hardware persistente. L/M/V non entrano nel modello: il log mostra che il relativo
  * comando può andare in timeout e le prove fisiche indicano la stessa velocità. La variabile
  * affidabile è l'intensità 1..100 inviata direttamente al comando gimbal 226.
@@ -58,12 +82,15 @@ data class GimbalCalibrationProfile(
     val validSamples: Int = 0,
     val totalSamples: Int = 0,
     val responsePoints: List<GimbalResponsePoint> = emptyList(),
+    val panLimits: GimbalAxisLimits = GimbalAxisLimits(),
+    val tiltLimits: GimbalAxisLimits = GimbalAxisLimits(),
 ) {
     val isValid: Boolean
         get() = schemaVersion == CURRENT_SCHEMA && calibratedAtMs > 0L &&
             responsePoints.size >= MIN_VALID_POINTS &&
             responsePoints.any { it.intensityPercent <= 10 } &&
             responsePoints.any { it.intensityPercent == 100 } &&
+            panLimits.isValid && tiltLimits.isValid &&
             responsePoints.all {
                 abs(it.panImagePixelsPerSecond) >= MIN_RATE &&
                     abs(it.tiltImagePixelsPerSecond) >= MIN_RATE &&
@@ -99,6 +126,20 @@ data class GimbalCalibrationProfile(
         return measured.coerceIn(0f, 1f) * sign(command)
     }
 
+    /** Velocità angolare assoluta ricavata dal tempo di attraversamento dei fine corsa. */
+    fun angularRateAt(intensityPercent: Float, panAxis: Boolean): Float {
+        if (!isValid || intensityPercent <= 0f) return 0f
+        val limits = if (panAxis) panLimits else tiltLimits
+        val sweepRate = limits.spanDeg / limits.travelSecondsAtSweepIntensity
+        val referenceImageRate = abs(imageRateAt(limits.sweepIntensityPercent.toFloat(), panAxis))
+        if (referenceImageRate < MIN_RATE) return 0f
+        return sweepRate * abs(imageRateAt(intensityPercent, panAxis)) / referenceImageRate
+    }
+
+    fun maxAngularRate(panAxis: Boolean): Float = angularRateAt(100f, panAxis)
+
+    fun limitsFor(panAxis: Boolean): GimbalAxisLimits = if (panAxis) panLimits else tiltLimits
+
     /** Inversa della curva: trasforma la velocità richiesta nell'intensità da inviare. */
     fun commandForMotionFraction(desiredFraction: Float, panAxis: Boolean): Float {
         if (!isValid || desiredFraction == 0f) return desiredFraction.coerceIn(-1f, 1f)
@@ -124,7 +165,7 @@ data class GimbalCalibrationProfile(
         if (panAxis) point.panImagePixelsPerSecond else point.tiltImagePixelsPerSecond
 
     companion object {
-        const val CURRENT_SCHEMA = 2
+        const val CURRENT_SCHEMA = 3
         const val DEFAULT_SETTLE_MS = 260L
         const val MIN_SAMPLES_PER_AXIS = 2
         const val MIN_VALID_POINTS = 8
@@ -138,9 +179,11 @@ object GimbalCalibrationBuilder {
         cameraModel: String,
         firmware: String,
         calibratedAtMs: Long = System.currentTimeMillis(),
+        panLimits: GimbalAxisLimits = GimbalAxisLimits(),
+        tiltLimits: GimbalAxisLimits = GimbalAxisLimits(),
     ): GimbalCalibrationProfile {
         val usable = samples.filter(GimbalCalibrationSample::usable)
-        val points = samples.map(GimbalCalibrationSample::intensityPercent).distinct().sorted().map { intensity ->
+        val rawPoints = samples.map(GimbalCalibrationSample::intensityPercent).distinct().sorted().map { intensity ->
             val pan = usable.filter { it.intensityPercent == intensity && it.axis == GimbalCalibrationSample.AXIS_PAN }
             val tilt = usable.filter { it.intensityPercent == intensity && it.axis == GimbalCalibrationSample.AXIS_TILT }
             GimbalResponsePoint(
@@ -151,6 +194,29 @@ object GimbalCalibrationBuilder {
                 validTiltSamples = tilt.size,
             )
         }.filter { it.validPanSamples > 0 && it.validTiltSamples > 0 }
+
+        // Il rumore del matching non deve poter creare una curva che rallenta aumentando il
+        // comando (il vecchio log riportava 70% più rapido del 100%). Una regressione monotona
+        // cumulativa conserva il verso misurato e rimuove soltanto tali inversioni fisicamente
+        // impossibili.
+        var lastPanMagnitude = 0f
+        var lastTiltMagnitude = 0f
+        val panSign = signOrOne(rawPoints.firstOrNull {
+            abs(it.panImagePixelsPerSecond) >= GimbalCalibrationProfile.MIN_RATE
+        }
+            ?.panImagePixelsPerSecond ?: 1f)
+        val tiltSign = signOrOne(rawPoints.firstOrNull {
+            abs(it.tiltImagePixelsPerSecond) >= GimbalCalibrationProfile.MIN_RATE
+        }
+            ?.tiltImagePixelsPerSecond ?: 1f)
+        val points = rawPoints.map { point ->
+            lastPanMagnitude = max(lastPanMagnitude, abs(point.panImagePixelsPerSecond))
+            lastTiltMagnitude = max(lastTiltMagnitude, abs(point.tiltImagePixelsPerSecond))
+            point.copy(
+                panImagePixelsPerSecond = lastPanMagnitude * panSign,
+                tiltImagePixelsPerSecond = lastTiltMagnitude * tiltSign,
+            )
+        }
 
         return GimbalCalibrationProfile(
             calibratedAtMs = calibratedAtMs,
@@ -163,8 +229,12 @@ object GimbalCalibrationBuilder {
             validSamples = usable.size,
             totalSamples = samples.size,
             responsePoints = points,
+            panLimits = panLimits,
+            tiltLimits = tiltLimits,
         )
     }
+
+    private fun signOrOne(value: Float): Float = if (value < 0f) -1f else 1f
 
     private fun median(values: List<Float>): Float {
         if (values.isEmpty()) return 0f

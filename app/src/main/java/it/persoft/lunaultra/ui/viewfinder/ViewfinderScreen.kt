@@ -255,6 +255,7 @@ fun ViewfinderScreen(
                     onProMode = viewModel::setPhotoProMode,
                     onTimer = viewModel::setPhotoTimer,
                     onRawCapture = viewModel::setPhotoRawCapture,
+                    onZoom = viewModel::setPhotoZoom,
                     onBrightness = viewModel::setPhotoBrightness,
                     onExposureBias = viewModel::setPhotoExposureBias,
                     onWhiteBalance = viewModel::setPhotoWhiteBalance,

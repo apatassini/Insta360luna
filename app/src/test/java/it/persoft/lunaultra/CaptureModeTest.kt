@@ -82,6 +82,7 @@ class CaptureModeTest {
                 brightness = -2,
                 exposureBiasThirds = 3,
                 whiteBalanceKelvin = 6_500,
+                zoomScale = 3,
             ),
             LunaProtocolCodes.FunctionMode.NORMAL_IMAGE,
         )
@@ -91,12 +92,13 @@ class CaptureModeTest {
             .filter { it.number == 1 }
             .map { it.asInt }
 
-        assertEquals(listOf(2, 7, 13, 25, 39), optionTypes)
+        assertEquals(listOf(2, 7, 13, 25, 39, 53), optionTypes)
         assertEquals(-2, (reader.find(2, 2) as ProtoField.VarInt).asSInt)
         assertEquals(3, (reader.find(2, 7) as ProtoField.VarInt).asSInt)
         assertEquals(LunaProtocolCodes.WhiteBalance.MANUAL_KELVIN, reader.intOrNull(2, 13))
         assertEquals(LunaProtocolCodes.RawCaptureType.DNG, reader.intOrNull(2, 25))
         assertEquals(6_500, reader.intOrNull(2, 39))
+        assertEquals(3f, reader.floatOrNull(2, 53)!!, 0.001f)
         assertEquals(LunaProtocolCodes.FunctionMode.NORMAL_IMAGE, reader.intOrNull(3))
     }
 

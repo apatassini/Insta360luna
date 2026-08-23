@@ -91,6 +91,7 @@ object LunaMessages {
             .int32(1, LunaProtocolCodes.PhotographyOptionType.WHITE_BALANCE)
             .int32(1, LunaProtocolCodes.PhotographyOptionType.RAW_CAPTURE_TYPE)
             .int32(1, LunaProtocolCodes.PhotographyOptionType.WHITE_BALANCE_VALUE)
+            .int32(1, LunaProtocolCodes.PhotographyOptionType.ZOOM_SCALE)
             .message(2) {
                 sint32(LunaProtocolCodes.PhotographyOptionsField.BRIGHTNESS, if (manual) value.brightness else 0)
                 sint32(
@@ -104,6 +105,7 @@ object LunaMessages {
                 )
                 int32(LunaProtocolCodes.PhotographyOptionsField.RAW_CAPTURE_TYPE, value.rawCaptureType)
                 int32(LunaProtocolCodes.PhotographyOptionsField.WHITE_BALANCE_VALUE, kelvin)
+                double(LunaProtocolCodes.PhotographyOptionsField.ZOOM_SCALE, value.zoomScale.toDouble())
             }
             .int32(3, functionMode)
             .toByteArray()

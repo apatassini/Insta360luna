@@ -40,10 +40,11 @@ data class GimbalSettings(
     val visualWaypointCorrection: Boolean = true,
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
-    val panMinDeg: Float = -170f,
-    val panMaxDeg: Float = 170f,
-    val tiltMinDeg: Float = -90f,
-    val tiltMaxDeg: Float = 90f,
+    /** Intervallo controllabile ufficiale; una calibrazione valida lo misura e lo sostituisce. */
+    val panMinDeg: Float = -57f,
+    val panMaxDeg: Float = 235f,
+    val tiltMinDeg: Float = -57f,
+    val tiltMaxDeg: Float = 120f,
 )
 
 /** Regolazioni fotografiche essenziali mostrate nel mirino. */
@@ -61,6 +62,8 @@ data class PhotoSettings(
     val exposureBiasThirds: Int = 0,
     /** Zero = automatico, altrimenti temperatura in kelvin. */
     val whiteBalanceKelvin: Int = 0,
+    /** Arresti verificati dalla Luna: 1×, 2×, 3×, 6× e 12×. */
+    val zoomScale: Int = 1,
 )
 
 /** Impostazioni video verificate sulla Luna Ultra e applicate alla modalità attiva. */

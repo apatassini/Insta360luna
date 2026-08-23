@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.gimbal
 
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
+import it.persoft.lunaultra.data.GimbalAxisLimits
 import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.data.GimbalCalibrationSample
 import it.persoft.lunaultra.data.JsonFileStore
@@ -27,6 +28,8 @@ data class GimbalCalibrationState(
     val pausedForPreview: Boolean = false,
     val completedSteps: Int = 0,
     val totalSteps: Int = TOTAL_STEPS,
+    val overallPercent: Int = 0,
+    val phaseLabel: String = "Preparazione",
     val message: String = "",
     val error: String? = null,
     val axisLabel: String = "—",
@@ -48,7 +51,7 @@ data class GimbalCalibrationState(
     val verificationLabel: String = "In attesa della prima misura",
     val annotatedJpeg: ByteArray? = null,
 ) {
-    val progress: Float get() = if (totalSteps == 0) 0f else completedSteps.toFloat() / totalSteps
+    val progress: Float get() = overallPercent.coerceIn(0, 100) / 100f
 
     companion object {
         const val TOTAL_STEPS = 12 * 2 * 2 * 2
@@ -56,9 +59,9 @@ data class GimbalCalibrationState(
 }
 
 /**
- * Misura la risposta reale del comando gimbal dall'1% al 100%, sui due assi e in entrambe le
- * direzioni. I livelli hardware L/M/V sono esclusi perché equivalenti nelle prove e inaffidabili
- * nel log. Ogni impulso è seguito dall'inverso, mantenendo la camera vicina all'origine.
+ * Trova prima i quattro fine corsa con impulsi consecutivi al 20%, quindi misura la risposta
+ * reale del comando dall'1% al 100%. Il riferimento zero è l'inquadratura frontale di avvio:
+ * non viene confuso con il centro aritmetico della corsa asimmetrica.
  */
 class GimbalCalibrator(
     private val gimbal: GimbalController,
@@ -85,7 +88,11 @@ class GimbalCalibrator(
 
     private suspend fun runCalibration(cameraModel: String, firmware: String) {
         val samples = mutableListOf<GimbalCalibrationSample>()
-        _state.value = GimbalCalibrationState(running = true, message = "Avvio anteprima e controllo immagine…")
+        _state.value = GimbalCalibrationState(
+            running = true,
+            message = "Avvio anteprima e controllo immagine…",
+            phaseLabel = "Controllo scena",
+        )
         log.info("CALIBRAZIONE GIMBAL · AVVIO", "Profilo precedente conservato fino al completamento della nuova misura.")
         try {
             val firstFrame = awaitFrame("Avvio: attendo un fotogramma verificabile…")
@@ -94,6 +101,7 @@ class GimbalCalibrator(
                 throw IllegalStateException("La scena ha pochi dettagli: inquadra oggetti fermi con bordi ben visibili")
             }
             _state.value = _state.value.copy(
+                overallPercent = 2,
                 verificationLabel = "SCENA RICONOSCIUTA",
                 referenceFeatures = firstCheck.referenceFeatures,
                 currentFeatures = firstCheck.currentFeatures,
@@ -102,6 +110,33 @@ class GimbalCalibrator(
                 controlPointsPercent = controlPointPercent(firstCheck),
                 positioningPercent = 100,
                 annotatedJpeg = WaypointImageVerifier.annotatedCurrentJpeg(firstFrame, firstCheck),
+            )
+
+            log.info(
+                "CALIBRAZIONE · RICERCA FINE CORSA",
+                "Impulsi al ${ENDSTOP_INTENSITY_PERCENT}% fino a ${ENDSTOP_CONFIRMATIONS} verifiche consecutive senza movimento.",
+            )
+            val panLimits = calibrateAxisLimits(
+                axis = GimbalCalibrationSample.AXIS_PAN,
+                minimumDeg = OFFICIAL_PAN_MIN_DEG,
+                maximumDeg = OFFICIAL_PAN_MAX_DEG,
+                phaseStartPercent = 2,
+                phaseEndPercent = 14,
+            )
+            returnAxisToZero(GimbalCalibrationSample.AXIS_PAN, panLimits, 14, 17)
+            val tiltLimits = calibrateAxisLimits(
+                axis = GimbalCalibrationSample.AXIS_TILT,
+                minimumDeg = OFFICIAL_TILT_MIN_DEG,
+                maximumDeg = OFFICIAL_TILT_MAX_DEG,
+                phaseStartPercent = 17,
+                phaseEndPercent = 27,
+            )
+            returnAxisToZero(GimbalCalibrationSample.AXIS_TILT, tiltLimits, 27, 30)
+
+            _state.value = _state.value.copy(
+                overallPercent = 30,
+                phaseLabel = "Curva velocità 1–100%",
+                message = "Fine corsa trovati · misuro ora la curva dei comandi",
             )
 
             for (intensityIndex in INTENSITY_PERCENTAGES.indices) {
@@ -167,6 +202,8 @@ class GimbalCalibrator(
                                 _state.value = _state.value.copy(
                                     pausedForPreview = false,
                                     completedSteps = done,
+                                    overallPercent = 30 + (done * 70 / GimbalCalibrationState.TOTAL_STEPS),
+                                    phaseLabel = "Curva velocità 1–100%",
                                     message = "$intensityPercent% · ${axisLabel(axis)} · prova $done/${GimbalCalibrationState.TOTAL_STEPS}",
                                     theoreticalPan = afterPosition.pan,
                                     theoreticalTilt = afterPosition.tilt,
@@ -220,7 +257,13 @@ class GimbalCalibrator(
                 }
             }
 
-            val profile = GimbalCalibrationBuilder.build(samples, cameraModel, firmware)
+            val profile = GimbalCalibrationBuilder.build(
+                samples = samples,
+                cameraModel = cameraModel,
+                firmware = firmware,
+                panLimits = panLimits,
+                tiltLimits = tiltLimits,
+            )
             if (!profile.isValid) {
                 throw IllegalStateException(
                     "Misure insufficienti (${profile.validSamples}/${profile.totalSamples}): " +
@@ -233,6 +276,22 @@ class GimbalCalibrator(
                 buildString {
                     appendLine("Qualità: ${profile.qualityPercent}% · ${profile.validSamples}/${profile.totalSamples} campioni")
                     appendLine("Ritardo comando: ${profile.responseOverheadMs} ms · assestamento: ${profile.settleMs} ms")
+                    appendLine(
+                        "Fine corsa pan: %.1f°…%+.1f° · %.1f s al %d%%".format(
+                            profile.panLimits.minimumDeg,
+                            profile.panLimits.maximumDeg,
+                            profile.panLimits.travelSecondsAtSweepIntensity,
+                            profile.panLimits.sweepIntensityPercent,
+                        ),
+                    )
+                    appendLine(
+                        "Fine corsa tilt: %.1f°…%+.1f° · %.1f s al %d%%".format(
+                            profile.tiltLimits.minimumDeg,
+                            profile.tiltLimits.maximumDeg,
+                            profile.tiltLimits.travelSecondsAtSweepIntensity,
+                            profile.tiltLimits.sweepIntensityPercent,
+                        ),
+                    )
                     profile.responsePoints.forEach { point ->
                         appendLine(
                             "%3d%%: pan %+.1f px/s · tilt %+.1f px/s".format(
@@ -245,7 +304,13 @@ class GimbalCalibrator(
                     append("Profilo salvato in gimbal_calibration.json e attivo da ora.")
                 },
             )
-            _state.value = _state.value.copy(running = false, message = "Calibrazione salvata e attiva", error = null)
+            _state.value = _state.value.copy(
+                running = false,
+                overallPercent = 100,
+                phaseLabel = "Completata",
+                message = "Calibrazione salvata e attiva",
+                error = null,
+            )
         } catch (cancelled: CancellationException) {
             _state.value = _state.value.copy(running = false, message = "Calibrazione interrotta", error = null)
             log.warn("CALIBRAZIONE GIMBAL · INTERROTTA", "Il profilo precedente non è stato modificato.")
@@ -259,6 +324,227 @@ class GimbalCalibrator(
             job = null
         }
     }
+
+    /**
+     * Trova prima il limite negativo, poi attraversa tutta la corsa fino al limite positivo.
+     * Un fine corsa è dichiarato soltanto dopo più impulsi consecutivi che non producono più
+     * spostamento nell'immagine: una singola verifica incerta non basta a fermare la ricerca.
+     */
+    private suspend fun calibrateAxisLimits(
+        axis: String,
+        minimumDeg: Float,
+        maximumDeg: Float,
+        phaseStartPercent: Int,
+        phaseEndPercent: Int,
+    ): GimbalAxisLimits {
+        val negative = seekEndStop(
+            axis = axis,
+            direction = -1f,
+            phaseLabel = "Fine corsa ${directionLabel(axis, -1f)}",
+            phaseStartPercent = phaseStartPercent,
+            phaseEndPercent = phaseStartPercent + (phaseEndPercent - phaseStartPercent) / 3,
+            requireTravel = false,
+        )
+        val positionAtNegative = gimbal.position.value
+        gimbal.setEstimated(
+            pan = if (axis == GimbalCalibrationSample.AXIS_PAN) minimumDeg else positionAtNegative.pan,
+            tilt = if (axis == GimbalCalibrationSample.AXIS_TILT) minimumDeg else positionAtNegative.tilt,
+        )
+        log.info(
+            "CALIBRAZIONE · FINE CORSA ${directionLabel(axis, -1f).uppercase()}",
+            "Rilevato dopo ${negative.totalPulses} impulsi · coordinate fissate a %.1f°".format(minimumDeg),
+            imageJpeg = negative.annotatedJpeg,
+        )
+
+        val positive = seekEndStop(
+            axis = axis,
+            direction = 1f,
+            phaseLabel = "Corsa completa verso ${directionLabel(axis, 1f)}",
+            phaseStartPercent = phaseStartPercent + (phaseEndPercent - phaseStartPercent) / 3,
+            phaseEndPercent = phaseEndPercent,
+            requireTravel = true,
+        )
+        val positionAtPositive = gimbal.position.value
+        gimbal.setEstimated(
+            pan = if (axis == GimbalCalibrationSample.AXIS_PAN) maximumDeg else positionAtPositive.pan,
+            tilt = if (axis == GimbalCalibrationSample.AXIS_TILT) maximumDeg else positionAtPositive.tilt,
+        )
+        val limits = GimbalAxisLimits(
+            minimumDeg = minimumDeg,
+            maximumDeg = maximumDeg,
+            sweepIntensityPercent = ENDSTOP_INTENSITY_PERCENT,
+            travelSecondsAtSweepIntensity = positive.movingPulses * ENDSTOP_PULSE_MS / 1000f,
+            movingPulses = positive.movingPulses,
+            endpointConfidencePercent = positive.confidencePercent,
+        )
+        if (!limits.isValid) {
+            throw IllegalStateException("Fine corsa ${axisLabel(axis)} non affidabili: libera il movimento della camera")
+        }
+        log.info(
+            "CALIBRAZIONE · CORSA ${axisLabel(axis).uppercase()} COMPLETA",
+            buildString {
+                appendLine("Limiti: %.1f°…%+.1f° · ampiezza %.1f°".format(minimumDeg, maximumDeg, limits.spanDeg))
+                appendLine(
+                    "Tempo al ${ENDSTOP_INTENSITY_PERCENT}%: %.1f s · ${positive.movingPulses} impulsi utili".format(
+                        limits.travelSecondsAtSweepIntensity,
+                    ),
+                )
+                append("Affidabilità fine corsa: ${positive.confidencePercent}%")
+            },
+            imageJpeg = positive.annotatedJpeg,
+        )
+        return limits
+    }
+
+    private suspend fun seekEndStop(
+        axis: String,
+        direction: Float,
+        phaseLabel: String,
+        phaseStartPercent: Int,
+        phaseEndPercent: Int,
+        requireTravel: Boolean,
+    ): EndStopSearch {
+        var consecutiveStill = 0
+        var movingPulses = 0
+        var lastAnnotated: ByteArray? = null
+        var endpointConfidenceSum = 0f
+
+        for (pulse in 1..MAX_ENDSTOP_PULSES) {
+            val before = awaitFrame("Ricerca fine corsa in pausa · attendo il ritorno dell'anteprima")
+            val beforePosition = gimbal.position.value
+            _state.value = _state.value.copy(
+                phaseLabel = phaseLabel,
+                overallPercent = phaseStartPercent +
+                    ((phaseEndPercent - phaseStartPercent) * pulse / MAX_ENDSTOP_PULSES),
+                axisLabel = axisLabel(axis),
+                directionLabel = directionLabel(axis, direction),
+                intensityPercent = ENDSTOP_INTENSITY_PERCENT,
+                pulseMs = ENDSTOP_PULSE_MS,
+                theoreticalPan = beforePosition.pan,
+                theoreticalTilt = beforePosition.tilt,
+                message = "$phaseLabel · impulso $pulse",
+                verificationLabel = "CERCO MOVIMENTO NELL'IMMAGINE",
+            )
+            gimbal.calibrationPulse(
+                panPercent = if (axis == GimbalCalibrationSample.AXIS_PAN) direction * ENDSTOP_INTENSITY else 0f,
+                tiltPercent = if (axis == GimbalCalibrationSample.AXIS_TILT) direction * ENDSTOP_INTENSITY else 0f,
+                durationMs = ENDSTOP_PULSE_MS,
+            ).getOrElse { throw IllegalStateException("Ricerca fine corsa non riuscita: ${it.message}", it) }
+            val settled = captureAfterSettling()
+            val verification = WaypointImageVerifier.verify(before, settled.jpeg)
+            val still = verification != null && verification.inlierMatches >= MIN_ENDSTOP_INLIERS &&
+                verification.displacementPixels <= ENDSTOP_STILL_RADIUS_PX
+            if (still) {
+                consecutiveStill++
+                endpointConfidenceSum += verification?.confidence ?: 0f
+            } else {
+                consecutiveStill = 0
+                endpointConfidenceSum = 0f
+                movingPulses++
+            }
+            lastAnnotated = WaypointImageVerifier.annotatedCurrentJpeg(settled.jpeg, verification)
+            val afterPosition = gimbal.position.value
+            val endpointPercent = (consecutiveStill * 100 / ENDSTOP_CONFIRMATIONS).coerceIn(0, 100)
+            _state.value = _state.value.copy(
+                theoreticalPan = afterPosition.pan,
+                theoreticalTilt = afterPosition.tilt,
+                shiftX = verification?.shiftX ?: 0f,
+                shiftY = verification?.shiftY ?: 0f,
+                referenceFeatures = verification?.referenceFeatures ?: 0,
+                currentFeatures = verification?.currentFeatures ?: 0,
+                candidateMatches = verification?.candidateMatches ?: 0,
+                inlierMatches = verification?.inlierMatches ?: 0,
+                controlPointsPercent = verification?.let(::controlPointPercent) ?: 0,
+                positioningPercent = endpointPercent,
+                verificationLabel = if (still) {
+                    "NESSUN MOVIMENTO · CONFERMA $consecutiveStill/$ENDSTOP_CONFIRMATIONS"
+                } else {
+                    "MOVIMENTO RILEVATO · IL FINE CORSA NON È ANCORA QUI"
+                },
+                annotatedJpeg = lastAnnotated,
+            )
+            if (pulse % ENDSTOP_LOG_EVERY_PULSES == 0 || consecutiveStill > 0) {
+                log.info(
+                    "CALIBRAZIONE · $phaseLabel · IMPULSO $pulse",
+                    buildString {
+                        appendLine("Comando: ${ENDSTOP_INTENSITY_PERCENT}% · ${directionLabel(axis, direction)} · ${ENDSTOP_PULSE_MS} ms")
+                        appendLine("Δx %+.1f px · Δy %+.1f px".format(verification?.shiftX ?: 0f, verification?.shiftY ?: 0f))
+                        appendLine("Punti coerenti: ${verification?.inlierMatches ?: 0}/${verification?.candidateMatches ?: 0}")
+                        append("Conferme senza movimento: $consecutiveStill/$ENDSTOP_CONFIRMATIONS")
+                    },
+                    imageJpeg = lastAnnotated,
+                )
+            }
+            if (consecutiveStill >= ENDSTOP_CONFIRMATIONS) {
+                if (requireTravel && movingPulses < MIN_ENDSTOP_TRAVEL_PULSES) {
+                    throw IllegalStateException(
+                        "Il gimbal non ha attraversato la corsa ${axisLabel(axis)}: controlla il verso o eventuali ostacoli",
+                    )
+                }
+                val confidence = ((endpointConfidenceSum / ENDSTOP_CONFIRMATIONS) * 100f)
+                    .toInt().coerceIn(0, 100)
+                return EndStopSearch(
+                    totalPulses = pulse,
+                    movingPulses = movingPulses,
+                    confidencePercent = confidence,
+                    annotatedJpeg = lastAnnotated,
+                )
+            }
+            delay(BETWEEN_ENDSTOP_PULSES_MS)
+        }
+        throw IllegalStateException(
+            "Fine corsa ${directionLabel(axis, direction)} non trovato entro il limite di sicurezza",
+        )
+    }
+
+    /** Ritorna allo zero frontale usando la frazione misurata della corsa, non il suo centro. */
+    private suspend fun returnAxisToZero(
+        axis: String,
+        limits: GimbalAxisLimits,
+        phaseStartPercent: Int,
+        phaseEndPercent: Int,
+    ) {
+        val returnPulses = (limits.movingPulses * limits.maximumDeg / limits.spanDeg)
+            .toInt().coerceAtLeast(1)
+        _state.value = _state.value.copy(
+            phaseLabel = "Ritorno allo zero frontale",
+            overallPercent = phaseStartPercent,
+            axisLabel = axisLabel(axis),
+            directionLabel = directionLabel(axis, -1f),
+            intensityPercent = ENDSTOP_INTENSITY_PERCENT,
+            message = "Ritorno a 0° dopo la misura ${axisLabel(axis)}",
+        )
+        repeat(returnPulses) { index ->
+            gimbal.calibrationPulse(
+                panPercent = if (axis == GimbalCalibrationSample.AXIS_PAN) -ENDSTOP_INTENSITY else 0f,
+                tiltPercent = if (axis == GimbalCalibrationSample.AXIS_TILT) -ENDSTOP_INTENSITY else 0f,
+                durationMs = ENDSTOP_PULSE_MS,
+            ).getOrElse { throw IllegalStateException("Ritorno allo zero non riuscito: ${it.message}", it) }
+            val doneFraction = (index + 1f) / returnPulses
+            _state.value = _state.value.copy(
+                overallPercent = phaseStartPercent + ((phaseEndPercent - phaseStartPercent) * doneFraction).toInt(),
+            )
+        }
+        val current = gimbal.position.value
+        gimbal.setEstimated(
+            pan = if (axis == GimbalCalibrationSample.AXIS_PAN) 0f else current.pan,
+            tilt = if (axis == GimbalCalibrationSample.AXIS_TILT) 0f else current.tilt,
+        )
+        delay(INITIAL_SETTLE_MS)
+        _state.value = _state.value.copy(
+            theoreticalPan = gimbal.position.value.pan,
+            theoreticalTilt = gimbal.position.value.tilt,
+            overallPercent = phaseEndPercent,
+            verificationLabel = "ZERO FRONTALE RIPRISTINATO",
+        )
+    }
+
+    private data class EndStopSearch(
+        val totalPulses: Int,
+        val movingPulses: Int,
+        val confidencePercent: Int,
+        val annotatedJpeg: ByteArray?,
+    )
 
     /** Aspetta finché due frame consecutivi non mostrano più inerzia apprezzabile. */
     private suspend fun captureAfterSettling(): SettledFrame {
@@ -340,9 +626,28 @@ class GimbalCalibrator(
 
     private companion object {
         val INTENSITY_PERCENTAGES = intArrayOf(1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
-        // A intensità minime serve un impulso più lungo perché lo spostamento sia misurabile.
-        val PULSE_DURATIONS_MS = longArrayOf(5_000L, 1_600L, 800L, 400L, 270L, 200L, 160L, 135L, 115L, 100L, 90L, 80L)
+        // Il log reale mostra ~228 ms di latenza: gli impulsi da 80–160 ms della versione
+        // precedente misuravano soprattutto il ritardo, non la velocità. Tutte le intensità
+        // hanno ora una finestra utile oltre tale latenza.
+        val PULSE_DURATIONS_MS = longArrayOf(
+            5_000L, 1_600L, 900L, 600L, 500L, 450L, 400L, 360L, 340L, 320L, 300L, 300L,
+        )
         const val REPETITIONS = 2
+        const val ENDSTOP_INTENSITY_PERCENT = 20
+        const val ENDSTOP_INTENSITY = ENDSTOP_INTENSITY_PERCENT / 100f
+        const val ENDSTOP_PULSE_MS = 600L
+        const val MAX_ENDSTOP_PULSES = 180
+        const val MIN_ENDSTOP_TRAVEL_PULSES = 6
+        const val ENDSTOP_CONFIRMATIONS = 3
+        const val ENDSTOP_LOG_EVERY_PULSES = 5
+        const val MIN_ENDSTOP_INLIERS = 5
+        const val ENDSTOP_STILL_RADIUS_PX = 2.4f
+        const val BETWEEN_ENDSTOP_PULSES_MS = 120L
+        // Intervalli controllabili ufficiali (non i limiti meccanici più ampi).
+        const val OFFICIAL_PAN_MIN_DEG = -57f
+        const val OFFICIAL_PAN_MAX_DEG = 235f
+        const val OFFICIAL_TILT_MIN_DEG = -57f
+        const val OFFICIAL_TILT_MAX_DEG = 120f
         const val MIN_SCENE_FEATURES = 14
         const val INITIAL_SETTLE_MS = 140L
         const val SETTLE_CHECK_MS = 120L

@@ -320,8 +320,14 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     )
                     LabeledValue(
                         "Avanzamento",
-                        "${calibrationState.completedSteps}/${calibrationState.totalSteps} · ${(calibrationState.progress * 100).roundToInt()}%",
+                        "${(calibrationState.progress * 100).roundToInt()}% · ${calibrationState.phaseLabel}",
                     )
+                    if (calibrationState.completedSteps > 0) {
+                        LabeledValue(
+                            "Curva comandi",
+                            "${calibrationState.completedSteps}/${calibrationState.totalSteps} misure",
+                        )
+                    }
                     if (calibrationState.pausedForPreview) {
                         Hint(
                             "Calibrazione in pausa, non interrotta. Il servizio mantiene camera, " +
@@ -399,6 +405,26 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         )
                         LabeledValue("Qualità misure", "${calibration.qualityPercent}% · ${calibration.validSamples}/${calibration.totalSamples}")
                         LabeledValue("Ritardo / assestamento", "${calibration.responseOverheadMs} ms / ${calibration.settleMs} ms")
+                        LabeledValue(
+                            "Fine corsa orizzontale",
+                            "%.0f°…%+.0f° · %.1f s al %d%%".format(
+                                calibration.panLimits.minimumDeg,
+                                calibration.panLimits.maximumDeg,
+                                calibration.panLimits.travelSecondsAtSweepIntensity,
+                                calibration.panLimits.sweepIntensityPercent,
+                            ),
+                            valueColor = Luna.Ok,
+                        )
+                        LabeledValue(
+                            "Fine corsa verticale",
+                            "%.0f°…%+.0f° · %.1f s al %d%%".format(
+                                calibration.tiltLimits.minimumDeg,
+                                calibration.tiltLimits.maximumDeg,
+                                calibration.tiltLimits.travelSecondsAtSweepIntensity,
+                                calibration.tiltLimits.sweepIntensityPercent,
+                            ),
+                            valueColor = Luna.Ok,
+                        )
                         calibration.responsePoints.filter {
                             it.intensityPercent in setOf(1, 10, 50, 100)
                         }.sortedBy { it.intensityPercent }.forEach { point ->
@@ -424,8 +450,9 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     }
                 }
                 Hint(
-                    "Durata circa 3 minuti. Lascia la camera libera di ruotare, inquadra una " +
-                        "scena ferma e ricca di dettagli e non toccarla. Vengono misurate le " +
+                    "Durata indicativa 4–7 minuti. Lascia la camera completamente libera di " +
+                        "ruotare: prima cerca sinistra/destra/basso/alto con impulsi al 20%, poi " +
+                        "torna allo zero frontale. Inquadra una scena ferma e ricca di dettagli. Vengono misurate le " +
                         "intensità 1%, 5% e poi ogni 10% fino al 100%, sui due assi; il profilo precedente resta valido se la " +
                         "nuova prova viene interrotta o non è affidabile.",
                 )

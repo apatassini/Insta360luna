@@ -21,6 +21,8 @@ import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.service.LunaConnectionService
 import it.persoft.lunaultra.timelapse.InterpolationMode
+import it.persoft.lunaultra.timelapse.PanoramaPlanner
+import it.persoft.lunaultra.timelapse.PhotoFrameAspect
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
@@ -153,6 +155,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val logEntries = container.log.entries
     val ptz = container.gimbal.position
     val gimbalMoving = container.gimbal.moving
+    val gimbalPosition = container.gimbal.position
     val gimbalCalibration = container.calibrationStore.state
     val gimbalCalibrationState = container.calibrator.state
     val runState = container.engine.state
@@ -742,6 +745,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setSettleSeconds(seconds: Float) =
         container.sequenceStore.update { it.copy(settleSeconds = seconds.coerceIn(0f, 30f)) }
 
+    fun setPanoramaHorizontalDegrees(degrees: Float) =
+        container.sequenceStore.update { it.copy(panoramaHorizontalDegrees = degrees.coerceIn(1f, 360f)) }
+
+    fun setPanoramaVerticalDegrees(degrees: Float) =
+        container.sequenceStore.update { it.copy(panoramaVerticalDegrees = degrees.coerceIn(0f, 180f)) }
+
+    fun setPanoramaOverlap(percent: Int) =
+        container.sequenceStore.update { it.copy(panoramaOverlapPercent = percent.coerceIn(10, 60)) }
+
+    fun setPanoramaAspect(aspect: PhotoFrameAspect) =
+        container.sequenceStore.update { it.copy(panoramaAspect = aspect) }
+
+    /** Crea la griglia a serpentina solo se tutta la copertura rientra nei fine corsa misurati. */
+    fun createPanoramaPlan() {
+        val profile = gimbalCalibration.value
+        if (!profile.isValid) {
+            showMessage("Esegui prima la calibrazione completa dei fine corsa")
+            return
+        }
+        val seq = sequence.value
+        val current = container.gimbal.position.value
+        val zoom = settings.value.photo.zoomScale
+        val result = runCatching {
+            PanoramaPlanner.plan(
+                centerPan = current.pan,
+                centerTilt = current.tilt,
+                horizontalCoverage = seq.panoramaHorizontalDegrees,
+                verticalCoverage = seq.panoramaVerticalDegrees,
+                overlapPercent = seq.panoramaOverlapPercent,
+                zoomScale = zoom,
+                aspect = seq.panoramaAspect,
+                panLimits = profile.panLimits,
+                tiltLimits = profile.tiltLimits,
+            ).getOrThrow()
+        }
+        result.onSuccess { plan ->
+            container.sequenceStore.update {
+                it.copy(
+                    mode = ShootingMode.FOTO,
+                    waypoints = plan.waypoints,
+                    shotsPerLeg = 2,
+                    useTotalDuration = false,
+                )
+            }
+            _captureMode.value = CaptureMode.forSequence(ShootingMode.FOTO)
+            container.log.info(
+                "PANORAMA PIANIFICATO",
+                buildString {
+                    appendLine("Copertura: ${seq.panoramaHorizontalDegrees.toInt()}° × ${seq.panoramaVerticalDegrees.toInt()}°")
+                    appendLine("Zoom: ${zoom}× · FOV stimato %.1f° × %.1f°".format(
+                        plan.fieldOfView.horizontalDegrees,
+                        plan.fieldOfView.verticalDegrees,
+                    ))
+                    appendLine("Sovrapposizione: ${seq.panoramaOverlapPercent}%")
+                    append("Griglia: ${plan.columns} × ${plan.rows} · ${plan.totalShots} scatti")
+                },
+            )
+            showMessage("Panorama pronto: ${plan.columns}×${plan.rows}, ${plan.totalShots} scatti")
+        }.onFailure { error ->
+            showMessage(error.message ?: "Il panorama non entra nei fine corsa disponibili")
+        }
+    }
+
     fun setStartHoldSeconds(seconds: Float) =
         container.sequenceStore.update { it.copy(startHoldSeconds = seconds.coerceIn(0f, 30f)) }
 
@@ -768,7 +834,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             showMessage("Aggiorna i vecchi punti con ‘Qui’ oppure rimemorizzali: usano la stima precedente")
             return
         }
-        if (seq.waypoints.any { it.previewJpegBase64 == null }) {
+        if (seq.hasUnverifiedManualWaypoints) {
             showMessage("Aggiorna ogni punto con ‘Qui’: serve la foto di controllo per verificare partenza e arrivo")
             return
         }
@@ -989,6 +1055,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setPhotoWhiteBalance(kelvin: Int) = updatePhotoSettings {
         it.copy(whiteBalanceKelvin = if (kelvin == 0) 0 else kelvin.coerceIn(2_000, 10_000))
+    }
+
+    fun setPhotoZoom(scale: Int) = updatePhotoSettings {
+        it.copy(zoomScale = scale.takeIf { value -> value in listOf(1, 2, 3, 6, 12) } ?: 1)
     }
 
     private fun updatePhotoSettings(transform: (PhotoSettings) -> PhotoSettings) {

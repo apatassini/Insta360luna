@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -45,6 +46,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.timelapse.InterpolationMode
+import it.persoft.lunaultra.timelapse.LunaOptics
+import it.persoft.lunaultra.timelapse.PhotoFrameAspect
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.ui.MainViewModel
@@ -76,7 +79,13 @@ private fun waypointColor(index: Int): Color = WaypointColors[index % WaypointCo
 @Composable
 fun SequenceScreen(viewModel: MainViewModel) {
     val sequence by viewModel.sequence.collectAsState()
+    val settings by viewModel.settings.collectAsState()
+    val calibration by viewModel.gimbalCalibration.collectAsState()
+    val gimbalPosition by viewModel.gimbalPosition.collectAsState()
     val wheel = CaptureMode.forSequence(sequence.mode)
+    val panoramaFov = remember(settings.photo.zoomScale, sequence.panoramaAspect) {
+        LunaOptics.fieldOfView(settings.photo.zoomScale, sequence.panoramaAspect)
+    }
 
     Column(
         modifier = Modifier
@@ -146,7 +155,7 @@ fun SequenceScreen(viewModel: MainViewModel) {
                             "oppure svuota la lista e memorizzali di nuovo.",
                     )
                 }
-                if (sequence.waypoints.any { it.previewJpegBase64 == null }) {
+                if (sequence.hasUnverifiedManualWaypoints) {
                     Hint(
                         "I punti senza miniatura non possono essere verificati con i punti di " +
                             "controllo. Portati sulla loro inquadratura e premi ‘Qui’.",
@@ -211,6 +220,120 @@ fun SequenceScreen(viewModel: MainViewModel) {
         if (sequence.mode == ShootingMode.FOTO) {
             SectionCard(title = "Panorama a scatti", icon = LunaIcons.Panorama, accent = Luna.Pano) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Copertura panoramica predefinita")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        listOf(90f, 180f, 270f).forEach { degrees ->
+                            FilterChip(
+                                selected = sequence.panoramaHorizontalDegrees == degrees,
+                                onClick = { viewModel.setPanoramaHorizontalDegrees(degrees) },
+                                label = { Text("${degrees.toInt()}°") },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                    selectedLabelColor = Luna.Pano,
+                                ),
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        NumberField(
+                            label = "Angolo orizzontale finale",
+                            value = sequence.panoramaHorizontalDegrees.roundToInt().toString(),
+                            onValueChange = { text -> text.toFloatOrNull()?.let(viewModel::setPanoramaHorizontalDegrees) },
+                            modifier = Modifier.weight(1f),
+                        )
+                        NumberField(
+                            label = "Angolo verticale finale",
+                            value = sequence.panoramaVerticalDegrees.roundToInt().toString(),
+                            onValueChange = { text -> text.toFloatOrNull()?.let(viewModel::setPanoramaVerticalDegrees) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+
+                    Text("Zoom e lente")
+                    LunaOptics.zoomStops.chunked(3).forEach { rowStops ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            rowStops.forEach { zoom ->
+                                FilterChip(
+                                    selected = settings.photo.zoomScale == zoom,
+                                    onClick = { viewModel.setPhotoZoom(zoom) },
+                                    label = { Text("${zoom}×") },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Luna.Photo.copy(alpha = 0.20f),
+                                        selectedLabelColor = Luna.Photo,
+                                    ),
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                            repeat(3 - rowStops.size) { Spacer(modifier = Modifier.weight(1f)) }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        PhotoFrameAspect.entries.forEach { aspect ->
+                            FilterChip(
+                                selected = sequence.panoramaAspect == aspect,
+                                onClick = { viewModel.setPanoramaAspect(aspect) },
+                                label = { Text(aspect.label) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                    LabeledValue(
+                        "Ottica attiva",
+                        "${panoramaFov.lensLabel} · ${panoramaFov.equivalentFocalMm.roundToInt()} mm eq · ${panoramaFov.qualityLabel}",
+                        valueColor = Luna.Photo,
+                    )
+                    LabeledValue(
+                        "Apertura singola foto (stimata)",
+                        "%.1f° orizzontali × %.1f° verticali".format(
+                            panoramaFov.horizontalDegrees,
+                            panoramaFov.verticalDegrees,
+                        ),
+                        valueColor = Luna.Pano,
+                    )
+                    NumberField(
+                        label = "Sovrapposizione per stitching (%)",
+                        value = sequence.panoramaOverlapPercent.toString(),
+                        onValueChange = { text -> text.toIntOrNull()?.let(viewModel::setPanoramaOverlap) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (calibration.isValid) {
+                        val maxCenteredHorizontal = panoramaFov.horizontalDegrees + 2f * minOf(
+                            gimbalPosition.pan - calibration.panLimits.minimumDeg,
+                            calibration.panLimits.maximumDeg - gimbalPosition.pan,
+                        ).coerceAtLeast(0f)
+                        LabeledValue(
+                            "Massimo dalla posizione attuale",
+                            "circa ${maxCenteredHorizontal.coerceAtMost(360f).roundToInt()}° orizzontali",
+                            valueColor = if (sequence.panoramaHorizontalDegrees <= maxCenteredHorizontal) Luna.Ok else Luna.Rec,
+                        )
+                        LabeledValue(
+                            "Fine corsa calibrati",
+                            "pan %.0f°…%+.0f° · tilt %.0f°…%+.0f°".format(
+                                calibration.panLimits.minimumDeg,
+                                calibration.panLimits.maximumDeg,
+                                calibration.tiltLimits.minimumDeg,
+                                calibration.tiltLimits.maximumDeg,
+                            ),
+                        )
+                    } else {
+                        Hint("Prima crea una calibrazione completa: il percorso non viene generato senza fine corsa verificati.")
+                    }
+                    Button(
+                        onClick = viewModel::createPanoramaPlan,
+                        enabled = calibration.isValid,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(LunaIcons.Panorama, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("  Crea percorso panorama dai gradi")
+                    }
+                    Hint(
+                        "L'angolo richiesto è la copertura finale, non solo la rotazione fra il " +
+                            "primo e l'ultimo centro. La griglia usa il FOV della lente, la " +
+                            "sovrapposizione e i fine corsa; se non entra, l'app lo segnala prima di muoversi.",
+                    )
+
+                    Text("Percorso manuale")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         NumberField(
                             label = "Scatti per tratto",

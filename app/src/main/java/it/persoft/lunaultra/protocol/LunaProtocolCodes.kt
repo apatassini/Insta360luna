@@ -205,6 +205,7 @@ object LunaProtocolCodes {
         const val RECORD_RESOLUTION = 31
         const val COLOR_MODE = 35
         const val WHITE_BALANCE_VALUE = 39
+        const val ZOOM_SCALE = 53
         const val PANO_ASPECT = 98
         const val FILTER_INTENSITY = 104
     }
@@ -223,6 +224,7 @@ object LunaProtocolCodes {
         const val RECORD_RESOLUTION = 31
         const val COLOR_MODE = 35
         const val WHITE_BALANCE_VALUE = 39
+        const val ZOOM_SCALE = 53
         const val PANO_ASPECT = 98
         const val FILTER_INTENSITY = 104
     }

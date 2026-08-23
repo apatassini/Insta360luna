@@ -53,6 +53,8 @@ data class Waypoint(
     val positionModelVersion: Int = LEGACY_POSITION_MODEL_VERSION,
     /** Inquadratura 256×256 vista quando il punto è stato memorizzato, JPEG in Base64. */
     val previewJpegBase64: String? = null,
+    /** Punto assoluto generato dalla griglia panorama; non richiede una miniatura manuale. */
+    val generatedByPanoramaPlanner: Boolean = false,
 ) {
     val needsRecapture: Boolean get() = positionModelVersion < CURRENT_POSITION_MODEL_VERSION
 
@@ -95,12 +97,21 @@ data class TimelapseSequence(
      * dopo un movimento produce scatti mossi, che in una panoramica si vedono all'unione.
      */
     val settleSeconds: Float = 1.5f,
+
+    /** Copertura finale richiesta: comprende anche il campo visivo del singolo fotogramma. */
+    val panoramaHorizontalDegrees: Float = 180f,
+    val panoramaVerticalDegrees: Float = 0f,
+    val panoramaOverlapPercent: Int = 30,
+    val panoramaAspect: PhotoFrameAspect = PhotoFrameAspect.FOUR_THREE,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)
 
     val isRunnable: Boolean get() = waypoints.size >= 2
 
     val hasLegacyWaypoints: Boolean get() = waypoints.any(Waypoint::needsRecapture)
+
+    val hasUnverifiedManualWaypoints: Boolean
+        get() = waypoints.any { !it.generatedByPanoramaPlanner && it.previewJpegBase64 == null }
 
     /** Durata effettiva di ogni tratto, coerente con la modalità scelta. */
     fun legDurations(): List<Float> {

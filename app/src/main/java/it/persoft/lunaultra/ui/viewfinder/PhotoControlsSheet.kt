@@ -35,7 +35,7 @@ import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
 import kotlin.math.roundToInt
 
-private enum class PhotoControl { TIMER, FORMAT, BRIGHTNESS, EV, WHITE_BALANCE }
+private enum class PhotoControl { TIMER, FORMAT, ZOOM, BRIGHTNESS, EV, WHITE_BALANCE }
 
 /**
  * Regolazioni fotografiche compatte: una riga rimane discreta, il dettaglio della sola voce
@@ -48,6 +48,7 @@ fun PhotoControlsSheet(
     onProMode: (Boolean) -> Unit,
     onTimer: (Int) -> Unit,
     onRawCapture: (Int) -> Unit,
+    onZoom: (Int) -> Unit,
     onBrightness: (Int) -> Unit,
     onExposureBias: (Int) -> Unit,
     onWhiteBalance: (Int) -> Unit,
@@ -94,6 +95,14 @@ fun PhotoControlsSheet(
                     value = settings.timerSeconds.takeIf { it > 0 }?.let { "${it}s" } ?: "Off",
                     selected = open == PhotoControl.TIMER,
                     onClick = { open = open.toggle(PhotoControl.TIMER) },
+                )
+            }
+            item {
+                SettingChip(
+                    label = "ZOOM",
+                    value = "${settings.zoomScale}×",
+                    selected = open == PhotoControl.ZOOM,
+                    onClick = { open = open.toggle(PhotoControl.ZOOM) },
                 )
             }
             item {
@@ -145,6 +154,13 @@ fun PhotoControlsSheet(
                 selected = settings.rawCaptureType,
                 label = { if (it == LunaProtocolCodes.RawCaptureType.DNG) "JPG + DNG" else "JPG" },
                 onSelect = onRawCapture,
+            )
+
+            PhotoControl.ZOOM -> ChoiceRow(
+                values = listOf(1, 2, 3, 6, 12),
+                selected = settings.zoomScale,
+                label = { "${it}×" },
+                onSelect = onZoom,
             )
 
             PhotoControl.BRIGHTNESS -> ValueSlider(

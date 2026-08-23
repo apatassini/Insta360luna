@@ -411,6 +411,14 @@ class TimelapseEngine(
         deadlineNanos: Long? = null,
     ): Boolean {
         var currentJpeg = initialJpeg
+        if (target.generatedByPanoramaPlanner) {
+            log.info(
+                "RUN $traceId · POSIZIONE PANORAMA CALIBRATA · $phase",
+                "Waypoint generato entro i fine corsa: uso le coordinate assolute del profilo e registro il frame reale nel log.",
+                imageJpeg = currentJpeg,
+            )
+            return true
+        }
         if (!settings.value.gimbal.visualWaypointCorrection) {
             log.info("RUN $traceId · CORREZIONE VISIVA DISATTIVATA · $phase")
             logImageVerification(traceId, target, currentJpeg, "$phase · SOLA VERIFICA")

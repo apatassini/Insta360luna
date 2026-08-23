@@ -1,11 +1,19 @@
 package it.persoft.lunaultra.ui.components
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.ui.theme.Luna
 
@@ -228,4 +237,142 @@ fun Hint(text: String, modifier: Modifier = Modifier) {
         color = Luna.OnSurfaceDim,
         modifier = modifier,
     )
+}
+
+/**
+ * Un numero grande con la sua didascalia sotto.
+ *
+ * Una scheda tecnica fatta di dieci righe etichetta-valore tutte uguali si legge una riga per
+ * volta, e nessuna di quelle righe si vede con la coda dell'occhio. Le tessere invece hanno una
+ * gerarchia: il numero è grande e si prende lo sguardo, la didascalia spiega cosa sia e sta
+ * sotto, in piccolo. Servono per i pochi valori che contano davvero in una schermata — non per
+ * tutti, o tornano a essere un elenco.
+ */
+@Composable
+fun MetricTile(
+    value: String,
+    caption: String,
+    modifier: Modifier = Modifier,
+    valueColor: Color = Luna.OnSurface,
+    accent: Color? = null,
+) {
+    Column(
+        modifier = modifier
+            .background(Luna.SurfaceHigh, RoundedCornerShape(14.dp))
+            .then(
+                if (accent != null) Modifier.border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                else Modifier,
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleLarge,
+            color = valueColor,
+            maxLines = 1,
+        )
+        Text(
+            text = caption,
+            style = MaterialTheme.typography.labelSmall,
+            color = Luna.OnSurfaceDim,
+            maxLines = 2,
+        )
+    }
+}
+
+/** Due o tre tessere affiancate, tutte della stessa larghezza. */
+@Composable
+fun MetricRow(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        content = content,
+    )
+}
+
+/**
+ * Pastiglia di stato con il pallino colorato.
+ *
+ * Il pallino fa il lavoro: verde, ambra o rosso si riconoscono senza leggere, e la scritta
+ * accanto serve solo a chi vuole sapere di preciso. [pulsing] la fa respirare, e va usato solo
+ * quando qualcosa sta davvero succedendo in questo momento — altrimenti è rumore che si muove.
+ */
+@Composable
+fun StatusChip(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    pulsing: Boolean = false,
+) {
+    val alpha = if (pulsing) {
+        val transition = rememberInfiniteTransition(label = "chip")
+        transition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+            label = "chipAlpha",
+        ).value
+    } else {
+        1f
+    }
+    Row(
+        modifier = modifier
+            .background(color.copy(alpha = 0.14f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .background(color.copy(alpha = alpha), CircleShape),
+        )
+        Text(text = text, style = MaterialTheme.typography.labelSmall, color = color)
+    }
+}
+
+/**
+ * La curva delle intensità come barre, invece che come dodici righe di numeri.
+ *
+ * La forma della curva è l'informazione: se sale regolare va bene, se ha un gradino o un
+ * avvallamento c'è qualcosa da guardare — ed è esattamente il caso del comando 100, che su
+ * questa camera muove meno del 90. In un elenco di numeri quel gradino va cercato; in un
+ * grafico salta all'occhio senza leggere niente.
+ */
+@Composable
+fun CurveBars(
+    values: List<Pair<Int, Float>>,
+    modifier: Modifier = Modifier,
+    color: Color = Luna.Accent,
+    height: Dp = 64.dp,
+) {
+    if (values.isEmpty()) return
+    val maximum = values.maxOf { it.second }.takeIf { it > 0f } ?: return
+    Row(
+        modifier = modifier.fillMaxWidth().height(height),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        values.sortedBy { it.first }.forEach { (intensity, value) ->
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Bottom,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight((value / maximum).coerceIn(0.04f, 1f))
+                        .background(color.copy(alpha = 0.75f), RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)),
+                )
+                Text(
+                    text = "$intensity",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Luna.OnSurfaceDim,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
 }

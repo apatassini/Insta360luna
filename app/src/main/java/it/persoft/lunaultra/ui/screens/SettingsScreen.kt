@@ -1,10 +1,6 @@
 package it.persoft.lunaultra.ui.screens
 
-import android.graphics.BitmapFactory
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,7 +10,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -34,9 +29,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -52,6 +44,7 @@ import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
 import it.persoft.lunaultra.ui.components.SectionCard
 import it.persoft.lunaultra.ui.components.SliderRow
+import it.persoft.lunaultra.ui.components.StatusChip
 import it.persoft.lunaultra.ui.components.ToggleRow
 import it.persoft.lunaultra.ui.formatBytes
 import it.persoft.lunaultra.ui.italianLabel
@@ -308,186 +301,48 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Calibrazione gimbal", icon = LunaIcons.Center, accent = Luna.Pano) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SectionCard(
+            title = "Calibrazione gimbal",
+            icon = LunaIcons.Center,
+            accent = Luna.Pano,
+            trailing = {
+                when {
+                    calibrationState.running -> StatusChip("in corso", Luna.Amber, pulsing = true)
+                    calibration.isValid -> StatusChip("attiva", Luna.Ok)
+                    else -> StatusChip("mai fatta", Luna.Warn)
+                }
+            },
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 // Una calibrazione che fallisce dopo sette minuti deve dire perché, e deve
                 // dirlo dove si guarda: in cima, non in fondo fra i valori del profilo.
                 if (!calibrationState.running) {
-                    calibrationState.error?.let { reason ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, Luna.Rec, RoundedCornerShape(12.dp))
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Text(
-                                "CALIBRAZIONE NON SALVATA",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Luna.Rec,
-                            )
-                            Text(reason, style = MaterialTheme.typography.bodySmall)
-                            Text(
-                                "Il profilo precedente è rimasto com'era. La Diagnostica ha il " +
-                                    "log completo di questo tentativo, miniature comprese.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Luna.OnSurfaceDim,
-                            )
-                        }
-                    }
+                    calibrationState.error?.let { CalibrationFailureNotice(it) }
                 }
                 if (calibrationState.running) {
-                    val annotatedBitmap = remember(calibrationState.annotatedJpeg) {
-                        calibrationState.annotatedJpeg?.let { bytes ->
-                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        }
-                    }
-                    Text(calibrationState.message)
-                    LinearProgressIndicator(
-                        progress = { calibrationState.progress },
-                        modifier = Modifier.fillMaxWidth(),
+                    CalibrationLiveReport(
+                        state = calibrationState,
+                        onCancel = viewModel::cancelGimbalCalibration,
                     )
-                    LabeledValue(
-                        "Avanzamento",
-                        "${(calibrationState.progress * 100).roundToInt()}% · ${calibrationState.phaseLabel}",
-                    )
-                    if (calibrationState.completedSteps > 0) {
-                        LabeledValue(
-                            "Curva comandi",
-                            "${calibrationState.completedSteps}/${calibrationState.totalSteps} misure",
-                        )
-                    }
-                    if (calibrationState.pausedForPreview) {
-                        Hint(
-                            "Calibrazione in pausa, non interrotta. Il servizio mantiene camera, " +
-                                "Wi-Fi e misure; riaprendo l'app riprende dal passaggio corrente.",
-                        )
-                    }
-                    LabeledValue(
-                        "Passaggio corrente",
-                        "${calibrationState.intensityPercent}% · ${calibrationState.axisLabel} · ${calibrationState.directionLabel}",
-                    )
-                    LabeledValue("Durata impulso", "${calibrationState.pulseMs} ms")
-                    LabeledValue(
-                        "Coordinate teoriche",
-                        "pan %.2f° · tilt %.2f°".format(
-                            calibrationState.theoreticalPan,
-                            calibrationState.theoreticalTilt,
-                        ),
-                    )
-                    Text(calibrationState.verificationLabel)
-                    LabeledValue(
-                        "Spostamento immagine",
-                        "Δx %+.1f px · Δy %+.1f px".format(calibrationState.shiftX, calibrationState.shiftY),
-                    )
-                    LabeledValue(
-                        "Punti di controllo corretti",
-                        "${calibrationState.inlierMatches}/${calibrationState.candidateMatches} · ${calibrationState.controlPointsPercent}%",
-                        valueColor = when {
-                            calibrationState.controlPointsPercent >= 70 -> Luna.Ok
-                            calibrationState.controlPointsPercent >= 45 -> Luna.Warn
-                            else -> Luna.Rec
-                        },
-                    )
-                    LabeledValue(
-                        "Posizionamento corretto",
-                        "${calibrationState.positioningPercent}%",
-                        valueColor = when {
-                            calibrationState.positioningPercent >= 75 -> Luna.Ok
-                            calibrationState.positioningPercent >= 50 -> Luna.Warn
-                            else -> Luna.Rec
-                        },
-                    )
-                    LinearProgressIndicator(
-                        progress = { calibrationState.positioningPercent / 100f },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    LabeledValue(
-                        "Campioni validi",
-                        "${calibrationState.validSamples}/${calibrationState.completedSteps.coerceAtLeast(1)}",
-                    )
-                    annotatedBitmap?.let { bitmap ->
-                        Image(
-                            bitmap = bitmap.asImageBitmap(),
-                            contentDescription = "Punti di controllo della calibrazione",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .border(1.dp, Luna.GlassBorder, RoundedCornerShape(14.dp)),
-                        )
-                        Hint("Verde = punti coerenti con il movimento · rosso = corrispondenze scartate.")
-                    }
-                    OutlinedButton(
-                        onClick = viewModel::cancelGimbalCalibration,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Interrompi calibrazione")
-                    }
                 } else {
                     if (calibration.isValid) {
                         LabeledValue(
-                            "Profilo attivo",
+                            "Misurata il",
                             formatCalibrationDate(calibration.calibratedAtMs),
                             valueColor = Luna.Ok,
                         )
-                        LabeledValue("Qualità misure", "${calibration.qualityPercent}% · ${calibration.validSamples}/${calibration.totalSamples}")
-                        LabeledValue("Ritardo / assestamento", "${calibration.responseOverheadMs} ms / ${calibration.settleMs} ms")
-                        LabeledValue(
-                            "Fine corsa orizzontale",
-                            "%.0f°…%+.0f° · %.1f s al %d%%".format(
-                                calibration.panLimits.minimumDeg,
-                                calibration.panLimits.maximumDeg,
-                                calibration.panLimits.travelSecondsAtSweepIntensity,
-                                calibration.panLimits.sweepIntensityPercent,
-                            ),
-                            valueColor = Luna.Ok,
-                        )
-                        LabeledValue(
-                            "Fine corsa verticale",
-                            "%.0f°…%+.0f° · %.1f s al %d%%".format(
-                                calibration.tiltLimits.minimumDeg,
-                                calibration.tiltLimits.maximumDeg,
-                                calibration.tiltLimits.travelSecondsAtSweepIntensity,
-                                calibration.tiltLimits.sweepIntensityPercent,
-                            ),
-                            valueColor = Luna.Ok,
-                        )
-                        calibration.responsePoints.filter {
-                            it.intensityPercent in setOf(1, 10, 50, 100)
-                        }.sortedBy { it.intensityPercent }.forEach { point ->
-                            LabeledValue(
-                                "Intensità ${point.intensityPercent}%",
-                                "pan %+.0f px/s · tilt %+.0f px/s".format(
-                                    point.panImagePixelsPerSecond,
-                                    point.tiltImagePixelsPerSecond,
-                                ),
-                            )
-                        }
+                        CalibrationProfileSummary(calibration)
                     } else {
-                        LabeledValue("Profilo attivo", "Non ancora calibrato")
+                        Hint(
+                            "Senza calibrazione l'app non sa quanto muove un comando, e ogni " +
+                                "spostamento a coordinate è una stima. Panoramiche e percorsi " +
+                                "hanno bisogno di questo profilo per finire dove dicono.",
+                        )
                     }
-                    Button(
-                        onClick = viewModel::startGimbalCalibration,
+                    CalibrationStartBlock(
+                        hasProfile = calibration.isValid,
                         enabled = connected,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Icon(LunaIcons.Center, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text(if (calibration.isValid) "  Riesegui calibrazione completa" else "  Avvia calibrazione completa")
-                    }
-                }
-                Hint(
-                    "Durata indicativa 4–7 minuti. Lascia la camera completamente libera di " +
-                        "ruotare: prima cerca sinistra/destra/basso/alto con impulsi al 40%, poi " +
-                        "torna allo zero frontale. Inquadra una scena ferma e ricca di dettagli. Vengono misurate le " +
-                        "intensità 1%, 5% e poi ogni 10% fino al 100%, sui due assi; il profilo precedente resta valido se la " +
-                        "nuova prova viene interrotta o non è affidabile.",
-                )
-                if (calibration.isValid) {
-                    Hint(
-                        "Il file gimbal_calibration.json viene caricato a ogni avvio e usato " +
-                            "automaticamente per tempi, direzioni e correzione visiva dei waypoint.",
+                        onStart = viewModel::startGimbalCalibration,
                     )
                 }
             }

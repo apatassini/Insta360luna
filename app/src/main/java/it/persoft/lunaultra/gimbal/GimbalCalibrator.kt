@@ -59,13 +59,61 @@ data class GimbalCalibrationState(
     val validSamples: Int = 0,
     val verificationLabel: String = "In attesa della prima misura",
     val annotatedJpeg: ByteArray? = null,
+
+    // Cosa sta rilevando adesso. Fino a ieri il pannello mostrava punti di controllo e
+    // percentuali di somiglianza fra immagini, che erano il metodo di prima: adesso la curva si
+    // conta a impulsi contro un segnale hardware, e quello che si guarda deve essere quello.
+    /** Vero mentre si sta correndo verso un fine corsa aspettando il segnale 8302. */
+    val seekingEndstop: Boolean = false,
+    /** Vero nell'istante in cui il limite si è fatto sentire. */
+    val endstopReached: Boolean = false,
+    /** Quanti impulsi si sono dati in questa corsa, e quanti al massimo prima di arrendersi. */
+    val pulsesInRun: Int = 0,
+    val maxPulsesInRun: Int = 0,
+    /** Quante volte la camera ha annunciato un limite da quando la calibrazione è partita. */
+    val endstopSignals: Int = 0,
+    /** Vero nelle fasi che guardano davvero i fotogrammi: la ricerca dei limiti e i collaudi. */
+    val usesImages: Boolean = false,
+    /** La curva mentre si costruisce, un punto per intensità e per asse. */
+    val curve: List<CurveReading> = emptyList(),
+    /** Quello che la procedura ha accertato finora, in ordine di scoperta. */
+    val findings: List<Finding> = emptyList(),
 ) {
     val progress: Float get() = overallPercent.coerceIn(0, 100) / 100f
+
+    /** Frazione del tetto di sicurezza già consumata dalla corsa in atto. */
+    val runProgress: Float
+        get() = if (maxPulsesInRun <= 0) 0f else (pulsesInRun.toFloat() / maxPulsesInRun).coerceIn(0f, 1f)
 
     companion object {
         const val TOTAL_STEPS = 12 * 2 * 2
     }
 }
+
+/** Un punto della curva appena misurato, con entrambe le unità che servono a capirlo. */
+data class CurveReading(
+    val intensityPercent: Int,
+    val panAxis: Boolean,
+    val degreesPerSecond: Float,
+    val degreesPerPulse: Float,
+    val pulses: Int,
+)
+
+/**
+ * Un fatto accertato dalla procedura, da mostrare mentre succede.
+ *
+ * Una calibrazione lunga sette minuti in cui lo schermo dice solo «34%» chiede fiducia senza
+ * dare niente in cambio. Questi sono i fatti man mano che arrivano: dove sta un fine corsa,
+ * quanto muove un'intensità, di quanto sbaglia lo zero. Chi guarda capisce se sta andando bene
+ * molto prima della fine, e se qualcosa non torna lo vede subito invece che nel log.
+ */
+data class Finding(
+    val label: String,
+    val detail: String,
+    val kind: FindingKind = FindingKind.FACT,
+)
+
+enum class FindingKind { FACT, GOOD, WARN }
 
 /**
  * Riepilogo dei fine corsa isolato dalla procedura hardware, così anche i caratteri `%`
@@ -501,6 +549,23 @@ class GimbalCalibrator(
 
             if (degPerPulse > 0f) {
                 measured += intensity to (degPerPulse / pulseSeconds)
+                _state.value = _state.value.copy(
+                    curve = _state.value.curve + CurveReading(
+                        intensityPercent = intensity,
+                        panAxis = axis == GimbalCalibrationSample.AXIS_PAN,
+                        degreesPerSecond = degPerPulse / pulseSeconds,
+                        degreesPerPulse = degPerPulse,
+                        pulses = pulses,
+                    ),
+                )
+                addFinding(
+                    "$intensity% ${axisLabel(axis)}",
+                    "%.1f °/s · %.2f° per impulso%s".format(
+                        degPerPulse / pulseSeconds,
+                        degPerPulse,
+                        if (pulses > 0) " · $pulses impulsi contati" else " · misurato sugli ultimi impulsi",
+                    ),
+                )
                 log.info(
                     "CALIBRAZIONE · $intensity% ${axisLabel(axis).uppercase()}",
                     if (slowPath) {
@@ -515,6 +580,11 @@ class GimbalCalibrator(
                     referenceDegPerPulse = degPerPulse
                 }
             } else {
+                addFinding(
+                    "$intensity% ${axisLabel(axis)} non misurato",
+                    "Il fine corsa non è arrivato entro $MAX_CURVE_PULSES impulsi.",
+                    FindingKind.WARN,
+                )
                 log.warn(
                     "CALIBRAZIONE · $intensity% ${axisLabel(axis).uppercase()} NON MISURATO",
                     "Il fine corsa non è arrivato entro il numero massimo di impulsi.",
@@ -614,13 +684,28 @@ class GimbalCalibrator(
         maxPulses: Int,
     ): Int {
         var pulses = 0
+        _state.value = _state.value.copy(
+            seekingEndstop = true,
+            endstopReached = false,
+            pulsesInRun = 0,
+            maxPulsesInRun = maxPulses,
+            usesImages = false,
+        )
         while (pulses < maxPulses) {
             val mark = limitMonitor.mark()
             pulseOnce(axis, direction, intensityPercent)
             pulses += 1
-            _state.value = _state.value.copy(pulseMs = pulses * CURVE_PULSE_MS)
-            if (limitMonitor.reached(axis, mark)) return pulses
+            _state.value = _state.value.copy(pulseMs = pulses * CURVE_PULSE_MS, pulsesInRun = pulses)
+            if (limitMonitor.reached(axis, mark)) {
+                _state.value = _state.value.copy(
+                    seekingEndstop = false,
+                    endstopReached = true,
+                    endstopSignals = _state.value.endstopSignals + 1,
+                )
+                return pulses
+            }
         }
+        _state.value = _state.value.copy(seekingEndstop = false, endstopReached = false)
         return 0
     }
 
@@ -663,6 +748,16 @@ class GimbalCalibrator(
         val deltaDegrees = measuredDeg - nearTravelDeg
         val deltaPulses = (effectivePulses(counted) - expectedPulses).roundToInt()
         val verdict = if (abs(deltaPulses) <= ZERO_TOLERANCE_PULSES) "zero corretto" else "zero da correggere"
+        addFinding(
+            "Zero ${axisLabel(axis)} verificato",
+            "%d impulsi contati, %.1f attesi · scarto %+.1f° · %s".format(
+                counted,
+                expectedPulses,
+                deltaDegrees,
+                verdict,
+            ),
+            if (abs(deltaPulses) <= ZERO_TOLERANCE_PULSES) FindingKind.GOOD else FindingKind.WARN,
+        )
         log.info(
             "CALIBRAZIONE · VERIFICA ZERO ${axisLabel(axis).uppercase()}",
             ("Dallo zero al fine corsa %s: %d impulsi contati al %d%%, %.1f attesi per i %.0f° " +
@@ -875,6 +970,19 @@ class GimbalCalibrator(
                 },
             )
         }
+        addFinding(
+            "Andata e ritorno",
+            when {
+                comparable == 0 -> "Nessuna tappa confrontabile: la scena non permette di misurarlo."
+                worst == null -> "Nessuno scarto misurabile."
+                else -> "Scarto massimo %.2f° su %d tappe confrontabili".format(worst, comparable)
+            },
+            when {
+                worst == null -> FindingKind.WARN
+                worst <= ROUND_TRIP_GOOD_DEG -> FindingKind.GOOD
+                else -> FindingKind.WARN
+            },
+        )
         if (worst != null && worst > ROUND_TRIP_GOOD_DEG) {
             log.warn("CALIBRAZIONE · ANDATA E RITORNO", summary)
         } else {
@@ -1009,6 +1117,16 @@ class GimbalCalibrator(
         if (!limits.isValid) {
             throw IllegalStateException("Fine corsa ${axisLabel(axis)} non affidabili: libera il movimento della camera")
         }
+        addFinding(
+            "Corsa ${axisLabel(axis)} misurata",
+            "%.0f°…%+.0f° · %.0f° di corsa · affidabilità %d%%".format(
+                limits.minimumDeg,
+                limits.maximumDeg,
+                limits.spanDeg,
+                limits.endpointConfidencePercent,
+            ),
+            if (limits.endpointConfidencePercent >= 70) FindingKind.GOOD else FindingKind.WARN,
+        )
         log.info(
             "CALIBRAZIONE · CORSA ${axisLabel(axis).uppercase()} COMPLETA",
             formatAxisLimitSummary(limits),
@@ -1046,6 +1164,7 @@ class GimbalCalibrator(
             pulseMs = ENDSTOP_BACKOFF_MS,
             message = "Mi allontano dal limite prima della verifica lenta",
             verificationLabel = "FINE CORSA AGGANCIATO · PREPARO LA RIFINITURA",
+            usesImages = true,
         )
         calPulse(
             panPercent = if (axis == GimbalCalibrationSample.AXIS_PAN) -direction * ENDSTOP_BACKOFF_INTENSITY else 0f,
@@ -1118,6 +1237,7 @@ class GimbalCalibrator(
                 theoreticalTilt = beforePosition.tilt,
                 message = "$phaseLabel · impulso $pulse",
                 verificationLabel = "ATTENDO IL SEGNALE HARDWARE DI FINE CORSA",
+                usesImages = true,
             )
             val signalMark = limitMonitor.mark()
             val panCommand = if (axis == GimbalCalibrationSample.AXIS_PAN) direction * intensityPercent / 100f else 0f
@@ -1526,6 +1646,19 @@ class GimbalCalibrator(
                 .format(check.deltaPulses, check.deltaDegrees, check.intensityPercent)
     }
 
+    /**
+     * Aggiunge un fatto accertato all'elenco che si vede mentre la calibrazione va avanti.
+     *
+     * Sette minuti di barra di avanzamento chiedono fiducia senza dare niente in cambio. Questi
+     * sono i fatti man mano che arrivano — dove sta un limite, quanto muove un'intensità, di
+     * quanto sbaglia lo zero — e permettono di capire se sta andando bene molto prima della
+     * fine. I più recenti in cima, perché è lì che si guarda.
+     */
+    private fun addFinding(label: String, detail: String, kind: FindingKind = FindingKind.FACT) {
+        val updated = (listOf(Finding(label, detail, kind)) + _state.value.findings).take(MAX_FINDINGS)
+        _state.value = _state.value.copy(findings = updated)
+    }
+
     private fun axisLabel(axis: String) = if (axis == GimbalCalibrationSample.AXIS_PAN) "orizzontale" else "verticale"
     private fun directionLabel(axis: String, direction: Float): String = when {
         axis == GimbalCalibrationSample.AXIS_PAN && direction > 0f -> "destra"
@@ -1613,6 +1746,9 @@ class GimbalCalibrator(
 
         /** Sotto questo scarto il ritorno allo zero è dentro il mezzo impulso di incertezza. */
         const val ZERO_TOLERANCE_PULSES = 1
+
+        /** Quanti rilevamenti tenere sotto gli occhi: oltre, l'elenco smette di essere leggibile. */
+        const val MAX_FINDINGS = 24
 
         const val SLOW_INTENSITY_THRESHOLD = 10
         const val REFERENCE_INTENSITY_PERCENT = 40

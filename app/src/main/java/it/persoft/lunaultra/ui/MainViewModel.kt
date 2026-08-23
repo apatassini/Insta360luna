@@ -1165,8 +1165,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Le condizioni rimaste sono connessione e almeno due punti del percorso. Il comando gimbal
      * non è più una configurazione sperimentale: `0x00E2` è fissato dal protocollo verificato.
      */
-    fun startRun() {
-        val seq = sequence.value
+    fun startRun(behaviour: ShootingMode? = null) {
+        val seq = sequence.value.let { if (behaviour != null) it.copy(mode = behaviour) else it }
         if (connectionState.value != ConnectionState.CONNECTED) {
             showMessage("Connettiti alla camera prima di avviare")
             return
@@ -1187,6 +1187,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ensureCameraMode(_captureMode.value)
             container.engine.start(seq)
         }
+    }
+
+    /**
+     * La durata del percorso, cambiata dal mirino con un passo che segue la scala.
+     *
+     * Sotto i dieci secondi si va di secondo, sopra di cinque, sopra il minuto di dieci: un
+     * passo fisso costringerebbe a venti tocchi per passare da dieci secondi a tre minuti, o a
+     * non poter distinguere quattro secondi da cinque.
+     */
+    fun nudgeTotalDuration(up: Boolean) {
+        val current = sequence.value.totalDurationSeconds
+        val step = when {
+            current < 10f -> 1f
+            current < 60f -> 5f
+            else -> 10f
+        }
+        val next = if (up) current + step else current - stepBelow(current)
+        setTotalDuration(next)
+        if (!sequence.value.useTotalDuration) setUseTotalDuration(true)
+    }
+
+    /** Scendendo, il passo è quello dello scalino sotto: altrimenti 10 s tornerebbe a 5 e poi a 0. */
+    private fun stepBelow(current: Float): Float = when {
+        current <= 10f -> 1f
+        current <= 60f -> 5f
+        else -> 10f
     }
 
     fun emergencyStop() {
@@ -1264,8 +1290,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val mode = _captureMode.value
-        if (mode.usesSequence) {
-            if (runState.value.running) emergencyStop() else startRun()
+        // Un percorso memorizzato vale per qualunque cosa si stia riprendendo: se ci sono due
+        // punti e si preme registra, il gimbal li percorre. Prima lo faceva solo se la voce
+        // scelta si chiamava «Sequenza…», e memorizzare dei punti in modalità Video non
+        // produceva nessun movimento — il che rendeva i punti una cosa che si imposta e poi non
+        // succede niente.
+        val path = mode.pathBehaviour
+        if (path != null && (mode.usesSequence || sequence.value.waypoints.size >= 2)) {
+            if (runState.value.running) emergencyStop() else startRun(path)
             return
         }
         val timerSeconds = settings.value.photo.timerSeconds

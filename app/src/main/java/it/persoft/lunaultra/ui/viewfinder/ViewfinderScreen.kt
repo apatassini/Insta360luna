@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.ui.MainViewModel
+import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.ui.Panel
 import it.persoft.lunaultra.ui.components.HudPill
 import it.persoft.lunaultra.ui.components.PreviewSurface
@@ -108,9 +109,14 @@ fun ViewfinderScreen(
     }
 
     val sequenceReady = sequence.isRunnable
+    // Questa modalità, adesso, percorrerà i punti: o perché è una voce «Sequenza…», o perché i
+    // punti ci sono e la modalità sa cosa farne. Da qui dipende cosa mostra il pulsante di
+    // scatto — l'avanzamento del percorso invece del pallino di registrazione.
+    val followsPath = captureMode.pathBehaviour != null &&
+        (captureMode.usesSequence || sequenceReady)
     val shutterReady = connected && (!captureMode.usesSequence || sequenceReady || run.running)
-    val shutterActive = if (captureMode.usesSequence) run.running else recording || photoCountdown > 0
-    val shutterProgress = if (captureMode.usesSequence && run.running) run.overallProgress else 0f
+    val shutterActive = if (followsPath) run.running else recording || photoCountdown > 0
+    val shutterProgress = if (run.running) run.overallProgress else 0f
 
     BoxWithConstraints(modifier = modifier.fillMaxSize().background(Luna.Bg)) {
         val landscape = maxWidth > maxHeight
@@ -379,6 +385,26 @@ fun ViewfinderScreen(
                 )
             }
 
+            // Il percorso e la sua durata, sull'immagine e sopra i comandi: compare solo quando
+            // i punti ci sono, e allora è la cosa che si aggiusta fra una passata e l'altra.
+            val pathDock: @Composable () -> Unit = {
+                PathDock(
+                    waypointCount = sequence.waypoints.size,
+                    totalSeconds = sequence.effectiveTotalSeconds(),
+                    perLegSeconds = !sequence.useTotalDuration,
+                    behaviourLabel = captureMode.pathBehaviour?.let { behaviour ->
+                        when (behaviour) {
+                            ShootingMode.VIDEO -> "registra percorrendoli"
+                            ShootingMode.FOTO -> "scatta a ogni punto"
+                            ShootingMode.TIMELAPSE_CAMERA -> "timelapse lungo il percorso"
+                        }
+                    },
+                    accent = captureMode.color,
+                    onNudge = viewModel::nudgeTotalDuration,
+                    onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
+                )
+            }
+
             if (landscape) {
                 Box(
                     modifier = Modifier
@@ -389,15 +415,29 @@ fun ViewfinderScreen(
                 ) {
                     captureBar()
                 }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 12.dp, bottom = 12.dp + bottomInset),
+                ) {
+                    pathDock()
+                }
             } else {
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .background(Luna.Band)
-                        .padding(bottom = bottomInset),
+                        .fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    captureBar()
+                    Box(modifier = Modifier.padding(bottom = 8.dp)) { pathDock() }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Luna.Band)
+                            .padding(bottom = bottomInset),
+                    ) {
+                        captureBar()
+                    }
                 }
             }
         } else if (run.running) {

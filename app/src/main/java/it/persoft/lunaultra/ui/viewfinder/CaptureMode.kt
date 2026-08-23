@@ -25,8 +25,18 @@ enum class CaptureMode(
     val hint: String,
     /** In che modalità va messa la camera per questa voce. */
     val cameraMode: CameraMode,
-    /** Non nullo = la modalità percorre i punti memorizzati con questo comportamento. */
+    /** Non nullo = la modalità percorre *sempre* i punti memorizzati, e senza non parte. */
     val sequenceMode: ShootingMode?,
+    /**
+     * Come si comporta questa modalità quando ci sono dei punti memorizzati.
+     *
+     * I punti non sono una modalità a parte: sono un percorso, e un percorso vale per qualunque
+     * cosa si stia riprendendo. Se ci sono due punti e si preme registra, il gimbal deve andare
+     * dal primo al secondo mentre registra — non restare fermo perché la voce scelta si chiama
+     * «Video» invece di «Sequenza video». Nullo solo dove muovere il gimbal rovinerebbe la
+     * ripresa: la panoramica interna della camera la fa la camera, ruotandosi da sé.
+     */
+    val pathMode: ShootingMode? = null,
     /** Usa il timelapse interno della camera invece della registrazione normale. */
     val cameraTimelapse: Boolean = false,
 ) {
@@ -38,51 +48,58 @@ enum class CaptureMode(
         hint = "La panoramica della camera: sferica a 360° oppure 2:1, si sceglie qui sotto.",
         cameraMode = CameraMode.PANORAMA,
         sequenceMode = null,
+        // La panoramica interna ruota il gimbal per conto suo: un percorso in più la rovina.
+        pathMode = null,
     ),
     FOTO(
         label = "Foto",
         shortLabel = "FOTO",
         icon = LunaIcons.Photo,
         color = Luna.Photo,
-        hint = "Scatto singolo normale.",
+        hint = "Scatto singolo normale. Con dei punti memorizzati li percorre scattando a ognuno.",
         cameraMode = CameraMode.FOTO,
         sequenceMode = null,
+        pathMode = ShootingMode.FOTO,
     ),
     VIDEO(
         label = "Video",
         shortLabel = "VIDEO",
         icon = LunaIcons.Video,
         color = Luna.Movie,
-        hint = "Registrazione normale: parte e si ferma con lo stesso tasto.",
+        hint = "Registrazione normale. Con dei punti memorizzati registra percorrendoli.",
         cameraMode = CameraMode.VIDEO,
         sequenceMode = null,
+        pathMode = ShootingMode.VIDEO,
     ),
     PURE_VIDEO(
         label = "PureVideo",
         shortLabel = "PURE",
         icon = LunaIcons.Video,
         color = Luna.Movie,
-        hint = "Ripresa ottimizzata per poca luce, in modalità Standard.",
+        hint = "Ripresa ottimizzata per poca luce. Con dei punti memorizzati li percorre.",
         cameraMode = CameraMode.PURE_VIDEO,
         sequenceMode = null,
+        pathMode = ShootingMode.VIDEO,
     ),
     SLOW_MOTION(
         label = "Slow-motion",
         shortLabel = "SLOW",
         icon = LunaIcons.Video,
         color = Luna.Movie,
-        hint = "Alta velocità: 4K/2,7K fino a 120 fps e 1080p fino a 240 fps.",
+        hint = "Alta velocità: 4K/2,7K fino a 120 fps e 1080p fino a 240 fps. Segue i punti.",
         cameraMode = CameraMode.SLOW_MOTION,
         sequenceMode = null,
+        pathMode = ShootingMode.VIDEO,
     ),
     TIMELAPSE(
         label = "Timelapse",
         shortLabel = "TL",
         icon = LunaIcons.Timelapse,
         color = Luna.Lapse,
-        hint = "Timelapse interno della camera, a gimbal fermo.",
+        hint = "Timelapse interno della camera. Con dei punti memorizzati li percorre mentre gira.",
         cameraMode = CameraMode.TIMELAPSE,
         sequenceMode = null,
+        pathMode = ShootingMode.TIMELAPSE_CAMERA,
         cameraTimelapse = true,
     ),
     SEQUENZA_VIDEO(
@@ -117,6 +134,15 @@ enum class CaptureMode(
 
     /** Le modalità guidate hanno bisogno dei punti: senza, lo scatto spiega perché non parte. */
     val usesSequence: Boolean get() = sequenceMode != null
+
+    /**
+     * Come va percorso il percorso, se ci sono dei punti. Nullo = questa modalità non li segue.
+     *
+     * Le voci «Sequenza …» restano perché dichiarano l'intenzione — con quelle senza punti lo
+     * scatto spiega cosa manca invece di riprendere da fermo — ma non sono più l'unico modo di
+     * usare un percorso.
+     */
+    val pathBehaviour: ShootingMode? get() = sequenceMode ?: pathMode
 
     /** La panoramica della camera è l'unica con la scelta fra sferica e 2:1. */
     val hasPanoAspect: Boolean get() = cameraMode.hasPanoAspect && !usesSequence

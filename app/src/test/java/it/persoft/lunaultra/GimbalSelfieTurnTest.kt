@@ -5,8 +5,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * La corsa del pan è asimmetrica (-57°…+235°): il mezzo giro non può scegliere il verso a caso.
- * Sbagliarlo non dà errore, dà una camera che si ferma contro il fine corsa a metà strada.
+ * Ripiego del mezzo giro quando l'azione nativa è disattivata.
+ *
+ * La corsa del pan è asimmetrica (-57°…+235°): il verso non si può scegliere a caso. Sbagliarlo
+ * non dà errore, dà una camera che si ferma contro il fine corsa a metà strada.
  */
 class GimbalSelfieTurnTest {
 

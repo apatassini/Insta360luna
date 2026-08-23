@@ -57,6 +57,7 @@ fun GimbalDock(
     onStop: () -> Unit,
     onZero: () -> Unit,
     onSelfie: () -> Unit,
+    selfieEngaged: Boolean,
     onCaptureWaypoint: () -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
@@ -106,10 +107,13 @@ fun GimbalDock(
                 )
                 HudIconButton(
                     icon = LunaIcons.Selfie,
-                    contentDescription = "Mezzo giro: inquadra dalla parte opposta",
+                    contentDescription = if (selfieEngaged) "Torna a inquadrare in avanti"
+                    else "Selfie: inquadra dalla parte opposta",
                     onClick = onSelfie,
                     enabled = enabled,
+                    selected = selfieEngaged,
                     size = 34.dp,
+                    activeColor = Luna.Photo,
                 )
             }
             GimbalJoystick(
@@ -229,7 +233,7 @@ private fun GimbalOptions(
         )
 
         Text(
-            text = "0° è il fronte del corpo camera, non il centro della corsa (-57°…+235°).",
+            text = "Ricentra agisce sul lato in cui sei: dal selfie ricentra il selfie.",
             style = MaterialTheme.typography.labelSmall,
             color = Luna.OnSurfaceDim,
         )

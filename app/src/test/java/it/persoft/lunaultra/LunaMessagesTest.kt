@@ -41,6 +41,18 @@ class LunaMessagesTest {
         )
     }
 
+    /**
+     * I tre valori misurati sulla camera. Il selfie è un interruttore: se un giorno il numero
+     * cambia, questo test è il posto in cui la modifica va dichiarata invece che subita.
+     */
+    @Test
+    fun `le tre azioni note del gimbal hanno i numeri misurati sulla camera`() {
+        assertEquals(1, LunaMessages.GimbalAction.MOVE)
+        assertEquals(2, LunaMessages.GimbalAction.BACK_CENTER)
+        assertEquals(3, LunaMessages.GimbalAction.SELFIE_TOGGLE)
+        assertEquals("0803", Hex.encode(LunaMessages.gimbalAction(3)).replace(" ", "").lowercase())
+    }
+
     @Test
     fun `un'azione arbitraria porta solo il campo 1`() {
         val fields = ProtoReader(LunaMessages.gimbalAction(7)).fields()

@@ -19,6 +19,7 @@ import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.preview.PreviewState
 import it.persoft.lunaultra.protocol.Hex
+import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.service.LunaConnectionService
 import it.persoft.lunaultra.timelapse.InterpolationMode
@@ -604,6 +605,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         else -> "veloce"
     }
 
+    private var gimbalProbeJob: Job? = null
+
     fun jogStop() {
         viewModelScope.launch { container.gimbal.stop() }
     }
@@ -626,15 +629,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Mezzo giro del pan: l'inquadratura passa dall'altra parte, per il selfie. */
+    /** Lato in cui l'app crede di essere: è una convinzione, la camera non lo pubblica. */
+    val selfieEngaged: StateFlow<Boolean> = container.gimbal.selfieEngaged
+
+    /** Commuta fra fronte e selfie. Con l'azione nativa è un interruttore, non una rotazione. */
     fun selfieTurn() {
         viewModelScope.launch {
-            val native = settings.value.gimbal.selfieActionCode > 0
             container.gimbal.selfieTurn()
                 .onSuccess {
                     showMessage(
-                        if (native) "Selfie: azione nativa ${settings.value.gimbal.selfieActionCode}"
-                        else "Mezzo giro eseguito · pan %.0f°".format(container.gimbal.position.value.pan),
+                        if (selfieEngaged.value) "Selfie: la camera guarda dalla tua parte"
+                        else "Fronte: la camera guarda in avanti",
                     )
                 }
                 .onFailure { showMessage("Mezzo giro non riuscito: ${it.message}") }
@@ -642,35 +647,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Invia una singola azione del gimbal per numero, dalla Diagnostica.
+     * Prova le azioni del gimbal, una o un intervallo, dalla Diagnostica.
      *
-     * Serve a trovare il comando nativo del selfie: dei valori del campo 1 di
-     * `GIMBAL_CONTROL` ne conosciamo due, e l'unico modo di scoprire gli altri è provarli
-     * guardando l'anteprima. La miniatura prima/dopo finisce nel log.
+     * È così che sono stati trovati i tre numeri che conosciamo: nessuna estrazione pubblica
+     * dei `.proto` contiene il gimbal, quindi l'unico modo onesto è provarli sulla camera
+     * guardando l'anteprima. Ogni azione lascia nel log la miniatura prima e dopo, e la
+     * scansione ricentra fra un tentativo e l'altro perché ognuno parta dalla stessa
+     * inquadratura — senza, dopo la prima azione che muove non si capisce più chi ha fatto cosa.
      */
-    fun probeGimbalAction(action: Int) {
-        viewModelScope.launch {
-            val before = container.preview.captureThumbnailJpeg()
+    fun probeGimbalActions(from: Int, to: Int = from) {
+        if (gimbalProbeJob?.isActive == true) {
+            showMessage("Scansione delle azioni già in corso")
+            return
+        }
+        val first = from.coerceIn(0, 127)
+        val last = to.coerceIn(first, 127).coerceAtMost(first + MAX_GIMBAL_ACTION_SPAN)
+        gimbalProbeJob = viewModelScope.launch {
             container.log.info(
-                "AZIONE GIMBAL $action · PRIMA",
-                "Invio GIMBAL_CONTROL campo 1 = $action.",
-                imageJpeg = before,
+                "AZIONI GIMBAL · SCANSIONE $first…$last",
+                "Note: 1 muove, 2 ricentra sul lato corrente, 3 commuta fronte/selfie.",
             )
-            container.commands.gimbalAction(action)
-                .onFailure {
-                    container.log.warn("AZIONE GIMBAL $action · NON INVIATA", it.message)
-                    showMessage("Azione $action non inviata: ${it.message}")
-                    return@launch
+            for (action in first..last) {
+                if (action == LunaMessages.GimbalAction.MOVE) {
+                    container.log.info("AZIONE GIMBAL 1 · SALTATA", "È il movimento: senza assi non fa nulla.")
+                    continue
                 }
-            delay(GIMBAL_ACTION_PROBE_WAIT_MS)
-            val after = container.preview.captureThumbnailJpeg()
-            val verification = WaypointImageVerifier.verify(before, after)
-            container.log.info(
-                "AZIONE GIMBAL $action · DOPO",
-                verification?.describe() ?: "Anteprima non confrontabile: guarda lo schermo della camera.",
-                imageJpeg = WaypointImageVerifier.annotatedCurrentJpeg(after, verification),
-            )
-            showMessage("Azione $action inviata · confronta le due miniature nel log")
+                val before = container.preview.captureThumbnailJpeg()
+                container.log.info(
+                    "AZIONE GIMBAL $action · PRIMA",
+                    "Invio GIMBAL_CONTROL campo 1 = $action.",
+                    imageJpeg = before,
+                )
+                val sent = container.commands.gimbalAction(action)
+                if (sent.isFailure) {
+                    container.log.warn("AZIONE GIMBAL $action · NON INVIATA", sent.exceptionOrNull()?.message)
+                    continue
+                }
+                delay(GIMBAL_ACTION_PROBE_WAIT_MS)
+                val after = container.preview.captureThumbnailJpeg()
+                val verification = WaypointImageVerifier.verify(before, after)
+                val moved = verification != null &&
+                    verification.displacementPixels > GIMBAL_ACTION_MOVED_PX
+                container.log.info(
+                    "AZIONE GIMBAL $action · ${if (moved) "HA MOSSO" else "nessun movimento visibile"}",
+                    verification?.describe() ?: "Anteprima non confrontabile: guarda lo schermo della camera.",
+                    imageJpeg = WaypointImageVerifier.annotatedCurrentJpeg(after, verification),
+                )
+                if (action != last) {
+                    container.gimbal.recenter()
+                    delay(GIMBAL_ACTION_PROBE_WAIT_MS)
+                    container.gimbal.setEstimated(0f, 0f)
+                }
+            }
+            showMessage("Scansione $first…$last finita · leggi il log")
         }
     }
 
@@ -1837,6 +1866,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Attesa fra l'azione di prova e la miniatura di confronto: il gimbal deve arrivare. */
         const val GIMBAL_ACTION_PROBE_WAIT_MS = 4_000L
+
+        /** Sopra questo scarto l'azione ha mosso qualcosa; sotto, non è successo niente. */
+        const val GIMBAL_ACTION_MOVED_PX = 12f
+
+        /** Una scansione a mano non deve poter diventare un giro di mezz'ora sulla camera. */
+        const val MAX_GIMBAL_ACTION_SPAN = 16
 
         /** Quanto resta valido un elenco della libreria prima di rifare il giro. */
         const val GALLERY_FRESH_MS = 60_000L

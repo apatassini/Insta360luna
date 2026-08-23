@@ -253,22 +253,23 @@ private fun GimbalCodeCard(viewModel: MainViewModel) {
 /**
  * Le azioni del gimbal, per numero.
  *
- * Del campo 1 di `GIMBAL_CONTROL` conosciamo due valori: 1 muove, 2 torna allo zero hardware.
- * L'app ufficiale ha anche il mezzo giro per il selfie, quindi un terzo valore quasi certamente
- * esiste — ma nessuna cattura pubblica lo mostra, e indovinarlo nel codice sarebbe inventarlo.
- * Qui lo si prova sulla camera: ogni invio lascia nel log la miniatura prima e dopo, e quando
- * una gira l'inquadratura di 180° si scrive il suo numero qui sotto.
+ * Nessuna estrazione pubblica dei `.proto` contiene il gimbal: quella più completa viene da una
+ * ONE RS, che il gimbal non ce l'ha. I tre numeri che conosciamo — 1 muove, 2 ricentra sul lato
+ * corrente, 3 commuta fronte/selfie — sono stati trovati qui, provandoli sulla camera. Gli altri
+ * si trovano allo stesso modo: la scansione ricentra fra un tentativo e l'altro, così ogni
+ * azione parte dalla stessa inquadratura e il log si legge senza indovinare chi ha fatto cosa.
  */
 @Composable
 private fun GimbalActionCard(viewModel: MainViewModel) {
     val settings by viewModel.settings.collectAsState()
-    var action by remember { mutableStateOf("3") }
+    var from by remember { mutableStateOf("4") }
+    var to by remember { mutableStateOf("12") }
 
     SectionCard(title = "Azioni del gimbal") {
         Text(
-            text = "Il comando 226 porta nel campo 1 un'azione: 1 è il movimento, 2 lo zero " +
-                "hardware. Prova gli altri numeri con l'anteprima accesa e la camera libera di " +
-                "girare: il log tiene la miniatura prima e dopo ogni invio.",
+            text = "Il comando 226 porta nel campo 1 un'azione. Conosciute: 1 movimento, " +
+                "2 ricentra il lato corrente, 3 fronte/selfie. Prova le altre con l'anteprima " +
+                "accesa e la camera libera di girare.",
             style = MaterialTheme.typography.bodySmall,
         )
         Row(
@@ -276,25 +277,24 @@ private fun GimbalActionCard(viewModel: MainViewModel) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            NumberField(
-                label = "Azione",
-                value = action,
-                onValueChange = { action = it },
-                modifier = Modifier.weight(1f),
-            )
+            NumberField(label = "Da", value = from, onValueChange = { from = it }, modifier = Modifier.weight(1f))
+            NumberField(label = "A", value = to, onValueChange = { to = it }, modifier = Modifier.weight(1f))
             Button(
-                onClick = { action.trim().toIntOrNull()?.let(viewModel::probeGimbalAction) },
+                onClick = {
+                    val first = from.trim().toIntOrNull() ?: return@Button
+                    viewModel.probeGimbalActions(first, to.trim().toIntOrNull() ?: first)
+                },
                 modifier = Modifier.weight(1f),
-            ) { Text("Prova") }
+            ) { Text("Scansiona") }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             OutlinedButton(
-                onClick = { action.trim().toIntOrNull()?.let(viewModel::setSelfieActionCode) },
+                onClick = { from.trim().toIntOrNull()?.let(viewModel::setSelfieActionCode) },
                 modifier = Modifier.weight(1f),
-            ) { Text("È il selfie") }
+            ) { Text("«Da» è il selfie") }
             OutlinedButton(
                 onClick = { viewModel.setSelfieActionCode(0) },
                 modifier = Modifier.weight(1f),
@@ -303,12 +303,13 @@ private fun GimbalActionCard(viewModel: MainViewModel) {
         LabeledValue(
             "Azione selfie",
             if (settings.gimbal.selfieActionCode > 0) settings.gimbal.selfieActionCode.toString()
-            else "non trovata · mezzo giro calcolato",
+            else "disattivata · mezzo giro calcolato",
         )
         Text(
-            text = "Finché l'azione nativa non è nota, il pulsante selfie del mirino ruota il " +
-                "pan di ${settings.gimbal.selfieTurnDeg.toInt()}° usando il profilo di " +
-                "calibrazione, scegliendo il verso che resta dentro i fine corsa.",
+            text = "Con l'azione nativa il mezzo giro è immediato e la camera decide dove " +
+                "fermarsi. A zero il pulsante ruota il pan di " +
+                "${settings.gimbal.selfieTurnDeg.toInt()}° con il profilo di calibrazione: " +
+                "più lento, meno preciso, ma non dipende da nessun numero trovato provando.",
             style = MaterialTheme.typography.bodySmall,
         )
     }

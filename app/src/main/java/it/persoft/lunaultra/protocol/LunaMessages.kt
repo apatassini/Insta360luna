@@ -269,19 +269,34 @@ object LunaMessages {
     /**
      * Azioni del gimbal trasportate dal campo 1 di `GIMBAL_CONTROL`.
      *
-     * Di questo enum sono confermati due valori soltanto, ed è il motivo per cui non ne trovi
-     * altri qui: [MOVE] è il vettore della levetta, [BACK_CENTER] è lo zero hardware. Il
-     * comando nativo che gira di 180° per il selfie esiste quasi certamente con un altro
-     * valore, ma nessuna cattura pubblica lo mostra: si cerca con la carta *Azioni del gimbal*
-     * della Diagnostica e, una volta trovato, si scrive in `GimbalSettings.selfieActionCode`.
-     * Fino ad allora il selfie lo fa la rotazione di 180° calcolata sul profilo di calibrazione.
+     * Tre valori misurati sulla Luna Ultra, non dedotti da un `.proto`: l'estrazione pubblica
+     * più completa (`RigacciOrg/insta360-wifi-api`) viene da una ONE RS e nel suo `MessageCode`
+     * il gimbal non esiste proprio — 78 `PHONE_COMMAND_*` e nessuno che lo nomini. Questi
+     * numeri vengono dalla camera vera, provati con la carta *Azioni del gimbal*.
      */
     object GimbalAction {
         /** Vettore continuo della levetta: il payload porta anche il campo 2 con gli assi. */
         const val MOVE = 1
 
-        /** `GIMBAL_ACTION_BACK_CENTER`: lo stesso zero hardware del doppio clic fisico. */
+        /**
+         * Ritorno al centro, **relativo al lato in cui la camera si trova**.
+         *
+         * Non è uno zero assoluto: dal fronte ricentra sul fronte, dal selfie ricentra sul
+         * selfie. Serve a raddrizzare l'inquadratura, non a sapere da che parte si guarda —
+         * ed è il motivo per cui la posizione stimata dopo un [SELFIE_TOGGLE] va ricostruita
+         * invece che dedotta.
+         */
         const val BACK_CENTER = 2
+
+        /**
+         * Mezzo giro fra fronte e selfie, ed è un **interruttore**: lanciato una volta gira
+         * dall'altra parte, rilanciato torna indietro. Misurato sulla camera.
+         *
+         * La camera non dice da che lato si trova: nessuna notifica letta finora lo riporta.
+         * Lo stato lo tiene l'app, e resta una convinzione — se qualcuno gira la camera dal
+         * suo schermo, l'app non se ne accorge.
+         */
+        const val SELFIE_TOGGLE = 3
     }
 
     /**

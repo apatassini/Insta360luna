@@ -41,13 +41,14 @@ data class GimbalSettings(
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
     /**
-     * Azione nativa del gimbal che gira di 180° per il selfie, se è stata trovata.
+     * Azione nativa che commuta fra fronte e selfie. Misurata sulla Luna Ultra: è la 3.
      *
-     * 0 significa "non la conosciamo": il selfie viene allora eseguito ruotando il pan di 180°
-     * con il profilo di calibrazione. Il valore si scopre con la carta *Azioni del gimbal*
-     * della Diagnostica e non viene indovinato qui.
+     * Resta configurabile perché è un numero trovato provando, non letto in un `.proto`: se
+     * un firmware la sposta, si cambia da Diagnostica senza ricompilare. Zero disattiva
+     * l'azione nativa e fa ruotare il pan di 180° con il profilo di calibrazione — più lento
+     * e meno preciso, ma funziona anche senza conoscere il numero.
      */
-    val selfieActionCode: Int = 0,
+    val selfieActionCode: Int = 3,
 
     /** Rotazione applicata dal comando selfie quando l'azione nativa non è nota. */
     val selfieTurnDeg: Float = 180f,

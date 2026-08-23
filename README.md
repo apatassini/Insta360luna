@@ -519,29 +519,57 @@ condivide lo stesso problema del comando di controllo — nome noto, numero no.
 Le velocità massime in °/s si tarano in Impostazioni → Movimento manuale (o in Diagnostica,
 insieme al resto della taratura fine): cronometra una rotazione completa e correggi. Da quelle dipende la corrispondenza fra la durata impostata e il movimento reale.
 
-### Ricentra e mezzo giro
+### Le azioni del gimbal: 1, 2, 3
 
-Lo **zero hardware** (`GIMBAL_CONTROL` con campo 1 = 2, payload `08 02`) è il fronte del corpo
-camera, **non** il centro della corsa: l'intervallo controllabile è -57°…+235°, quindi 0° sta a
-un sesto della corsa, non a metà. Se la camera è appoggiata con il fronte rivolto a chi la usa,
-ricentrare la fa guardare proprio lui — è dove guarda lo zero, non un comando sbagliato.
+Il campo 1 di `GIMBAL_CONTROL` porta un'azione. **Nessuna estrazione pubblica dei `.proto`
+contiene il gimbal** — la più completa (`RigacciOrg/insta360-wifi-api`) viene da una ONE RS, e
+quella camera il gimbal non ce l'ha: 78 `PHONE_COMMAND_*` e nemmeno uno che lo nomini. Questi
+tre numeri vengono quindi dalla camera vera, provati uno a uno:
 
-Per questo il mirino ha due pulsanti **sempre in vista** sopra la levetta:
+| Azione | Payload | Cosa fa |
+|---|---|---|
+| 1 | `08 01 12 …` | vettore continuo pan/tilt e stop |
+| 2 | `08 02` | ricentra **il lato in cui la camera si trova** |
+| 3 | `08 03` | commuta fronte ↔ selfie: **è un interruttore** |
 
-| Pulsante | Cosa fa |
-|---|---|
-| **Ricentra** | zero hardware del firmware, lo stesso del doppio clic fisico |
-| **Mezzo giro** | l'inquadratura passa dalla parte opposta: il selfie |
+Le due trappole, misurate:
 
-Del campo 1 di `GIMBAL_CONTROL` sono confermati due valori soltanto: 1 muove, 2 ricentra.
-L'azione nativa del mezzo giro dell'app ufficiale quasi certamente esiste con un terzo valore,
-ma nessuna cattura pubblica lo mostra e scriverlo nel codice sarebbe inventarlo. Finché non è
-noto il mezzo giro **ruota il pan di 180°** con il profilo di calibrazione, scegliendo il verso
-che resta dentro i fine corsa — a +235°/-57° i due versi non sono intercambiabili.
+**La 2 non è uno zero assoluto.** Dal fronte ricentra sul fronte, dal selfie ricentra sul selfie.
+Raddrizza l'inquadratura, non stabilisce da che parte si guarda. Un comando di ritorno assoluto
+al fronte, se esiste, ha un altro numero e non è ancora stato trovato.
 
-Per trovarlo: Diagnostica → **Azioni del gimbal**, con l'anteprima accesa e la camera libera di
-girare. Ogni prova lascia nel log la miniatura prima e dopo; quando un numero gira
-l'inquadratura di 180°, *È il selfie* lo memorizza e da lì in poi il pulsante usa quello.
+**La 3 è un interruttore, non una rotazione.** Premuta una volta gira, premuta di nuovo torna. E
+la camera **non dice da che lato si trova**: nessuna notifica decodificata finora lo riporta, per
+cui il lato mostrato dal pulsante è una convinzione dell'app. Chi gira il gimbal dallo schermo
+della camera la smentisce senza che l'app se ne accorga.
+
+Da qui una conseguenza pratica nel codice: prima di commutare, l'app **ricentra**. Il
+ricentraggio è relativo al lato, quindi partire dal centro è l'unico modo di sapere dove si
+finisce — al centro dell'altro lato, cioè a 0°/0° del nuovo riferimento. Senza quel passo la
+posizione stimata dopo un mezzo giro sarebbe un numero inventato.
+
+Il mirino ha i due comandi **sempre in vista** sopra la levetta: **Ricentra** e **Selfie**, il
+secondo acceso quando l'app crede di essere girata.
+
+Se un firmware sposta il numero, si cambia da Diagnostica senza ricompilare; a zero il mezzo giro
+torna a essere una rotazione di 180° calcolata sul profilo di calibrazione, che sceglie il verso
+rimasto dentro i fine corsa — a +235°/-57° i due versi non sono intercambiabili.
+
+### Trovare le azioni che mancano
+
+Diagnostica → **Azioni del gimbal** scansiona un intervallo di numeri con l'anteprima accesa:
+ogni azione lascia nel log la miniatura prima e dopo, ed è **il ricentraggio fra un tentativo e
+l'altro** a rendere il log leggibile — senza, dopo la prima azione che muove non si capisce più
+chi ha fatto cosa. È così che sono stati trovati la 2 e la 3.
+
+**La via definitiva, però, non è provare: è leggere.** Il servizio che ascolta su TCP/6666 è il
+binario `ins_link` sulla camera, e i descrittori protobuf compilati dentro un binario **portano i
+nomi in chiaro**: un `strings` su `ins_link` tira fuori i nomi delle azioni, e `pbtk` ne
+ricostruisce i `.proto` con i numeri. Serve una shell di root sulla camera, e quella è
+documentata: [derrickyau9/insta360-luna-ultra-reverse-engineering](https://github.com/derrickyau9/insta360-luna-ultra-reverse-engineering)
+descrive il bootstrap via porta 23456 (protocollo INSGUI), Dropbear come SSH di root a chiave e
+`adbd` sulla 5555. Quel progetto non documenta il gimbal — ma dà l'accesso da cui il gimbal si
+legge invece di indovinarlo.
 
 ### Calibrazione e ripetibilità dello zero
 
@@ -629,6 +657,10 @@ Il protocollo non l'ho ricostruito io. Questa app sta sulle spalle di:
   sotto-modalità, di `PanoAspect` e dei `FunctionMode`: misurati su questa camera, non dedotti.
 * **[diamondfsd/luna-ai-cut](https://github.com/diamondfsd/luna-ai-cut)** — l'estrazione da cui
   parte il lavoro sulla Luna Ultra.
+* **[derrickyau9/insta360-luna-ultra-reverse-engineering](https://github.com/derrickyau9/insta360-luna-ultra-reverse-engineering)**
+  — l'accesso di root alla camera (bootstrap sulla porta 23456, Dropbear, `adbd`) e la mappa dei
+  servizi: è da lì che si sa che a rispondere sulla 6666 è il binario `ins_link`, cioè dove
+  andare a leggere i numeri del gimbal invece di provarli.
 * **[Cedric-Hsu/insta360-go3s-mac-import](https://github.com/Cedric-Hsu/insta360-go3s-mac-import)**
   e **[NiklasVoigt/Insta360-Livestream](https://github.com/NiklasVoigt/Insta360-Livestream)**
   — conferme indipendenti del framing su altri modelli.

@@ -71,6 +71,7 @@ fun ViewfinderScreen(
     val run by viewModel.runState.collectAsState()
     val ptz by viewModel.ptz.collectAsState()
     val moving by viewModel.gimbalMoving.collectAsState()
+    val selfieEngaged by viewModel.selfieEngaged.collectAsState()
     val captureMode by viewModel.captureMode.collectAsState()
     val recordingSince by viewModel.recordingSinceMs.collectAsState()
     val wifiConnecting by viewModel.wifiConnecting.collectAsState()
@@ -214,6 +215,7 @@ fun ViewfinderScreen(
                     onStop = viewModel::jogStop,
                     onZero = viewModel::zeroPosition,
                     onSelfie = viewModel::selfieTurn,
+                    selfieEngaged = selfieEngaged,
                     onCaptureWaypoint = viewModel::captureWaypoint,
                     compact = landscape,
                     modifier = Modifier

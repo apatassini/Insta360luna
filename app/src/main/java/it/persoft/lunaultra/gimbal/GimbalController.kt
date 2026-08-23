@@ -56,6 +56,16 @@ class GimbalController(
     private val _moving = MutableStateFlow(false)
     val moving: StateFlow<Boolean> = _moving
 
+    /**
+     * Lato in cui l'app **crede** di essere: falso fronte, vero selfie.
+     *
+     * È una convinzione, non una lettura: la camera non pubblica il lato in nessuna notifica
+     * decodificata finora, e chi gira il gimbal dallo schermo della camera lo cambia senza che
+     * l'app lo sappia. Serve a dare uno stato al pulsante, non a decidere dei movimenti.
+     */
+    private val _selfieEngaged = MutableStateFlow(false)
+    val selfieEngaged: StateFlow<Boolean> = _selfieEngaged
+
     /** Ultimo vettore realmente consegnato alla camera, per integrare il tempo reale. */
     private var appliedPanPercent = 0f
     private var appliedTiltPercent = 0f
@@ -150,12 +160,12 @@ class GimbalController(
     }
 
     /**
-     * Usa lo zero meccanico del firmware; non simula il ritorno integrando impulsi.
+     * Ricentra con il comando del firmware; non simula il ritorno integrando impulsi.
      *
-     * Quello zero è il fronte del corpo camera e **non** il centro della corsa: l'intervallo
-     * è -57°…+235°, quindi 0° sta a un sesto della corsa. Se la camera è appoggiata con il
-     * fronte rivolto a chi la usa, dopo questo comando lo inquadra: è dove guarda lo zero,
-     * non un comando sbagliato. Per girarsi dall'altra parte c'è [selfieTurn].
+     * Attenzione a cosa vuol dire "centro": è il centro **del lato in cui la camera si trova
+     * adesso**, non uno zero assoluto. Dal fronte ricentra sul fronte, dal selfie ricentra sul
+     * selfie — misurato sulla camera. Quindi questo comando raddrizza l'inquadratura, non
+     * stabilisce da che parte si guarda: per quello c'è [selfieTurn], che è un interruttore.
      */
     suspend fun recenter(): Result<Unit> {
         stop()
@@ -169,29 +179,34 @@ class GimbalController(
     }
 
     /**
-     * Mezzo giro sul pan: l'inquadratura passa dall'altra parte, il tilt resta dov'è.
+     * Commuta fra fronte e selfie: l'inquadratura passa dall'altra parte.
      *
-     * Se l'azione nativa dell'app ufficiale è stata trovata e scritta nelle impostazioni la
-     * usa; altrimenti ruota di `selfieTurnDeg` con il profilo di calibrazione,
-     * scegliendo il verso che resta dentro i fine corsa — a +235°/-57° i due versi non sono
+     * Con l'azione nativa (la 3, misurata sulla camera) è un interruttore: una pressione gira,
+     * un'altra torna. Prima di girare **ricentra**, se non siamo già al centro: il ricentraggio
+     * è relativo al lato, quindi partire dal centro è l'unico modo di sapere dove si finisce —
+     * al centro dell'altro lato, cioè a 0°/0° del nuovo riferimento. Senza questo passo la
+     * posizione stimata dopo un mezzo giro sarebbe un numero inventato.
+     *
+     * Senza azione nativa (codice 0) ruota di `selfieTurnDeg` con il profilo di calibrazione,
+     * scegliendo il verso che resta dentro i fine corsa: a +235°/-57° i due versi non sono
      * intercambiabili, e girare dalla parte sbagliata finisce contro il limite a metà strada.
      */
     suspend fun selfieTurn(): Result<Unit> {
         val cfg = settings.value.gimbal
         if (cfg.selfieActionCode > 0) {
+            integrateAppliedUntilNow()
+            val current = _position.value
+            if (abs(current.pan) > SELFIE_CENTER_TOLERANCE_DEG || abs(current.tilt) > SELFIE_CENTER_TOLERANCE_DEG) {
+                recenter().getOrElse { return Result.failure(it) }
+                delay(RECENTER_SETTLE_MS)
+                setEstimated(0f, 0f)
+            }
             stop()
             val result = commands.gimbalAction(cfg.selfieActionCode)
             if (result.isSuccess) {
-                appliedPanPercent = 0f
-                appliedTiltPercent = 0f
-                appliedSinceNanos = System.nanoTime()
-                // Di un'azione nativa non sappiamo quanto muove: dirlo è meglio che scrivere
-                // una posizione inventata sopra a quella stimata. Il ricentraggio la rimette
-                // a posto, ed è quello che va fatto prima di memorizzare un waypoint.
-                log.warn(
-                    "Mezzo giro con l'azione nativa ${cfg.selfieActionCode}: la posizione stimata " +
-                        "non è più attendibile finché non ricentri.",
-                )
+                delay(RECENTER_SETTLE_MS)
+                setEstimated(0f, 0f)
+                _selfieEngaged.value = !_selfieEngaged.value
             }
             return result
         }
@@ -207,7 +222,9 @@ class GimbalController(
                 ),
             )
         }
-        return moveToPosition(target, current.tilt)
+        val moved = moveToPosition(target, current.tilt)
+        if (moved.isSuccess) _selfieEngaged.value = !_selfieEngaged.value
+        return moved
     }
 
     /** Fine corsa del pan: quelli misurati se la calibrazione è valida, altrimenti gli ufficiali. */
@@ -470,6 +487,12 @@ class GimbalController(
         private const val VISUAL_MAX_SPEED = 0.35f
         private const val MIN_PROTOCOL_COMMAND = 0.01f
         private const val MIN_SELFIE_TURN_DEG = 5f
+
+        /** Sotto questo scarto la camera è già "al centro" e il mezzo giro parte diretto. */
+        private const val SELFIE_CENTER_TOLERANCE_DEG = 2f
+
+        /** Il ricentraggio e il mezzo giro sono meccanici: vanno lasciati arrivare. */
+        private const val RECENTER_SETTLE_MS = 2_500L
     }
 }
 

@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.screens.DiagnosticsScreen
 import it.persoft.lunaultra.ui.screens.GalleryScreen
+import it.persoft.lunaultra.ui.screens.PanoramaScreen
 import it.persoft.lunaultra.ui.screens.SequenceScreen
 import it.persoft.lunaultra.ui.screens.SettingsScreen
 import it.persoft.lunaultra.ui.theme.Luna
@@ -84,6 +85,7 @@ fun LunaApp(viewModel: MainViewModel) {
                 when (panel) {
                     Panel.GALLERY -> GalleryScreen(viewModel)
                     Panel.SEQUENCE -> SequenceScreen(viewModel)
+                    Panel.PANORAMA -> PanoramaScreen(viewModel)
                     Panel.SETTINGS -> SettingsScreen(viewModel, onOpenDiagnostics = {
                         panelOrdinal = Panel.DIAGNOSTICS.ordinal
                     })

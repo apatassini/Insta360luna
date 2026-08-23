@@ -311,7 +311,7 @@ fun ViewfinderScreen(
                     selected = captureMode,
                     sequenceReady = sequenceReady,
                     onSelect = viewModel::setCaptureMode,
-                    onOpenPanorama = { onOpenPanel(Panel.SEQUENCE) },
+                    onOpenPanorama = { onOpenPanel(Panel.PANORAMA) },
                     onDismiss = { modeSheetOpen = false },
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
                 )

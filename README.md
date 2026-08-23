@@ -283,6 +283,22 @@ Ultra di installare app da questa origine; Android richiede comunque la conferma
 installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
 sistema. Se GitHub non è raggiungibile, il controllo non blocca la connessione alla camera.
 
+### La panoramica ha un pannello suo
+
+Si descrive con due cose — **quanti gradi coprire** e **con che obiettivo** — e la griglia degli
+scatti la calcola l'app. I waypoint esistono, ma sono il *come*, non il *cosa*: non hanno motivo
+di stare sotto gli occhi di chi vuole solo scattare, ed è per questo che la panoramica non vive
+più dentro *Automazioni gimbal* insieme a punti memorizzati, interpolazioni e durate.
+
+Il pannello si apre dalle modalità, toccando il distintivo in cima al mirino. Dentro: la
+copertura (cinque voci pronte o i gradi a mano), l'obiettivo da 1× a 12× con il campo visivo
+che ne risulta, la sovrapposizione, e **quanti scatti verranno fuori** — che è il numero che
+decide se ne vale la pena, e va saputo prima di cominciare. Un pulsante solo: *Scatta la
+panoramica*, che pianifica e parte.
+
+Serve una calibrazione valida: la griglia nasce dai fine corsa misurati, e senza quelli l'app
+non sa se la copertura richiesta ci sta.
+
 **Quale release.** L'app ha **un ramo solo, `main`**, e la sua release è `apk-main`: si installa
 da lì e si aggiorna da lì, senza scelte da fare.
 

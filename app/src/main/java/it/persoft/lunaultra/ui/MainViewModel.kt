@@ -23,6 +23,7 @@ import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.service.LunaConnectionService
 import it.persoft.lunaultra.timelapse.InterpolationMode
+import it.persoft.lunaultra.timelapse.PanoramaPlan
 import it.persoft.lunaultra.timelapse.PanoramaPlanner
 import it.persoft.lunaultra.timelapse.PanoramaPreset
 import it.persoft.lunaultra.timelapse.PhotoFrameAspect
@@ -984,10 +985,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     append("Griglia: ${plan.columns} × ${plan.rows} · ${plan.totalShots} scatti")
                 },
             )
+            _panoramaPlan.value = plan
             showMessage("Panorama pronto: ${plan.columns}×${plan.rows}, ${plan.totalShots} scatti")
         }.onFailure { error ->
+            _panoramaPlan.value = null
             showMessage(error.message ?: "Il panorama non entra nei fine corsa disponibili")
         }
+    }
+
+    /**
+     * L'anteprima del piano: quante colonne, quante righe, quanti scatti.
+     *
+     * Si ricalcola a ogni cambio di copertura, obiettivo o sovrapposizione, perché il numero
+     * di scatti è la cosa che decide se la panoramica vale la pena: 12 scatti sono un minuto,
+     * 40 sono cinque, e conviene saperlo prima di cominciare, non dopo.
+     */
+    private val _panoramaPlan = MutableStateFlow<PanoramaPlan?>(null)
+    val panoramaPlan: StateFlow<PanoramaPlan?> = _panoramaPlan
+
+    /** Ricalcola il piano senza muovere niente: serve solo a mostrarne le dimensioni. */
+    fun refreshPanoramaPreview() {
+        val profile = gimbalCalibration.value
+        if (!profile.isValid) {
+            _panoramaPlan.value = null
+            return
+        }
+        val seq = sequence.value
+        val current = container.gimbal.position.value
+        _panoramaPlan.value = PanoramaPlanner.plan(
+            centerPan = current.pan,
+            centerTilt = current.tilt,
+            horizontalCoverage = seq.panoramaHorizontalDegrees,
+            verticalCoverage = seq.panoramaVerticalDegrees,
+            overlapPercent = seq.panoramaOverlapPercent,
+            zoomScale = settings.value.photo.zoomScale,
+            aspect = seq.panoramaAspect,
+            panLimits = profile.panLimits,
+            tiltLimits = profile.tiltLimits,
+        ).getOrNull()
+    }
+
+    /** Pianifica e parte: per chi scatta una panoramica, sono un gesto solo. */
+    fun shootPanorama() {
+        createPanoramaPlan()
+        if (sequence.value.waypoints.size >= 2) startRun()
     }
 
     fun setStartHoldSeconds(seconds: Float) =

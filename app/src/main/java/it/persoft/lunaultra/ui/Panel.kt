@@ -14,6 +14,7 @@ enum class Panel(val title: String, val icon: ImageVector) {
     NONE("", LunaIcons.Close),
     GALLERY("Galleria", LunaIcons.Gallery),
     SEQUENCE("Automazioni gimbal", LunaIcons.Sequence),
+    PANORAMA("Panoramica a più scatti", LunaIcons.Panorama),
     SETTINGS("Impostazioni", LunaIcons.Tune),
     DIAGNOSTICS("Diagnostica", LunaIcons.Diagnostics),
 }

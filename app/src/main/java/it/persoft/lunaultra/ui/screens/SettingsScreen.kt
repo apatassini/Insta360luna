@@ -46,6 +46,7 @@ import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.BuildConfig
 import it.persoft.lunaultra.ui.MainViewModel
+import it.persoft.lunaultra.ui.UpdateUiState
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
@@ -539,6 +540,46 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                val updateState by viewModel.update.collectAsState()
+                Button(
+                    onClick = viewModel::checkForUpdateNow,
+                    enabled = updateState !is UpdateUiState.Checking && updateState !is UpdateUiState.Downloading,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(LunaIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text("  Verifica aggiornamenti")
+                }
+                when (val state = updateState) {
+                    is UpdateUiState.Checking -> {
+                        LabeledValue("Stato", "controllo la release di ${state.branch}…")
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    is UpdateUiState.Downloading -> {
+                        val fraction = state.fraction
+                        LabeledValue(
+                            "Scaricamento",
+                            if (fraction != null) {
+                                "%d%% · %.1f di %.1f MB".format(
+                                    state.percent,
+                                    state.downloaded / 1_048_576f,
+                                    state.total / 1_048_576f,
+                                )
+                            } else {
+                                "%.1f MB".format(state.downloaded / 1_048_576f)
+                            },
+                        )
+                        if (fraction != null) {
+                            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                    is UpdateUiState.ReadyToInstall ->
+                        LabeledValue("Stato", "scaricato ${state.commitSha.take(12)} · conferma l'installazione")
+                    is UpdateUiState.UpToDate -> LabeledValue("Stato", "già all'ultima build")
+                    is UpdateUiState.Failed -> LabeledValue("Stato", state.reason, valueColor = Luna.Warn)
+                    UpdateUiState.Idle -> Unit
+                }
                 Hint(
                     "Vuoto significa il branch che ha prodotto questo APK. All'avvio l'app legge " +
                         "la release di quel branch e propone l'aggiornamento se il commit è " +

@@ -31,9 +31,21 @@ class UpdateManager(context: Context) {
 
     private val appContext = context.applicationContext
 
+    /**
+     * Avanzamento dello scaricamento, in byte.
+     *
+     * [total] è negativo quando il server non dichiara la dimensione: succede, e allora
+     * l'unica cosa onesta da mostrare è quanti megabyte sono arrivati, non una percentuale
+     * inventata su un totale che non si conosce.
+     */
+    fun interface DownloadProgress {
+        fun onBytes(downloaded: Long, total: Long)
+    }
+
     suspend fun downloadIfAvailable(
         currentCommit: String = BuildConfig.GIT_SHA,
         branch: String = BuildConfig.GIT_BRANCH,
+        progress: DownloadProgress? = null,
     ): Result<DownloadedUpdate?> =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -43,7 +55,7 @@ class UpdateManager(context: Context) {
                 val directory = File(appContext.cacheDir, "updates").apply { mkdirs() }
                 val target = File(directory, "luna-${release.commitSha.take(12)}.apk")
                 if (!target.isFile || !digestMatches(target, release.sha256)) {
-                    download(release.downloadUrl, target, release.sha256)
+                    download(release.downloadUrl, target, release.sha256, progress)
                 }
                 DownloadedUpdate(target, release.commitSha)
             }
@@ -55,7 +67,12 @@ class UpdateManager(context: Context) {
         return connection.inputStream.bufferedReader().use { it.readText() }
     }
 
-    private fun download(url: String, target: File, expectedSha256: String?) {
+    private fun download(
+        url: String,
+        target: File,
+        expectedSha256: String?,
+        progress: DownloadProgress? = null,
+    ) {
         val part = File(target.parentFile, "${target.name}.part")
         part.delete()
         try {
@@ -66,13 +83,22 @@ class UpdateManager(context: Context) {
                 part.outputStream().buffered().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     var total = 0L
+                    var lastReported = 0L
+                    progress?.onBytes(0L, declared)
                     while (true) {
                         val read = input.read(buffer)
                         if (read < 0) break
                         total += read
                         require(total <= MAX_APK_BYTES) { "APK troppo grande" }
                         output.write(buffer, 0, read)
+                        // Un avviso ogni 64 KB: abbastanza fitto perché la barra si muova,
+                        // abbastanza rado da non ricomporre la schermata a ogni buffer.
+                        if (total - lastReported >= PROGRESS_STEP_BYTES) {
+                            lastReported = total
+                            progress?.onBytes(total, declared)
+                        }
                     }
+                    progress?.onBytes(total, declared)
                 }
             }
             require(part.length() > 0L) { "APK vuoto" }
@@ -139,6 +165,7 @@ class UpdateManager(context: Context) {
         internal fun releaseApi(branch: String): String = RELEASES_BY_TAG + releaseTag(branch)
 
         internal const val MAX_APK_BYTES = 100L * 1024L * 1024L
+        private const val PROGRESS_STEP_BYTES = 64L * 1024L
         internal const val CONNECT_TIMEOUT_MS = 8_000
         internal const val READ_TIMEOUT_MS = 30_000
 

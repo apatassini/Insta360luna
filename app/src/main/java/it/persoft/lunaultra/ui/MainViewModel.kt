@@ -234,6 +234,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectJob: Job? = null
     private var connectionJob: Job? = null
     private var updateCheckStarted = false
+    private var updateJob: Job? = null
+
+    /**
+     * Come installare, ricevuto dall'Activity al primo controllo.
+     *
+     * Il ViewModel non può aprire l'installer da solo — serve un Context di Activity — quindi
+     * se lo tiene per quando il pulsante in Impostazioni chiederà di rifare il giro.
+     */
+    private var installUpdate: ((File) -> Unit)? = null
+
+    private val _update = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
+    val update: StateFlow<UpdateUiState> = _update
     private var photoCountdownJob: Job? = null
 
     private var pollJob: Job? = null
@@ -294,30 +306,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * controllare la release GitHub. Il download è automatico; Android mostra comunque la sua
      * conferma di installazione, che un'app normale non può aggirare.
      */
+    /**
+     * Controllo automatico all'avvio: parte una volta sola per sessione.
+     *
+     * Il pulsante in Impostazioni chiama invece [checkForUpdateNow], che non ha quel vincolo:
+     * chi lo preme sta chiedendo di rifare il controllo, non di saltarlo perché è già stato
+     * fatto.
+     */
     fun checkForUpdate(onReadyToInstall: (File) -> Unit) {
         if (updateCheckStarted) return
         updateCheckStarted = true
-        viewModelScope.launch {
-            showMessage("Controllo aggiornamenti…")
+        installUpdate = onReadyToInstall
+        runUpdateCheck(onReadyToInstall)
+    }
+
+    /** Verifica richiesta dall'utente. */
+    fun checkForUpdateNow() {
+        val installer = installUpdate
+        if (installer == null) {
+            showMessage("Installazione non disponibile in questa schermata")
+            return
+        }
+        if (_update.value is UpdateUiState.Checking || _update.value is UpdateUiState.Downloading) return
+        runUpdateCheck(installer)
+    }
+
+    private fun runUpdateCheck(onReadyToInstall: (File) -> Unit) {
+        updateJob?.cancel()
+        updateJob = viewModelScope.launch {
             val branch = settings.value.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
+            _update.value = UpdateUiState.Checking(branch)
             container.log.info(
                 "AGGIORNAMENTI",
                 "Cerco la release del branch \"$branch\" (build corrente: ${BuildConfig.GIT_SHA.take(12)}).",
             )
-            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA, branch)
+            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA, branch) { downloaded, total ->
+                _update.value = UpdateUiState.Downloading(branch, downloaded, total)
+            }
                 .onSuccess { update ->
                     if (update != null) {
-                        showMessage("Aggiornamento scaricato: conferma l'installazione")
+                        _update.value = UpdateUiState.ReadyToInstall(branch, update.commitSha)
+                        container.log.info(
+                            "AGGIORNAMENTI · SCARICATO",
+                            "Commit ${update.commitSha.take(12)} · ${update.apk.length() / 1024} KB. " +
+                                "Android chiede comunque conferma per installare.",
+                        )
                         onReadyToInstall(update.apk)
                     } else {
-                        showMessage("App aggiornata ($branch) · premi Connetti quando vuoi")
+                        _update.value = UpdateUiState.UpToDate(branch)
                     }
                 }
                 .onFailure {
                     container.log.warn("Controllo aggiornamenti non riuscito: ${it.message}")
-                    showMessage("Aggiornamento non verificabile · premi Connetti quando vuoi")
+                    _update.value = UpdateUiState.Failed(branch, it.message ?: "motivo sconosciuto")
                 }
         }
+    }
+
+    /** Toglie dallo schermo l'esito, quando è solo un'informazione e non un'azione. */
+    fun dismissUpdateNotice() {
+        _update.value = UpdateUiState.Idle
     }
 
     fun connect() = beginConnect(showFailure = true)

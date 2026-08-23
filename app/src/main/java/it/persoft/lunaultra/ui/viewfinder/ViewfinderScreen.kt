@@ -72,6 +72,7 @@ fun ViewfinderScreen(
     val ptz by viewModel.ptz.collectAsState()
     val moving by viewModel.gimbalMoving.collectAsState()
     val selfieEngaged by viewModel.selfieEngaged.collectAsState()
+    val updateState by viewModel.update.collectAsState()
     val captureMode by viewModel.captureMode.collectAsState()
     val recordingSince by viewModel.recordingSinceMs.collectAsState()
     val wifiConnecting by viewModel.wifiConnecting.collectAsState()
@@ -298,6 +299,12 @@ fun ViewfinderScreen(
                         .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
                 )
             }
+
+            UpdateNotice(
+                state = updateState,
+                onDismiss = viewModel::dismissUpdateNotice,
+                modifier = Modifier.align(Alignment.Center),
+            )
 
             if (modeSheetOpen && chromeVisible) {
                 ModeSheet(

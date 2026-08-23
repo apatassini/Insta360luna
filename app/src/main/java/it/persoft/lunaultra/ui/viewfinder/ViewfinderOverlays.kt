@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.timelapse.RunState
+import it.persoft.lunaultra.ui.UpdateUiState
 import it.persoft.lunaultra.ui.components.GlassPanel
 import it.persoft.lunaultra.ui.italianLabel
 import it.persoft.lunaultra.ui.theme.Luna
@@ -189,6 +190,99 @@ fun PreviewStatusNote(text: String, modifier: Modifier = Modifier) {
  * invece si sta ancora decidendo, qui c'è anche cosa fa ognuna e se è utilizzabile — una
  * modalità guidata senza punti memorizzati non parte, e conviene saperlo prima di sceglierla.
  */
+/**
+ * Lo stato dell'aggiornamento, sopra l'inquadratura.
+ *
+ * Sta al centro perché è l'unica cosa che conta finché dura, e sparisce da solo quando non c'è
+ * più niente da dire. Lo scaricamento mostra la percentuale se il server ha dichiarato la
+ * dimensione, altrimenti i megabyte arrivati: una percentuale su un totale ignoto sarebbe
+ * inventata, e una barra che si muove a caso è peggio di nessuna barra.
+ */
+@Composable
+fun UpdateNotice(
+    state: UpdateUiState,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (state is UpdateUiState.Idle) return
+    GlassPanel(modifier = modifier.width(300.dp), contentPadding = 14.dp, verticalSpacing = 8.dp) {
+        Text(
+            text = when (state) {
+                is UpdateUiState.Checking -> "CONTROLLO AGGIORNAMENTI"
+                is UpdateUiState.Downloading -> "SCARICAMENTO IN CORSO"
+                is UpdateUiState.ReadyToInstall -> "AGGIORNAMENTO PRONTO"
+                is UpdateUiState.UpToDate -> "APP AGGIORNATA"
+                is UpdateUiState.Failed -> "AGGIORNAMENTO NON VERIFICABILE"
+                UpdateUiState.Idle -> ""
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = if (state is UpdateUiState.Failed) Luna.Warn else Luna.Ok,
+        )
+        when (state) {
+            is UpdateUiState.Checking -> {
+                Text(
+                    "Cerco la release di ${state.branch}…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+
+            is UpdateUiState.Downloading -> {
+                val fraction = state.fraction
+                Text(
+                    text = if (fraction != null) {
+                        "%d%% · %.1f di %.1f MB".format(
+                            state.percent,
+                            state.downloaded / 1_048_576f,
+                            state.total / 1_048_576f,
+                        )
+                    } else {
+                        "%.1f MB scaricati".format(state.downloaded / 1_048_576f)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+                if (fraction != null) {
+                    LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+
+            is UpdateUiState.ReadyToInstall -> Text(
+                "Commit ${state.commitSha.take(12)}. Android chiede conferma per installare.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White,
+            )
+
+            is UpdateUiState.UpToDate -> Text(
+                "Sei sull'ultima build di ${state.branch}.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White,
+            )
+
+            is UpdateUiState.Failed -> Text(
+                "${state.reason}. La camera si usa lo stesso: l'aggiornamento non blocca niente.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White,
+            )
+
+            UpdateUiState.Idle -> Unit
+        }
+        if (state is UpdateUiState.UpToDate || state is UpdateUiState.Failed ||
+            state is UpdateUiState.ReadyToInstall
+        ) {
+            Text(
+                text = "Chiudi",
+                style = MaterialTheme.typography.labelMedium,
+                color = Luna.OnSurfaceDim,
+                modifier = Modifier.clickable(onClick = onDismiss),
+            )
+        }
+    }
+}
+
 @Composable
 fun ModeSheet(
     selected: CaptureMode,

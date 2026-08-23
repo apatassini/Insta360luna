@@ -3,6 +3,18 @@ package it.persoft.lunaultra.timelapse
 import kotlin.math.abs
 
 /**
+ * Lato lungo delle coperture in proporzione: sta dentro la corsa con margine.
+ *
+ * Sta fuori dall'enum e non nel suo companion perché le voci di un enum vengono costruite
+ * prima del companion: leggerlo da lì sarebbe leggere un valore non ancora inizializzato, e
+ * Kotlin lo rifiuta a ragione.
+ */
+private const val LONG_SIDE_DEG = 120f
+
+/** Quanto i gradi possono discostarsi e continuare a essere "quella" copertura. */
+private const val TOLERANCE_DEG = 1f
+
+/**
  * Coperture panoramiche pronte, nominate per il risultato invece che per i numeri.
  *
  * Chi inquadra pensa «voglio una striscia larga» o «voglio prendere anche il cielo e il
@@ -57,10 +69,6 @@ enum class PanoramaPreset(
             abs(vertical - verticalDegrees) < TOLERANCE_DEG
 
     companion object {
-        /** Lato lungo delle coperture in proporzione: sta dentro la corsa con margine. */
-        private const val LONG_SIDE_DEG = 120f
-        private const val TOLERANCE_DEG = 1f
-
         /** La voce corrispondente ai gradi correnti, oppure null: quello è il personalizzato. */
         fun matching(horizontal: Float, vertical: Float): PanoramaPreset? =
             entries.firstOrNull { it.matches(horizontal, vertical) }

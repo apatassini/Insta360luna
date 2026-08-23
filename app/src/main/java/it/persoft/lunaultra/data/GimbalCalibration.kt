@@ -84,6 +84,21 @@ data class GimbalCalibrationProfile(
     val responsePoints: List<GimbalResponsePoint> = emptyList(),
     val panLimits: GimbalAxisLimits = GimbalAxisLimits(),
     val tiltLimits: GimbalAxisLimits = GimbalAxisLimits(),
+
+    /**
+     * Correzione di scala misurata contro i fine corsa, alla fine della calibrazione.
+     *
+     * Le immagini danno la **forma** della curva — quanto è più veloce il 100% del 10% — ma non
+     * la sua scala in gradi: quella nasce dal tempo impiegato a percorrere la corsa, che è una
+     * misura a cronometro e sbaglia di qualche punto percentuale. Un errore del 10% sulla scala
+     * non si nota su un arco di 45°, ma su 235° diventano 23° e il gimbal manca il fine corsa.
+     *
+     * Il fine corsa invece è verità assoluta: la camera lo annuncia. Quindi lo si raggiunge, si
+     * confronta quanto il modello *credeva* di aver percorso con quanto c'era davvero da
+     * percorrere, e il rapporto finisce qui. 1 significa modello già giusto.
+     */
+    val panAngularScale: Float = 1f,
+    val tiltAngularScale: Float = 1f,
 ) {
     val isValid: Boolean
         get() = schemaVersion == CURRENT_SCHEMA && calibratedAtMs > 0L &&
@@ -130,7 +145,8 @@ data class GimbalCalibrationProfile(
     fun angularRateAt(intensityPercent: Float, panAxis: Boolean): Float {
         if (!isValid || intensityPercent <= 0f) return 0f
         val limits = if (panAxis) panLimits else tiltLimits
-        val sweepRate = limits.spanDeg / limits.travelSecondsAtSweepIntensity
+        val scale = if (panAxis) panAngularScale else tiltAngularScale
+        val sweepRate = limits.spanDeg / limits.travelSecondsAtSweepIntensity * scale
         val referenceImageRate = abs(imageRateAt(limits.sweepIntensityPercent.toFloat(), panAxis))
         if (referenceImageRate < MIN_RATE) return 0f
         return sweepRate * abs(imageRateAt(intensityPercent, panAxis)) / referenceImageRate
@@ -165,7 +181,13 @@ data class GimbalCalibrationProfile(
         if (panAxis) point.panImagePixelsPerSecond else point.tiltImagePixelsPerSecond
 
     companion object {
-        const val CURRENT_SCHEMA = 3
+        // 4: la scala angolare non viene più dal solo cronometro della corsa, ma è corretta
+        // contro i fine corsa. I profili 3 sono sistematicamente troppo veloci e vanno rifatti.
+        const val CURRENT_SCHEMA = 4
+
+        /** Oltre questi limiti la correzione non è una taratura, è un sintomo. */
+        const val MIN_ANGULAR_SCALE = 0.4f
+        const val MAX_ANGULAR_SCALE = 2.5f
         const val DEFAULT_SETTLE_MS = 260L
         const val MIN_SAMPLES_PER_AXIS = 2
         const val MIN_VALID_POINTS = 8

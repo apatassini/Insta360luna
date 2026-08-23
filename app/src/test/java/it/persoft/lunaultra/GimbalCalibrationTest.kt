@@ -1,6 +1,7 @@
 package it.persoft.lunaultra
 
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
+import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.data.GimbalCalibrationSample
 import it.persoft.lunaultra.data.GimbalAxisLimits
 import it.persoft.lunaultra.gimbal.formatAxisLimitSummary
@@ -57,6 +58,42 @@ class GimbalCalibrationTest {
         assertTrue(profile.maxAngularRate(panAxis = true) > 0f)
     }
 
+    /**
+     * La scala misurata sui fine corsa deve moltiplicare le velocità in gradi e lasciare
+     * intatta la curva in pixel: la forma della risposta la danno le immagini, la scala il
+     * cronometro corretto sui limiti. Se le due cose si mescolassero, correggere la scala
+     * cambierebbe anche i rapporti fra un'intensità e l'altra.
+     */
+    @Test
+    fun `la scala misurata sui fine corsa riscala i gradi ma non i pixel`() {
+        val base = profileWithCurve()
+        val corrected = base.copy(panAngularScale = 0.9f, tiltAngularScale = 1.1f)
+
+        assertEquals(
+            base.angularRateAt(100f, panAxis = true) * 0.9f,
+            corrected.angularRateAt(100f, panAxis = true),
+            0.001f,
+        )
+        assertEquals(
+            base.angularRateAt(30f, panAxis = false) * 1.1f,
+            corrected.angularRateAt(30f, panAxis = false),
+            0.001f,
+        )
+        assertEquals(base.imageRateAt(50f, true), corrected.imageRateAt(50f, true), 0.0001f)
+    }
+
+    /** Senza correzione il profilo si comporta esattamente come prima: la scala neutra è 1. */
+    @Test
+    fun `la scala neutra non cambia nulla`() {
+        val base = profileWithCurve()
+        assertEquals(1f, base.panAngularScale, 0f)
+        assertEquals(
+            base.angularRateAt(100f, panAxis = true),
+            base.copy(panAngularScale = 1f).angularRateAt(100f, panAxis = true),
+            0.0001f,
+        )
+    }
+
     @Test
     fun `rejects an incomplete curve without low speed and 100 percent`() {
         val profile = GimbalCalibrationBuilder.build(
@@ -69,6 +106,31 @@ class GimbalCalibrationTest {
             calibratedAtMs = 1234L,
         )
         assertFalse(profile.isValid)
+    }
+
+    /** Una curva completa e valida, usata dai controlli sulla scala. */
+    private fun profileWithCurve(): GimbalCalibrationProfile {
+        val intensities = listOf(1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+        val samples = buildList {
+            intensities.forEach { intensity ->
+                repeat(2) {
+                    listOf(1f, -1f).forEach { direction ->
+                        val command = intensity / 100f * direction
+                        val motion = intensity / 100f * (0.6f + intensity / 250f)
+                        add(sample(intensity, GimbalCalibrationSample.AXIS_PAN, command, -120f * motion))
+                        add(sample(intensity, GimbalCalibrationSample.AXIS_TILT, command, 80f * motion))
+                    }
+                }
+            }
+        }
+        return GimbalCalibrationBuilder.build(
+            samples,
+            "Luna Ultra",
+            "1.0.288",
+            1234L,
+            panLimits = limits(-57f, 235f, 48f),
+            tiltLimits = limits(-57f, 120f, 31f),
+        )
     }
 
     private fun sample(intensity: Int, axis: String, command: Float, signedRateAtIntensity: Float): GimbalCalibrationSample {

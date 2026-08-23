@@ -290,8 +290,8 @@ class GimbalCalibrator(
                         "usa una scena ferma, più luminosa e con più dettagli",
                 )
             }
-            validateMotionModel(profile, firstFrame)
-            store.update { profile }
+            val corrected = validateMotionModel(profile, firstFrame)
+            store.update { corrected }
             // La validazione lavora sullo zero hardware, che è dove guarda il corpo camera:
             // finirla lì significherebbe lasciare la camera puntata dove non serve. Il profilo
             // ora è salvato, quindi il ritorno usa la curva appena misurata.
@@ -299,7 +299,11 @@ class GimbalCalibrator(
             log.info(
                 "CALIBRAZIONE GIMBAL · COMPLETATA",
                 buildString {
-                    appendLine("Qualità: ${profile.qualityPercent}% · ${profile.validSamples}/${profile.totalSamples} campioni")
+                    appendLine("Qualità: ${corrected.qualityPercent}% · ${corrected.validSamples}/${corrected.totalSamples} campioni")
+                    appendLine(
+                        "Scala corretta sui fine corsa: orizzontale ×%.3f · verticale ×%.3f"
+                            .format(corrected.panAngularScale, corrected.tiltAngularScale),
+                    )
                     appendLine("Ritardo comando: ${profile.responseOverheadMs} ms · assestamento: ${profile.settleMs} ms")
                     appendLine(
                         "Fine corsa pan: %.1f°…%+.1f° · %.1f s al %d%%".format(
@@ -490,7 +494,12 @@ class GimbalCalibrator(
      * gimbal. Il secondo: la prima inquadratura è la **casa**, cioè dove la camera è stata
      * puntata, mentre i collaudi partono dallo zero hardware. Sono due posti diversi.
      */
-    private suspend fun validateMotionModel(profile: GimbalCalibrationProfile, startReference: ByteArray?) {
+    private data class AxisScale(val axis: String, val scale: Float)
+
+    private suspend fun validateMotionModel(
+        profile: GimbalCalibrationProfile,
+        startReference: ByteArray?,
+    ): GimbalCalibrationProfile {
         data class Target(val axis: String, val endpoint: Float, val checkpoint: Float)
         val targets = listOf(
             Target(GimbalCalibrationSample.AXIS_PAN, profile.panLimits.maximumDeg, 200f),
@@ -515,6 +524,7 @@ class GimbalCalibrator(
         describeValidationZero(startReference, zeroReference)
 
         val zeroChecks = mutableListOf<ZeroCheck>()
+        val measured = mutableListOf<AxisScale>()
         targets.forEachIndexed { index, target ->
             recenterHardware("Zero prima della verifica ${directionLabel(target.axis, target.endpoint)}", 90 + index * 2, 91 + index * 2)
             zeroChecks += verifyRepeatedZero(zeroReference, index + 1, targets.size + 1)
@@ -522,63 +532,72 @@ class GimbalCalibrator(
                 min(0f, target.endpoint),
                 max(0f, target.endpoint),
             )
-            val first = movePredictedDegrees(profile, target.axis, checkpoint, VALIDATION_FAST_INTENSITY_PERCENT, false)
-            if (first.limitReached) {
-                throw IllegalStateException(
-                    "Il fine corsa ${directionLabel(target.axis, target.endpoint)} e arrivato prima dei ${abs(checkpoint).toInt()}° previsti",
-                )
-            }
+            // Il modello viene spinto verso il fine corsa e si contano i gradi che *crede* di
+            // aver percorso. Il fine corsa è verità: la camera lo annuncia. Il rapporto fra i
+            // gradi veri e quelli creduti è la correzione di scala — l'informazione che questa
+            // fase produce, e che prima veniva buttata via insieme a tutta la calibrazione.
+            var commandedDeg = 0f
+            val first = movePredictedDegrees(profile, target.axis, checkpoint, VALIDATION_FAST_INTENSITY_PERCENT, true)
+            commandedDeg += first.predictedDegrees
+            var reached = first.limitReached
 
-            val expectedRemainder = target.endpoint - checkpoint
-            val finalApproach = movePredictedDegrees(
-                profile,
-                target.axis,
-                expectedRemainder,
-                VALIDATION_FINE_INTENSITY_PERCENT,
-                true,
-            )
-            var reached = finalApproach.limitReached
-            var actualRemainder = finalApproach.predictedDegrees
-            while (!reached && abs(actualRemainder - expectedRemainder) < VALIDATION_EXTRA_SEARCH_DEG) {
-                val extra = movePredictedDegrees(
+            if (!reached) {
+                val remainder = target.endpoint - checkpoint
+                val approach = movePredictedDegrees(
                     profile,
                     target.axis,
-                    VALIDATION_EXTRA_STEP_DEG * kotlin.math.sign(target.endpoint),
+                    remainder,
                     VALIDATION_FINE_INTENSITY_PERCENT,
                     true,
                 )
-                actualRemainder += extra.predictedDegrees
+                commandedDeg += approach.predictedDegrees
+                reached = approach.limitReached
+            }
+
+            // La finestra di ricerca è una frazione della corsa, non un numero fisso: su 235°
+            // un margine di 16° è lo 0,7%, che qualunque errore di taratura consuma subito.
+            val searchLimitDeg = abs(target.endpoint) * VALIDATION_SEARCH_FRACTION + VALIDATION_EXTRA_SEARCH_DEG
+            val direction = kotlin.math.sign(target.endpoint)
+            while (!reached && abs(commandedDeg) < abs(target.endpoint) + searchLimitDeg) {
+                val extra = movePredictedDegrees(
+                    profile,
+                    target.axis,
+                    VALIDATION_EXTRA_STEP_DEG * direction,
+                    VALIDATION_FINE_INTENSITY_PERCENT,
+                    true,
+                )
+                commandedDeg += extra.predictedDegrees
                 reached = extra.limitReached
             }
             if (!reached) {
                 throw IllegalStateException(
-                    "Il fine corsa ${directionLabel(target.axis, target.endpoint)} non coincide col modello entro ${VALIDATION_EXTRA_SEARCH_DEG.toInt()}°",
+                    "Il fine corsa ${directionLabel(target.axis, target.endpoint)} non arriva neanche dopo %.0f° comandati contro i %.0f° previsti: il gimbal è ostacolato oppure il segnale 8302 non arriva"
+                        .format(abs(commandedDeg), abs(target.endpoint)),
                 )
             }
-            val endpointError = abs(actualRemainder - expectedRemainder)
-            if (endpointError > VALIDATION_ENDPOINT_TOLERANCE_DEG) {
-                throw IllegalStateException(
-                    "Errore ${directionLabel(target.axis, target.endpoint)} %.1f°: il profilo non e abbastanza preciso".format(endpointError),
-                )
-            }
+
+            // Reali / creduti. Sotto 1 il modello si credeva più veloce di quanto sia.
+            val scale = abs(target.endpoint) / abs(commandedDeg).coerceAtLeast(1f)
+            measured += AxisScale(target.axis, scale)
+            val errorDeg = abs(commandedDeg) - abs(target.endpoint)
             _state.value = _state.value.copy(
                 overallPercent = 92 + index * 2,
                 axisLabel = axisLabel(target.axis),
                 directionLabel = directionLabel(target.axis, target.endpoint),
                 theoreticalPan = if (target.axis == GimbalCalibrationSample.AXIS_PAN) target.endpoint else 0f,
                 theoreticalTilt = if (target.axis == GimbalCalibrationSample.AXIS_TILT) target.endpoint else 0f,
-                positioningPercent = ((1f - endpointError / VALIDATION_ENDPOINT_TOLERANCE_DEG)
+                positioningPercent = ((1f - abs(1f - scale) / MAX_ACCEPTABLE_SCALE_ERROR)
                     .coerceIn(0f, 1f) * 100f).toInt(),
-                verificationLabel = "FINE CORSA COERENTE · ERRORE %.1f°".format(endpointError),
-                message = "${directionLabel(target.axis, target.endpoint)}: punto previsto ${checkpoint.toInt()}°, residuo ${expectedRemainder.toInt()}°",
+                verificationLabel = "FINE CORSA RAGGIUNTO · SCALA ×%.3f".format(scale),
+                message = "${directionLabel(target.axis, target.endpoint)}: %.0f° comandati per %.0f° reali".format(abs(commandedDeg), abs(target.endpoint)),
             )
             log.info(
                 "CALIBRAZIONE · VALIDAZIONE ${directionLabel(target.axis, target.endpoint).uppercase()}",
                 buildString {
-                    appendLine("Zero hardware -> checkpoint previsto: ${checkpoint.toInt()}°")
-                    appendLine("Checkpoint -> fine corsa previsto: ${expectedRemainder.toInt()}°")
-                    appendLine("Movimento residuo osservato: %.1f°".format(actualRemainder))
-                    append("Errore del modello: %.1f° · segnale hardware 8302 ricevuto".format(endpointError))
+                    appendLine("Gradi comandati per arrivare al fine corsa: %.1f°".format(abs(commandedDeg)))
+                    appendLine("Gradi reali di quella corsa: %.1f°".format(abs(target.endpoint)))
+                    appendLine("Scarto del modello: %+.1f°".format(errorDeg))
+                    append("Correzione di scala su questo asse e verso: ×%.3f".format(scale))
                 },
                 imageJpeg = preview.captureThumbnailJpeg(),
             )
@@ -621,6 +640,49 @@ class GimbalCalibrator(
         } else {
             log.info("CALIBRAZIONE · RIPETIBILITÀ DELLO ZERO", summary)
         }
+
+        return applyMeasuredScale(profile, measured)
+    }
+
+    /**
+     * Applica al profilo la scala misurata sui fine corsa.
+     *
+     * Ogni asse ha due misure, una per verso, e si prende la media: un verso solo porterebbe
+     * dentro l'asimmetria del singolo finecorsa. Una correzione fuori da un intervallo
+     * ragionevole non è una taratura ma un sintomo — gimbal ostacolato, segnale di limite
+     * sbagliato, corsa diversa da quella dichiarata — e allora è giusto fermarsi.
+     */
+    private fun applyMeasuredScale(
+        profile: GimbalCalibrationProfile,
+        measured: List<AxisScale>,
+    ): GimbalCalibrationProfile {
+        fun scaleFor(axis: String): Float {
+            val values = measured.filter { it.axis == axis }.map(AxisScale::scale)
+            if (values.isEmpty()) return 1f
+            return values.average().toFloat()
+        }
+        val pan = scaleFor(GimbalCalibrationSample.AXIS_PAN)
+        val tilt = scaleFor(GimbalCalibrationSample.AXIS_TILT)
+        listOf("orizzontale" to pan, "verticale" to tilt).forEach { (label, value) ->
+            if (value < GimbalCalibrationProfile.MIN_ANGULAR_SCALE || value > GimbalCalibrationProfile.MAX_ANGULAR_SCALE) {
+                throw IllegalStateException(
+                    "Correzione di scala %s fuori scala (×%.2f): il gimbal è ostacolato oppure la corsa non è quella dichiarata"
+                        .format(label, value),
+                )
+            }
+        }
+        log.info(
+            "CALIBRAZIONE · SCALA CORRETTA SUI FINE CORSA",
+            buildString {
+                appendLine("Orizzontale ×%.3f · verticale ×%.3f".format(pan, tilt))
+                appendLine(
+                    "Sotto 1 il modello si credeva più veloce del vero: i gradi comandati erano " +
+                        "più di quelli percorsi, ed è così che si mancava il fine corsa.",
+                )
+                append("Le velocità del profilo sono state riscalate di conseguenza.")
+            },
+        )
+        return profile.copy(panAngularScale = pan, tiltAngularScale = tilt)
     }
 
     /**
@@ -904,7 +966,14 @@ class GimbalCalibrator(
         var lastAnnotated: ByteArray? = null
         var endpointConfidenceSum = 0f
 
-        var movingDurationMs = 0L
+        // Durata dei comandi inviati prima di toccare il limite. Non è la somma degli impulsi
+        // "in cui si è visto un movimento": a questa velocità due fotogrammi consecutivi non si
+        // sovrappongono abbastanza perché il confronto funzioni, e un impulso che ha mosso
+        // eccome finisce contato come fermo. Un solo impulso perso su quindici sposta la scala
+        // in gradi del 7%, e su una corsa da 235° sono 16° — abbastanza da mancare il finecorsa.
+        // Qui si contano i comandi, che sono un fatto, non una deduzione.
+        var commandedDurationMs = 0L
+        var travelDurationMs = 0L
 
         for (pulse in 1..maxPulses) {
             val before = preview.captureThumbnailJpeg()
@@ -944,14 +1013,18 @@ class GimbalCalibrator(
             if (acceptedHardwareLimit) {
                 consecutiveStill = ENDSTOP_CONFIRMATIONS
                 endpointConfidenceSum = ENDSTOP_CONFIRMATIONS.toFloat()
+                // Durante quest'ultimo impulso il gimbal ha percorso un tratto e poi si è
+                // fermato contro il limite: metà è la stima meno arbitraria che ci sia.
+                travelDurationMs = commandedDurationMs + pulseMs / 2
             } else if (acceptedVisualStill) {
                 consecutiveStill++
                 endpointConfidenceSum += verification.confidence
+                if (travelDurationMs == 0L) travelDurationMs = commandedDurationMs
             } else {
                 consecutiveStill = 0
                 endpointConfidenceSum = 0f
                 movingPulses++
-                movingDurationMs += pulseMs
+                commandedDurationMs += pulseMs
             }
             lastAnnotated = WaypointImageVerifier.annotatedCurrentJpeg(after, verification)
             val afterPosition = gimbal.position.value
@@ -1000,7 +1073,7 @@ class GimbalCalibrator(
                 return EndStopSearch(
                     totalPulses = pulse,
                     movingPulses = movingPulses,
-                    movingDurationMs = movingDurationMs,
+                    movingDurationMs = if (travelDurationMs > 0L) travelDurationMs else commandedDurationMs,
                     confidencePercent = confidence,
                     annotatedJpeg = lastAnnotated,
                     hardwareSignal = acceptedHardwareLimit,
@@ -1333,7 +1406,12 @@ class GimbalCalibrator(
         const val VALIDATION_FINE_STEP_MS = 220f
         const val VALIDATION_EXTRA_STEP_DEG = 2f
         const val VALIDATION_EXTRA_SEARCH_DEG = 16f
-        const val VALIDATION_ENDPOINT_TOLERANCE_DEG = 10f
+
+        /** Quanto oltre la corsa prevista si continua a cercare il fine corsa, in frazione. */
+        const val VALIDATION_SEARCH_FRACTION = 0.35f
+
+        /** Scarto di scala oltre il quale il posizionamento mostrato scende a zero. */
+        const val MAX_ACCEPTABLE_SCALE_ERROR = 0.25f
         const val ZERO_REPEATABILITY_RADIUS_PX = 12f
 
         // Soglie per credere a uno scarto dello zero. Sotto queste, il confronto ha trovato

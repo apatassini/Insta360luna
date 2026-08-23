@@ -612,6 +612,33 @@ Restano un paio di minuti sullo zero hardware: sono i quattro collaudi finali, c
 coordinate contro i fine corsa e per definizione partono da lì. Finiti quelli, la camera torna a
 casa.
 
+### La scala in gradi viene dai fine corsa, non dal cronometro
+
+Le immagini danno la **forma** della curva — quanto è più veloce il 100% del 10% — ma non la sua
+scala in gradi. Quella nasceva dal tempo impiegato a percorrere la corsa, misurato contando gli
+impulsi «in cui si è visto un movimento». Ed è lì che si rompeva: al 40% con impulsi da 650 ms
+due fotogrammi consecutivi non si sovrappongono abbastanza perché il confronto funzioni, così un
+impulso che ha mosso eccome finiva contato come fermo. **Un solo impulso perso su quindici sposta
+la scala del 7%**, e su una corsa da 235° sono 16° — abbastanza da mancare il fine corsa e far
+fallire la validazione dopo nove minuti di misure buone.
+
+Due correzioni:
+
+1. il tempo di corsa si misura **contando i comandi inviati**, che sono un fatto, invece degli
+   impulsi visivamente confermati, che a quella velocità sono una deduzione sbagliata;
+2. la validazione non boccia più: **misura**. Il fine corsa è verità assoluta — la camera lo
+   annuncia — quindi si spinge il modello fino a toccarlo, si contano i gradi che *credeva* di
+   aver percorso, e il rapporto con i gradi veri diventa la correzione di scala del profilo
+   (`panAngularScale`, `tiltAngularScale`). Due misure per asse, una per verso, mediate: così un
+   eventuale scostamento dello zero hardware si annulla invece di sommarsi.
+
+Si fallisce solo se il fine corsa non arriva neanche cercandolo molto oltre la corsa prevista, o
+se la correzione esce da un intervallo ragionevole: quello non è più taratura, è un sintomo —
+gimbal ostacolato, segnale di limite sbagliato, corsa diversa da quella dichiarata.
+
+I profili con `schemaVersion` 3 sono sistematicamente troppo veloci e vengono rifiutati: vanno
+rifatti una volta.
+
 L'interpolazione fra due waypoint segue le formule della specifica:
 
 ```text

@@ -46,6 +46,47 @@ class PanoramaPlannerTest {
     }
 
     @Test
+    fun `un grado in piu del fotogramma non vale un secondo scatto`() {
+        // Il 16:9 orizzontale chiede 120x67 gradi e il fotogramma 4:3 a 1x ne copre 81,7x66,0: in
+        // verticale mancava un grado, e il piano faceva due righe distanti 1,5 gradi. Due
+        // fotogrammi sovrapposti al 98% non sono una panoramica, sono lo stesso scatto due
+        // volte — e in una griglia 2x2 significa quattro foto invece di due.
+        val plan = PanoramaPlanner.plan(
+            centerPan = 5f,
+            centerTilt = 23f,
+            horizontalCoverage = 120f,
+            verticalCoverage = 67f,
+            overlapPercent = 30,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = pan,
+            tiltLimits = tilt,
+        ).getOrThrow()
+
+        assertEquals(1, plan.rows)
+        assertEquals(2, plan.columns)
+        assertEquals(2, plan.waypoints.size)
+    }
+
+    @Test
+    fun `una copertura che serve davvero due righe le ottiene`() {
+        val plan = PanoramaPlanner.plan(
+            centerPan = 5f,
+            centerTilt = 0f,
+            horizontalCoverage = 120f,
+            verticalCoverage = 110f,
+            overlapPercent = 30,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = pan,
+            tiltLimits = tilt,
+        ).getOrThrow()
+
+        assertEquals(2, plan.rows)
+        assertEquals(plan.columns * plan.rows, plan.waypoints.size)
+    }
+
+    @Test
     fun `rejects a panorama that cannot be centered at the current position`() {
         val result = PanoramaPlanner.plan(
             centerPan = -50f,

@@ -150,11 +150,25 @@ object PanoramaPlanner {
         )
     }
 
+    /**
+     * Quanti scatti servono a coprire [coverage] con fotogrammi larghi [frameFov].
+     *
+     * Il primo fotogramma copre già il suo campo visivo; ogni scatto in più aggiunge il passo
+     * utile, cioè il campo meno la sovrapposizione. Il resto oltre l'ultimo passo intero viene
+     * assorbito se è una briciola: chiedere 67° con un fotogramma da 66° faceva due scatti
+     * sovrapposti al 98% per un grado di differenza, e due scatti quasi identici complicano
+     * l'unione invece di aiutarla.
+     */
     private fun shotCount(coverage: Float, frameFov: Float, overlap: Float): Int {
-        if (coverage <= frameFov) return 1
+        if (coverage <= frameFov || frameFov <= 0f) return 1
         val usefulStep = frameFov * (1f - overlap)
-        return (ceil((coverage - frameFov) / usefulStep).toInt() + 1).coerceAtLeast(2)
+        if (usefulStep <= 0f) return 1
+        val steps = ceil((coverage - frameFov) / usefulStep - RESIDUAL_TOLERANCE).toInt()
+        return (steps + 1).coerceAtLeast(1)
     }
+
+    /** Un resto sotto questa frazione di passo non vale uno scatto in più. */
+    private const val RESIDUAL_TOLERANCE = 0.1f
 
     private fun positions(start: Float, end: Float, count: Int): List<Float> {
         if (count <= 1) return listOf((start + end) / 2f)

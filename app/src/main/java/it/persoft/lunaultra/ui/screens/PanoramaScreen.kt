@@ -18,6 +18,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -33,6 +34,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.GimbalCalibrationProfile
+import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.timelapse.LunaOptics
 import it.persoft.lunaultra.timelapse.PanoramaPlan
 import it.persoft.lunaultra.timelapse.TimelapseSequence
@@ -44,6 +46,7 @@ import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.MetricRow
 import it.persoft.lunaultra.ui.components.MetricTile
 import it.persoft.lunaultra.ui.components.NumberField
+import it.persoft.lunaultra.ui.components.ToggleRow
 import it.persoft.lunaultra.ui.components.SectionCard
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
@@ -66,6 +69,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
     val plan by viewModel.panoramaPlan.collectAsState()
     val connection by viewModel.connectionState.collectAsState()
     val run by viewModel.runState.collectAsState()
+    val stitch by viewModel.stitchState.collectAsState()
     val connected = connection == ConnectionState.CONNECTED
 
     // Il piano si rifà a ogni modifica: il numero di scatti è la cosa che decide se ne vale
@@ -232,6 +236,68 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                         "La camera percorre la griglia a serpentina e scatta a ogni posizione, " +
                         "fermandosi il tempo necessario perché l'immagine non venga mossa.",
                 )
+            }
+        }
+
+        SectionCard(title = "Unione delle foto", icon = LunaIcons.Panorama, accent = Luna.Ok) {
+            ToggleRow(
+                title = "Unisci da sola alla fine",
+                subtitle = "Scarica gli scatti, li rimette sulla sfera secondo l'obiettivo, " +
+                    "sfuma le giunzioni e salva la panoramica nella galleria del telefono.",
+                checked = sequence.autoStitchPanorama,
+                onCheckedChange = viewModel::setAutoStitchPanorama,
+            )
+            when (val state = stitch) {
+                is StitchUiState.Idle -> Hint(
+                    "Le foto singole restano sulla camera: l'unione lavora su copie scaricate " +
+                        "e non tocca niente sulla scheda.",
+                )
+
+                is StitchUiState.Working -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(state.message, style = MaterialTheme.typography.bodyMedium)
+                    LinearProgressIndicator(
+                        progress = { state.fraction },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Hint("Ci vuole qualche minuto: lo scaricamento passa dal Wi-Fi della camera.")
+                }
+
+                is StitchUiState.Done -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MetricRow {
+                        MetricTile(
+                            value = "${state.report.canvasWidth}×${state.report.canvasHeight}",
+                            caption = "pixel della panoramica",
+                            valueColor = Luna.Ok,
+                            modifier = Modifier.weight(1f),
+                        )
+                        MetricTile(
+                            value = "%.0f°×%.0f°".format(
+                                state.report.coverageHorizontalDegrees,
+                                state.report.coverageVerticalDegrees,
+                            ),
+                            caption = "copertura unita",
+                            modifier = Modifier.weight(1f),
+                        )
+                        MetricTile(
+                            value = "%.1f°".format(state.report.worstCorrectionDegrees),
+                            caption = "correzione massima",
+                            valueColor = if (state.report.worstCorrectionDegrees > 2f) Luna.Warn else Luna.Ok,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    LabeledValue("Salvata come", state.fileName, valueColor = Luna.Ok)
+                    Hint("La trovi in Immagini › Luna Ultra, nella galleria del telefono.")
+                }
+
+                is StitchUiState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "UNIONE NON RIUSCITA",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Luna.Rec,
+                    )
+                    Text(state.reason, style = MaterialTheme.typography.bodySmall)
+                    Hint("Gli scatti sono comunque sulla camera: si possono unire con un altro programma.")
+                }
             }
         }
     }

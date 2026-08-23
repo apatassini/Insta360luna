@@ -32,12 +32,21 @@ val BottomBandHeight = 96.dp
 val SideBandWidth = 124.dp
 
 /**
- * La fascia di scatto: ghiera delle modalità e i quattro comandi che le stanno attorno.
+ * La fascia di scatto: lo scatto al centro, e i comandi che si usano guardando l'inquadratura.
  *
- * L'impaginazione è quella di una camera perché è quella che il pollice conosce già: memorizza
- * punto a sinistra, scatto al centro, regolazioni a destra. La ghiera delle modalità non è più
- * qui: occupava una fascia intera per una scelta che si fa una volta ogni tanto, mentre
- * l'inquadratura è ciò che si guarda sempre. Adesso si cambia modalità dal distintivo in cima.
+ * A sinistra ci sono sempre tutti e tre: la galleria, memorizza punto, e togli l'ultimo punto.
+ * Prima galleria e punto si davano il cambio a seconda della modalità, e sembrava una buona
+ * idea — un bersaglio grande invece di due piccoli — ma significava che per rivedere uno scatto
+ * bisognava cambiare modalità, e che il punto appena memorizzato per sbaglio restava lì fino al
+ * pannello delle automazioni. Un comando che c'è solo a volte va cercato ogni volta; tre
+ * comandi sempre allo stesso posto si imparano una volta sola.
+ *
+ * Togliere l'ultimo punto e non svuotare tutto: un percorso si costruisce un punto per volta
+ * guardando l'inquadratura, e l'errore che si fa è memorizzare quello appena sbagliato.
+ * Svuotare resta nelle automazioni, dove si vede la lista e si sa cosa si sta buttando via.
+ *
+ * La ghiera delle modalità non è più qui: occupava una fascia intera per una scelta che si fa
+ * una volta ogni tanto. Si cambia modalità dal distintivo in cima.
  */
 @Composable
 fun CaptureBar(
@@ -48,6 +57,7 @@ fun CaptureBar(
     onShutter: () -> Unit,
     waypointCount: Int,
     onCaptureWaypoint: () -> Unit,
+    onRemoveLastWaypoint: () -> Unit,
     onOpenCameraSettings: () -> Unit,
     onOpenAutomations: () -> Unit,
     onOpenGallery: () -> Unit,
@@ -69,8 +79,9 @@ fun CaptureBar(
                     guided = selected.usesSequence,
                     waypointCount = waypointCount,
                     onCaptureWaypoint = onCaptureWaypoint,
+                    onRemoveLastWaypoint = onRemoveLastWaypoint,
                     onOpenGallery = onOpenGallery,
-                    size = 36.dp,
+                    size = 34.dp,
                 )
                 HudIconButton(
                     icon = LunaIcons.Tune,
@@ -105,13 +116,14 @@ fun CaptureBar(
                 .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                 LeftSlot(
                     guided = selected.usesSequence,
                     waypointCount = waypointCount,
                     onCaptureWaypoint = onCaptureWaypoint,
+                    onRemoveLastWaypoint = onRemoveLastWaypoint,
                     onOpenGallery = onOpenGallery,
-                    size = 54.dp,
+                    size = 42.dp,
                 )
             }
             ShutterButton(
@@ -123,20 +135,20 @@ fun CaptureBar(
             )
             Row(
                 modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 HudIconButton(
                     icon = LunaIcons.Tune,
                     contentDescription = "Impostazioni della camera",
                     onClick = onOpenCameraSettings,
-                    size = 44.dp,
+                    size = 42.dp,
                 )
                 HudIconButton(
                     icon = LunaIcons.Sequence,
                     contentDescription = "Automazioni del gimbal",
                     onClick = onOpenAutomations,
-                    size = 44.dp,
+                    size = 42.dp,
                     selected = selected.usesSequence,
                     activeColor = Luna.Path,
                 )
@@ -146,37 +158,49 @@ fun CaptureBar(
 }
 
 /**
- * Il posto a sinistra dello scatto, che cambia con la modalità.
+ * I tre comandi a sinistra dello scatto, sempre gli stessi e sempre nello stesso ordine.
  *
- * Nelle modalità della camera è la galleria, come su qualunque app di ripresa; in quelle
- * guidate è «memorizza punto», che è il gesto che si ripete dieci volte di fila mentre si
- * costruisce un percorso. Metterli entrambi vorrebbe dire due bersagli piccoli invece di uno
- * grande, proprio dove il pollice arriva senza guardare.
+ * Galleria, memorizza punto, togli l'ultimo punto. Il numero sul secondo dice quanti punti ci
+ * sono: senza, «togli l'ultimo» non si sa se ha qualcosa da togliere — e infatti il terzo si
+ * spegne quando la lista è vuota, invece di essere un pulsante che non fa niente.
+ *
+ * Nelle modalità guidate il pulsante del punto si accende del colore del percorso: è quello che
+ * si sta usando, e lo si trova con la coda dell'occhio senza staccarsi dall'inquadratura.
  */
 @Composable
 private fun LeftSlot(
     guided: Boolean,
     waypointCount: Int,
     onCaptureWaypoint: () -> Unit,
+    onRemoveLastWaypoint: () -> Unit,
     onOpenGallery: () -> Unit,
     size: androidx.compose.ui.unit.Dp,
 ) {
-    if (guided) {
-        HudIconButton(
-            icon = LunaIcons.Waypoint,
-            contentDescription = "Memorizza il punto corrente",
-            onClick = onCaptureWaypoint,
-            size = size,
-            badge = waypointCount.takeIf { it > 0 }?.toString(),
-            activeColor = Luna.Pano,
-        )
-    } else {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         HudIconButton(
             icon = LunaIcons.Gallery,
             contentDescription = "Galleria della camera",
             onClick = onOpenGallery,
             size = size,
         )
+        HudIconButton(
+            icon = LunaIcons.Waypoint,
+            contentDescription = "Memorizza il punto corrente",
+            onClick = onCaptureWaypoint,
+            size = size,
+            badge = waypointCount.takeIf { it > 0 }?.toString(),
+            selected = guided,
+            activeColor = Luna.Path,
+        )
+        HudIconButton(
+            icon = LunaIcons.Delete,
+            contentDescription = "Togli l'ultimo punto memorizzato",
+            onClick = onRemoveLastWaypoint,
+            size = size,
+            enabled = waypointCount > 0,
+        )
     }
 }
-

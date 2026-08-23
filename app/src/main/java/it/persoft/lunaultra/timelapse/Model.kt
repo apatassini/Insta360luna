@@ -102,6 +102,13 @@ data class TimelapseSequence(
     val panoramaHorizontalDegrees: Float = 180f,
     val panoramaVerticalDegrees: Float = 0f,
     val panoramaOverlapPercent: Int = 30,
+    /**
+     * Unire gli scatti appena la panoramica finisce, senza doverlo chiedere.
+     *
+     * Acceso di suo: chi scatta una panoramica la vuole unita, e le foto separate restano
+     * comunque sulla camera. L'unione avviene sul telefono e non tocca niente sulla scheda.
+     */
+    val autoStitchPanorama: Boolean = true,
     val panoramaAspect: PhotoFrameAspect = PhotoFrameAspect.FOUR_THREE,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)

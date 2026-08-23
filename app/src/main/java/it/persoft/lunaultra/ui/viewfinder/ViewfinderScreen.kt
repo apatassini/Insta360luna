@@ -218,6 +218,7 @@ fun ViewfinderScreen(
                     selfieEngaged = selfieEngaged,
                     onBootZero = viewModel::returnToBootZero,
                     onCaptureWaypoint = viewModel::captureWaypoint,
+                    onRemoveLastWaypoint = viewModel::removeLastWaypoint,
                     compact = landscape,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)

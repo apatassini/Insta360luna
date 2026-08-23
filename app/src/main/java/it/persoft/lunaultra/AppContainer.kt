@@ -13,6 +13,7 @@ import it.persoft.lunaultra.gimbal.GimbalLimitMonitor
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.CameraWriteProbe
 import it.persoft.lunaultra.media.MediaRepository
+import it.persoft.lunaultra.stitch.PanoramaStitchJob
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
 import it.persoft.lunaultra.net.WifiNetworkBinder
@@ -71,6 +72,9 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
 
     /** Risponde alla domanda «si può scrivere sulla scheda della camera?» provandoci. */
     val writeProbe = CameraWriteProbe(wifiBinder, log)
+
+    /** Dagli scatti di una panoramica alla panoramica unita nella galleria del telefono. */
+    val stitchJob = PanoramaStitchJob(appContext, media, log)
 
     suspend fun load() {
         settingsStore.load()

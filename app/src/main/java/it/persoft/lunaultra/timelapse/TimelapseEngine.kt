@@ -27,6 +27,9 @@ import kotlin.math.sign
 
 enum class RunPhase { IDLE, PREPARING, RUNNING, STOPPING, COMPLETED, ABORTED }
 
+/** L'orientamento di uno scatto, come lo aveva chiesto il piano. */
+data class ShotAngle(val panDegrees: Float, val tiltDegrees: Float)
+
 data class RunState(
     val phase: RunPhase = RunPhase.IDLE,
     val mode: ShootingMode = ShootingMode.VIDEO,
@@ -40,6 +43,14 @@ data class RunState(
     val shotsTaken: Int = 0,
     val shotsPlanned: Int = 0,
     val message: String? = null,
+    /**
+     * Dove guardava la camera a ogni scatto, in ordine.
+     *
+     * Serve a unire le foto dopo: la camera non dice come ha chiamato il file che ha appena
+     * salvato, quindi l'unico modo di sapere quale foto sta dove è tenere il conto degli angoli
+     * mentre si scatta e accoppiarli in ordine con i file nuovi trovati alla fine.
+     */
+    val shotAngles: List<ShotAngle> = emptyList(),
 ) {
     val running: Boolean get() = phase == RunPhase.PREPARING || phase == RunPhase.RUNNING || phase == RunPhase.STOPPING
     val overallProgress: Float
@@ -329,14 +340,26 @@ class TimelapseEngine(
                 delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
 
                 _state.value = _state.value.copy(message = "Scatto ${taken + 1}/$planned")
+                var stored = false
                 commands.takePicture()
-                    .onSuccess { log.info("Scatto ${taken + 1}/$planned a %.1f° / %.1f°".format(targetPan, targetTilt)) }
+                    .onSuccess {
+                        stored = true
+                        log.info("Scatto ${taken + 1}/$planned a %.1f° / %.1f°".format(targetPan, targetTilt))
+                    }
                     .onFailure { log.warn("Scatto ${taken + 1} non riuscito: ${it.message}") }
 
                 taken++
                 _state.value = _state.value.copy(
                     shotsTaken = taken,
                     elapsedSeconds = taken * (moveSeconds + sequence.settleSeconds),
+                    // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
+                    // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
+                    // fotogramma nel posto del successivo.
+                    shotAngles = if (stored) {
+                        _state.value.shotAngles + ShotAngle(targetPan, targetTilt)
+                    } else {
+                        _state.value.shotAngles
+                    },
                 )
             }
         }

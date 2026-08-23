@@ -17,17 +17,21 @@ import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
+import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.preview.PreviewState
 import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.service.LunaConnectionService
 import it.persoft.lunaultra.timelapse.InterpolationMode
+import it.persoft.lunaultra.timelapse.LunaOptics
 import it.persoft.lunaultra.timelapse.PanoramaPlan
 import it.persoft.lunaultra.timelapse.PanoramaPlanner
 import it.persoft.lunaultra.timelapse.PanoramaPreset
 import it.persoft.lunaultra.timelapse.PhotoFrameAspect
+import it.persoft.lunaultra.timelapse.RunPhase
 import it.persoft.lunaultra.timelapse.ShootingMode
+import it.persoft.lunaultra.timelapse.ShotAngle
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.update.UpdateManager
@@ -261,6 +265,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         observeNotifications()
         observeConnection()
         observeForegroundService()
+        observeFinishedRuns()
+    }
+
+    /**
+     * Guarda quando una corsa finisce, per unire da sé gli scatti di una panoramica.
+     *
+     * Il momento giusto è il passaggio a completata e non un istante prima: gli angoli sono
+     * completi solo alla fine, e i file sulla camera pure. Una corsa interrotta non produce
+     * niente da unire, e infatti si guarda solo il completamento.
+     */
+    private fun observeFinishedRuns() {
+        viewModelScope.launch {
+            var previous = runState.value.phase
+            runState.collect { state ->
+                if (previous != RunPhase.COMPLETED && state.phase == RunPhase.COMPLETED) {
+                    stitchPanoramaIfRequested(state.shotAngles)
+                }
+                previous = state.phase
+            }
+        }
     }
 
     /**
@@ -900,6 +924,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearWaypoints() = container.sequenceStore.update { it.copy(waypoints = emptyList()) }
 
+    /**
+     * Toglie l'ultimo punto memorizzato: è il gesto di chi si è accorto subito di aver sbagliato.
+     *
+     * Dal mirino serve questo e non lo svuotamento: un percorso si costruisce un punto per
+     * volta guardando l'inquadratura, e l'errore che si fa è memorizzare quello appena
+     * sbagliato. Cancellarli tutti resta nel pannello delle automazioni, dove si vede la lista
+     * e si sa cosa si sta buttando via.
+     */
+    fun removeLastWaypoint() = container.sequenceStore.update { seq ->
+        if (seq.waypoints.isEmpty()) seq else seq.copy(waypoints = seq.waypoints.dropLast(1))
+    }
+
     // ---------------------------------------------------------------- sequenza
 
     fun setTotalDuration(seconds: Float) =
@@ -1048,9 +1084,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Pianifica e parte: per chi scatta una panoramica, sono un gesto solo. */
+    /** Stato dell'unione automatica, per il pannello della panoramica. */
+    private val _stitchState = MutableStateFlow<StitchUiState>(StitchUiState.Idle)
+    val stitchState: StateFlow<StitchUiState> = _stitchState
+
+    /** L'elenco dei file com'era prima di scattare: serve a riconoscere quelli nuovi. */
+    private var filesBeforePanorama: List<MediaItem> = emptyList()
+    private var stitchJob: Job? = null
+
+    fun setAutoStitchPanorama(enabled: Boolean) =
+        container.sequenceStore.update { it.copy(autoStitchPanorama = enabled) }
+
+    /**
+     * Scatta la panoramica, e se l'unione automatica è accesa se ne ricorda l'inizio.
+     *
+     * La fotografia dell'elenco file va presa *prima* di scattare: è l'unico modo di sapere
+     * quali file sono nuovi, perché la camera non dice come chiama quello che salva.
+     */
     fun shootPanorama() {
         createPanoramaPlan()
-        if (sequence.value.waypoints.size >= 2) startRun()
+        if (sequence.value.waypoints.size < 2) return
+        _stitchState.value = StitchUiState.Idle
+        viewModelScope.launch {
+            filesBeforePanorama = if (sequence.value.autoStitchPanorama) {
+                container.media.list().getOrElse { emptyList() }
+            } else {
+                emptyList()
+            }
+            startRun()
+        }
+    }
+
+    /**
+     * Unisce gli scatti appena finiti, se erano di una panoramica e l'unione è accesa.
+     *
+     * Viene chiamata quando la corsa passa a completata. Il campo visivo è quello dell'obiettivo
+     * con cui si è scattato — zoom e rapporto attuali — perché è quello che decide come vanno
+     * deformati i fotogrammi per rimetterli sulla sfera.
+     */
+    private fun stitchPanoramaIfRequested(shots: List<ShotAngle>) {
+        val seq = sequence.value
+        if (!seq.autoStitchPanorama || shots.size < 2) return
+        if (!seq.waypoints.all { it.generatedByPanoramaPlanner }) return
+        if (stitchJob?.isActive == true) return
+        val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, seq.panoramaAspect)
+        val before = filesBeforePanorama
+        stitchJob = viewModelScope.launch {
+            _stitchState.value = StitchUiState.Working(0f, "Cerco gli scatti sulla camera")
+            val after = container.media.list().getOrElse {
+                _stitchState.value = StitchUiState.Failed("Elenco dei file non disponibile: ${it.message}")
+                return@launch
+            }
+            container.stitchJob.run(
+                before = before,
+                after = after,
+                angles = shots,
+                horizontalFovDegrees = fov.horizontalDegrees,
+                onProgress = { fraction, message ->
+                    _stitchState.value = StitchUiState.Working(fraction, message)
+                },
+            ).onSuccess {
+                _stitchState.value = it
+                showMessage("Panoramica unita: ${it.fileName}")
+            }.onFailure {
+                _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita")
+                showMessage("Panoramica non unita: ${it.message}")
+            }
+        }
     }
 
     fun setStartHoldSeconds(seconds: Float) =

@@ -1,5 +1,6 @@
 package it.persoft.lunaultra.gimbal
 
+import android.graphics.BitmapFactory
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
 import it.persoft.lunaultra.data.GimbalAxisLimits
 import it.persoft.lunaultra.data.GimbalCalibrationProfile
@@ -7,6 +8,9 @@ import it.persoft.lunaultra.data.GimbalCalibrationSample
 import it.persoft.lunaultra.data.JsonFileStore
 import it.persoft.lunaultra.diagnostics.ImageVerification
 import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
+import it.persoft.lunaultra.timelapse.LensFieldOfView
+import it.persoft.lunaultra.timelapse.LunaOptics
+import it.persoft.lunaultra.timelapse.PhotoFrameAspect
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.preview.PreviewController
 import kotlinx.coroutines.CancellationException
@@ -149,7 +153,11 @@ class GimbalCalibrator(
     private val travelPan = LinkedHashMap<Int, Long>()
     private val travelTilt = LinkedHashMap<Int, Long>()
 
-    fun start(cameraModel: String, firmware: String) {
+    /** Zoom in uso: il campo visivo dipende da quello, e da lì i pixel diventano gradi. */
+    private var cameraZoomScale: Int = 1
+
+    fun start(cameraModel: String, firmware: String, zoomScale: Int = 1) {
+        cameraZoomScale = zoomScale
         if (job?.isActive == true) return
         job = scope.launch {
             runCalibration(cameraModel, firmware)
@@ -321,12 +329,22 @@ class GimbalCalibrator(
             )
             if (!profile.isValid) {
                 throw IllegalStateException(
-                    "Misure insufficienti (${profile.validSamples}/${profile.totalSamples}): " +
-                        "usa una scena ferma, più luminosa e con più dettagli",
+                    "${profile.invalidReason ?: "profilo incompleto"} " +
+                        "(campioni buoni ${profile.validSamples} su ${profile.totalSamples} raccolti, " +
+                        "${GimbalCalibrationState.TOTAL_STEPS} previsti)",
                 )
             }
             val corrected = validateMotionModel(profile, firstFrame)
             store.update { corrected }
+
+            // La prova che dice davvero se il modello sa muoversi: andata e ritorno su angoli
+            // noti, con le foto della stessa posizione a confronto. Viene dopo il salvataggio
+            // perché è una verifica del profilo, non una condizione per averlo.
+            val roundTrips = runCatching { runRoundTrips(corrected, cameraZoomScale) }.getOrElse {
+                log.warn("CALIBRAZIONE · ANDATA E RITORNO NON COMPLETATA", it.message)
+                emptyList()
+            }
+            logRoundTripSummary(roundTrips)
             // La validazione lavora sullo zero hardware, che è dove guarda il corpo camera:
             // finirla lì significherebbe lasciare la camera puntata dove non serve. Il profilo
             // ora è salvato, quindi il ritorno usa la curva appena misurata.
@@ -554,6 +572,198 @@ class GimbalCalibrator(
      * puntata, mentre i collaudi partono dallo zero hardware. Sono due posti diversi.
      */
     private data class AxisScale(val axis: String, val scale: Float)
+
+    /**
+     * Una tappa della prova di andata e ritorno: dove andare, e la foto di com'era là.
+     *
+     * Le foto sono il metro. Il confronto che conta non è mai fra due inquadrature diverse —
+     * quelle *devono* differire, la camera si è mossa — ma fra la stessa posizione vista due
+     * volte a distanza di un giro. Se combaciano, il modello ci sa tornare; se no, lo scarto
+     * in pixel dice di quanto ha sbagliato, e i pixel si convertono in gradi perché il campo
+     * visivo dell'obiettivo è noto.
+     */
+    private data class RoundTripStop(
+        val label: String,
+        val axis: String,
+        val degrees: Float,
+        var reference: ByteArray? = null,
+    )
+
+    /**
+     * Andata e ritorno su angoli noti, con le foto a fare da metro.
+     *
+     * È la prova che dice se il modello sa muoversi: si va a +45°, si fotografa, si torna a
+     * casa e si confronta con la foto di casa — deve combaciare — poi si torna a +45° e si
+     * confronta con la foto di +45° — deve combaciare anche quella. Ogni scarto è un errore
+     * vero, misurato in gradi, non una percentuale fra due immagini che non c'entrano nulla
+     * fra loro.
+     *
+     * Il campo visivo dell'obiettivo converte i pixel in gradi: 256 pixel di miniatura coprono
+     * l'intero fotogramma, e di quel fotogramma si conosce l'apertura angolare.
+     */
+    private suspend fun runRoundTrips(
+        profile: GimbalCalibrationProfile,
+        zoomScale: Int,
+    ): List<RoundTripResult> {
+        val fov = LunaOptics.fieldOfView(zoomScale, PhotoFrameAspect.FOUR_THREE)
+        val stops = buildList {
+            listOf(ROUND_TRIP_ARC_DEG, -ROUND_TRIP_ARC_DEG).forEach { deg ->
+                add(RoundTripStop(directionLabel(GimbalCalibrationSample.AXIS_PAN, deg), GimbalCalibrationSample.AXIS_PAN, deg))
+            }
+            listOf(ROUND_TRIP_TILT_UP_DEG, -ROUND_TRIP_TILT_DOWN_DEG).forEach { deg ->
+                add(RoundTripStop(directionLabel(GimbalCalibrationSample.AXIS_TILT, deg), GimbalCalibrationSample.AXIS_TILT, deg))
+            }
+        }
+        val results = mutableListOf<RoundTripResult>()
+        val homeReference = homeFrame ?: awaitFrame("Attendo l'immagine di casa").also { homeFrame = it }
+
+        stops.forEachIndexed { index, stop ->
+            _state.value = _state.value.copy(
+                phaseLabel = "Andata e ritorno · ${stop.label}",
+                overallPercent = 90 + index,
+                axisLabel = axisLabel(stop.axis),
+                directionLabel = stop.label,
+                message = "Vado a %.0f° e torno: le foto devono combaciare".format(stop.degrees),
+            )
+
+            // Andata: il modello crede di percorrere questi gradi. Qui si fotografa e basta,
+            // perché non c'è ancora niente con cui confrontare.
+            moveByModel(profile, stop.axis, stop.degrees)
+            stop.reference = awaitFrame("Fotografo la tappa ${stop.label}")
+
+            // Ritorno a casa: la foto deve tornare quella di casa. Questo scarto è l'errore
+            // del giro completo, e non dipende da cosa c'è nell'inquadratura.
+            moveByModel(profile, stop.axis, -stop.degrees)
+            val backHome = WaypointImageVerifier.verify(homeReference, awaitFrame("Verifico il ritorno a casa"))
+
+            // Seconda andata: la foto deve tornare quella della tappa. Se combacia, il modello
+            // ci sa tornare; se no, di quanto sbaglia lo dicono i pixel.
+            moveByModel(profile, stop.axis, stop.degrees)
+            val backAtStop = WaypointImageVerifier.verify(stop.reference, awaitFrame("Verifico il ritorno alla tappa"))
+
+            // E si rientra, per lasciare la camera dove l'utente l'ha messa.
+            moveByModel(profile, stop.axis, -stop.degrees)
+
+            val panAxis = stop.axis == GimbalCalibrationSample.AXIS_PAN
+            val degreesPerPixel = degreesPerPixel(stop.reference, fov, panAxis)
+            val result = RoundTripResult(
+                label = stop.label,
+                axis = stop.axis,
+                degrees = stop.degrees,
+                homeErrorDeg = backHome?.displacementPixels?.times(degreesPerPixel),
+                stopErrorDeg = backAtStop?.displacementPixels?.times(degreesPerPixel),
+                homeComparable = backHome != null && backHome.confidence >= ZERO_MIN_CONFIDENCE,
+                stopComparable = backAtStop != null && backAtStop.confidence >= ZERO_MIN_CONFIDENCE,
+            )
+            results += result
+            _state.value = _state.value.copy(
+                verificationLabel = result.verdict(),
+                shiftX = backAtStop?.shiftX ?: 0f,
+                shiftY = backAtStop?.shiftY ?: 0f,
+                annotatedJpeg = WaypointImageVerifier.annotatedCurrentJpeg(stop.reference, backAtStop),
+            )
+            log.info(
+                "CALIBRAZIONE · ANDATA E RITORNO ${stop.label.uppercase()}",
+                buildString {
+                    appendLine("Spostamento comandato: %.0f° · un pixel di miniatura vale %.3f°".format(stop.degrees, degreesPerPixel))
+                    appendLine(
+                        "Tornato a casa: " + (result.homeErrorDeg
+                            ?.let { "scarto %.2f°".format(it) }
+                            ?: "immagine non confrontabile"),
+                    )
+                    append(
+                        "Tornato alla tappa: " + (result.stopErrorDeg
+                            ?.let { "scarto %.2f°".format(it) }
+                            ?: "immagine non confrontabile"),
+                    )
+                },
+                imageJpeg = WaypointImageVerifier.annotatedCurrentJpeg(stop.reference, backAtStop),
+            )
+        }
+        return results
+    }
+
+    /** Riepilogo della prova, in gradi di errore: il numero che conta. */
+    private fun logRoundTripSummary(results: List<RoundTripResult>) {
+        if (results.isEmpty()) return
+        val worst = results.mapNotNull(RoundTripResult::worstErrorDeg).maxOrNull()
+        val comparable = results.count { it.homeComparable || it.stopComparable }
+        val summary = buildString {
+            results.forEach { r ->
+                appendLine(
+                    "%-10s comandati %+.0f° · ritorno a casa %s · ritorno alla tappa %s".format(
+                        r.label,
+                        r.degrees,
+                        r.homeErrorDeg?.let { "%.2f°".format(it) } ?: "—",
+                        r.stopErrorDeg?.let { "%.2f°".format(it) } ?: "—",
+                    ),
+                )
+            }
+            append(
+                when {
+                    comparable == 0 ->
+                        "Nessuna tappa confrontabile: la scena non permette di misurare il ritorno."
+                    worst == null -> "Nessuno scarto misurabile."
+                    worst <= ROUND_TRIP_GOOD_DEG ->
+                        "Scarto massimo %.2f°: il modello torna dove dice di tornare.".format(worst)
+                    else ->
+                        "Scarto massimo %.2f°: il modello sbaglia di questo, ed è la misura che conta per i waypoint."
+                            .format(worst)
+                },
+            )
+        }
+        if (worst != null && worst > ROUND_TRIP_GOOD_DEG) {
+            log.warn("CALIBRAZIONE · ANDATA E RITORNO", summary)
+        } else {
+            log.info("CALIBRAZIONE · ANDATA E RITORNO", summary)
+        }
+    }
+
+    /**
+     * Quanti gradi vale un pixel della miniatura, sull'asse richiesto.
+     *
+     * Le dimensioni si leggono dall'immagine invece di darle per scontate: la miniatura ha la
+     * larghezza fissa ma l'altezza segue il rapporto dello stream, che cambia con la modalità
+     * della camera. Usare un'altezza presunta sbaglierebbe i gradi verticali di un terzo, e un
+     * terzo su 45° sono quindici gradi di errore raccontati come misura.
+     */
+    private fun degreesPerPixel(reference: ByteArray?, fov: LensFieldOfView, panAxis: Boolean): Float {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        if (reference != null) BitmapFactory.decodeByteArray(reference, 0, reference.size, options)
+        val span = if (panAxis) options.outWidth else options.outHeight
+        if (span <= 0) return 0f
+        return (if (panAxis) fov.horizontalDegrees else fov.verticalDegrees) / span
+    }
+
+    /** Muove dei gradi richiesti secondo il modello, senza fermarsi ai limiti. */
+    private suspend fun moveByModel(profile: GimbalCalibrationProfile, axis: String, degrees: Float) {
+        movePredictedDegrees(profile, axis, degrees, ROUND_TRIP_INTENSITY_PERCENT, stopAtLimit = true)
+        delay(HOME_SETTLE_MS)
+    }
+
+    /** Esito di una tappa: gli scarti in gradi, che sono errori veri e non punteggi. */
+    data class RoundTripResult(
+        val label: String,
+        val axis: String,
+        val degrees: Float,
+        val homeErrorDeg: Float?,
+        val stopErrorDeg: Float?,
+        val homeComparable: Boolean,
+        val stopComparable: Boolean,
+    ) {
+        val worstErrorDeg: Float? get() = listOfNotNull(homeErrorDeg, stopErrorDeg).maxOrNull()
+
+        fun verdict(): String = when {
+            !homeComparable && !stopComparable -> "${label.uppercase()} · SCENA NON CONFRONTABILE"
+            (worstErrorDeg ?: 0f) <= GOOD_RETURN_DEG -> "${label.uppercase()} · RITORNO ESATTO"
+            else -> "${label.uppercase()} · SCARTO %.1f°".format(worstErrorDeg ?: 0f)
+        }
+
+        companion object {
+            /** Sotto questo scarto il ritorno si considera esatto: è la tolleranza dei waypoint. */
+            const val GOOD_RETURN_DEG = 2f
+        }
+    }
 
     private suspend fun validateMotionModel(
         profile: GimbalCalibrationProfile,
@@ -1278,7 +1488,9 @@ class GimbalCalibrator(
      */
     private fun keepHomeInsideLimits(limits: GimbalAxisLimits, axis: String) {
         val panAxis = axis == GimbalCalibrationSample.AXIS_PAN
-        val margin = TARGET_RESPONSE_ARC_DEG + HOME_LIMIT_MARGIN_DEG
+        // Metà arco per lato, più un margine: la spazzata parte da casa e si allontana di
+        // un arco in un verso solo per volta, non di un arco per parte.
+        val margin = TARGET_RESPONSE_ARC_DEG / 2f + HOME_LIMIT_MARGIN_DEG
         val low = limits.minimumDeg + margin
         val high = limits.maximumDeg - margin
         if (low >= high) return
@@ -1470,7 +1682,16 @@ class GimbalCalibrator(
         if (verification.candidateMatches <= 0) 0
         else (verification.inlierMatches * 100 / verification.candidateMatches).coerceIn(0, 100)
 
-    /** Coerenza della risposta osservata rispetto alle misure precedenti dello stesso asse. */
+    /**
+     * Coerenza della risposta osservata rispetto alle misure precedenti dello stesso asse.
+     *
+     * Attenzione a cosa *non* è: non è la bontà di un'inquadratura. Durante una spazzata due
+     * fotogrammi consecutivi mostrano posti diversi, perché la camera si è mossa apposta —
+     * confrontarli per dare un voto all'inquadratura non significherebbe niente. Qui il
+     * confronto serve solo a misurare di quanto si è spostata l'immagine, e il punteggio dice
+     * se quella velocità somiglia alle altre misure della stessa intensità. La verifica di
+     * *posizione* è un'altra cosa e si fa altrove, con l'andata e ritorno.
+     */
     private fun responseScorePercent(sample: GimbalCalibrationSample, previous: List<GimbalCalibrationSample>): Int {
         val peers = previous.filter {
             it.usable && it.intensityPercent == sample.intensityPercent && it.axis == sample.axis
@@ -1559,6 +1780,13 @@ class GimbalCalibrator(
 
         /** Sotto questa distanza fra casa e fine corsa la misura di scala non dice nulla. */
         const val MIN_VALIDATION_DISTANCE_DEG = 25f
+
+        // Andata e ritorno: quanto ci si allontana, con che intensità, e quale scarto è buono.
+        const val ROUND_TRIP_ARC_DEG = 45f
+        const val ROUND_TRIP_TILT_UP_DEG = 45f
+        const val ROUND_TRIP_TILT_DOWN_DEG = 30f
+        const val ROUND_TRIP_INTENSITY_PERCENT = 30
+        const val ROUND_TRIP_GOOD_DEG = RoundTripResult.GOOD_RETURN_DEG
 
         /** Scarto di scala oltre il quale il posizionamento mostrato scende a zero. */
         const val MAX_ACCEPTABLE_SCALE_ERROR = 0.25f

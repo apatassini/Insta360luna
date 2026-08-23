@@ -113,6 +113,43 @@ data class GimbalCalibrationProfile(
                     it.validTiltSamples >= MIN_SAMPLES_PER_AXIS
             }
 
+    /**
+     * Perché il profilo non è valido, in una frase leggibile. Nullo quando è valido.
+     *
+     * Serve perché "Misure insufficienti (42/42)" non è una diagnosi: quel 42 su 42 dice che
+     * tutti i campioni raccolti erano buoni, e nasconde che a mancare erano quelli mai
+     * raccolti. Chi legge deve sapere quale intensità e quale asse, non un rapporto che torna.
+     */
+    val invalidReason: String?
+        get() {
+            if (schemaVersion != CURRENT_SCHEMA) return "profilo di una versione precedente"
+            if (calibratedAtMs <= 0L) return "profilo mai calibrato"
+            if (!panLimits.isValid) return "fine corsa orizzontali non affidabili"
+            if (!tiltLimits.isValid) return "fine corsa verticali non affidabili"
+            if (responsePoints.size < MIN_VALID_POINTS) {
+                return "solo ${responsePoints.size} intensità misurate su almeno $MIN_VALID_POINTS"
+            }
+            if (responsePoints.none { it.intensityPercent <= 10 }) {
+                return "nessuna intensità bassa (1–10%) misurata: senza quelle i movimenti lenti non sono calcolabili"
+            }
+            if (responsePoints.none { it.intensityPercent == 100 }) return "il 100% non è stato misurato"
+            responsePoints.forEach { point ->
+                if (point.validPanSamples < MIN_SAMPLES_PER_AXIS) {
+                    return "al ${point.intensityPercent}% l'orizzontale ha ${point.validPanSamples} misure buone su $MIN_SAMPLES_PER_AXIS"
+                }
+                if (point.validTiltSamples < MIN_SAMPLES_PER_AXIS) {
+                    return "al ${point.intensityPercent}% il verticale ha ${point.validTiltSamples} misure buone su $MIN_SAMPLES_PER_AXIS"
+                }
+                if (abs(point.panImagePixelsPerSecond) < MIN_RATE) {
+                    return "al ${point.intensityPercent}% l'orizzontale non ha mosso abbastanza da essere misurato"
+                }
+                if (abs(point.tiltImagePixelsPerSecond) < MIN_RATE) {
+                    return "al ${point.intensityPercent}% il verticale non ha mosso abbastanza da essere misurato"
+                }
+            }
+            return null
+        }
+
     val qualityPercent: Int
         get() = if (totalSamples <= 0) 0 else (validSamples * 100 / totalSamples).coerceIn(0, 100)
 

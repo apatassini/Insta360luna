@@ -637,6 +637,29 @@ Restano un paio di minuti sullo zero hardware: sono i quattro collaudi finali, c
 coordinate contro i fine corsa e per definizione partono da lì. Finiti quelli, la camera torna a
 casa.
 
+### Andata e ritorno: la prova che dice se il modello sa muoversi
+
+Durante una spazzata l'app confronta due fotogrammi consecutivi. Serve a **misurare di quanto
+si è spostata l'immagine**, e va bene per quello — ma non dice niente sulla precisione, perché
+quelle due inquadrature mostrano posti diversi: la camera si è mossa apposta. Un punteggio di
+somiglianza fra due immagini che *devono* differire non è una misura di nulla.
+
+La misura che conta è un'altra, e alla fine della calibrazione c'è:
+
+1. da casa si va a **+45°**, e si fotografa;
+2. si torna a **casa**, e si confronta con la foto di casa — **deve combaciare**;
+3. si torna a **+45°**, e si confronta con la foto di +45° — **deve combaciare**;
+4. si rientra, e si ripete a −45°, +45° in alto, −30° in basso.
+
+Ogni scarto è un errore vero, non un voto: i pixel diventano gradi perché il campo visivo
+dell'obiettivo è noto (20 mm equivalenti per lo zoom in uso), e le dimensioni della miniatura si
+leggono dall'immagine invece di darle per scontate — l'altezza segue il rapporto dello stream,
+che cambia con la modalità, e presumerla sbaglierebbe i gradi verticali di un terzo.
+
+Il log riporta, per ogni tappa, di quanti gradi il ritorno ha mancato il punto. Sotto i 2° il
+modello torna dove dice di tornare; sopra, quello scarto è esattamente l'errore che avranno i
+waypoint.
+
 ### La scala in gradi viene dai fine corsa, non dal cronometro
 
 Le immagini danno la **forma** della curva — quanto è più veloce il 100% del 10% — ma non la sua

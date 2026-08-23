@@ -266,11 +266,36 @@ object LunaMessages {
             .toByteArray()
     }
 
-    /** `GIMBAL_ACTION_BACK_CENTER = 2`: lo stesso zero hardware del doppio clic fisico. */
-    fun gimbalBackCenter(): ByteArray =
-        ProtoWriter()
-            .int32(1, 2)
-            .toByteArray()
+    /**
+     * Azioni del gimbal trasportate dal campo 1 di `GIMBAL_CONTROL`.
+     *
+     * Di questo enum sono confermati due valori soltanto, ed è il motivo per cui non ne trovi
+     * altri qui: [MOVE] è il vettore della levetta, [BACK_CENTER] è lo zero hardware. Il
+     * comando nativo che gira di 180° per il selfie esiste quasi certamente con un altro
+     * valore, ma nessuna cattura pubblica lo mostra: si cerca con la carta *Azioni del gimbal*
+     * della Diagnostica e, una volta trovato, si scrive in `GimbalSettings.selfieActionCode`.
+     * Fino ad allora il selfie lo fa la rotazione di 180° calcolata sul profilo di calibrazione.
+     */
+    object GimbalAction {
+        /** Vettore continuo della levetta: il payload porta anche il campo 2 con gli assi. */
+        const val MOVE = 1
+
+        /** `GIMBAL_ACTION_BACK_CENTER`: lo stesso zero hardware del doppio clic fisico. */
+        const val BACK_CENTER = 2
+    }
+
+    /**
+     * Azione senza assi: il solo campo 1 di `GIMBAL_CONTROL`.
+     *
+     * [GimbalAction.BACK_CENTER] produce esattamente `08 02`, il payload osservato in cattura.
+     */
+    fun gimbalAction(action: Int): ByteArray {
+        require(action in 0..127) { "Azione gimbal fuori intervallo: $action" }
+        return ProtoWriter().int32(1, action).toByteArray()
+    }
+
+    /** Zero hardware del firmware: non è il centro della corsa, è lo zero del corpo camera. */
+    fun gimbalBackCenter(): ByteArray = gimbalAction(GimbalAction.BACK_CENTER)
 
     /** Scrittura del livello hardware del gimbal: 1 lento, 2 medio, 3 veloce. */
     fun setGimbalSpeed(level: Int): ByteArray {

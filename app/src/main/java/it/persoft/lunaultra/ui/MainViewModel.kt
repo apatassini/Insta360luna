@@ -14,6 +14,7 @@ import it.persoft.lunaultra.data.GimbalSettings
 import it.persoft.lunaultra.data.PhotoSettings
 import it.persoft.lunaultra.data.LunaVideoProfiles
 import it.persoft.lunaultra.data.VideoSettings
+import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.preview.PreviewState
@@ -602,15 +603,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { container.gimbal.stop() }
     }
 
+    /**
+     * Zero hardware del firmware.
+     *
+     * Il messaggio dice dov'è quello zero perché è la domanda che arriva sempre: 0° è il
+     * fronte del corpo camera, non il centro della corsa -57°…+235°. Se la camera è
+     * appoggiata con il fronte verso di noi, ricentrare significa inquadrarci.
+     */
     fun zeroPosition() {
         viewModelScope.launch {
             container.gimbal.recenter()
                 .onSuccess {
                     container.gimbal.setEstimated(0f, 0f)
-                    showMessage("Gimbal ricentrato sullo zero hardware")
+                    showMessage("Gimbal sullo zero hardware (0° = fronte della camera)")
                 }
                 .onFailure { showMessage("Ricentraggio non riuscito: ${it.message}") }
         }
+    }
+
+    /** Mezzo giro del pan: l'inquadratura passa dall'altra parte, per il selfie. */
+    fun selfieTurn() {
+        viewModelScope.launch {
+            val native = settings.value.gimbal.selfieActionCode > 0
+            container.gimbal.selfieTurn()
+                .onSuccess {
+                    showMessage(
+                        if (native) "Selfie: azione nativa ${settings.value.gimbal.selfieActionCode}"
+                        else "Mezzo giro eseguito · pan %.0f°".format(container.gimbal.position.value.pan),
+                    )
+                }
+                .onFailure { showMessage("Mezzo giro non riuscito: ${it.message}") }
+        }
+    }
+
+    /**
+     * Invia una singola azione del gimbal per numero, dalla Diagnostica.
+     *
+     * Serve a trovare il comando nativo del selfie: dei valori del campo 1 di
+     * `GIMBAL_CONTROL` ne conosciamo due, e l'unico modo di scoprire gli altri è provarli
+     * guardando l'anteprima. La miniatura prima/dopo finisce nel log.
+     */
+    fun probeGimbalAction(action: Int) {
+        viewModelScope.launch {
+            val before = container.preview.captureThumbnailJpeg()
+            container.log.info(
+                "AZIONE GIMBAL $action · PRIMA",
+                "Invio GIMBAL_CONTROL campo 1 = $action.",
+                imageJpeg = before,
+            )
+            container.commands.gimbalAction(action)
+                .onFailure {
+                    container.log.warn("AZIONE GIMBAL $action · NON INVIATA", it.message)
+                    showMessage("Azione $action non inviata: ${it.message}")
+                    return@launch
+                }
+            delay(GIMBAL_ACTION_PROBE_WAIT_MS)
+            val after = container.preview.captureThumbnailJpeg()
+            val verification = WaypointImageVerifier.verify(before, after)
+            container.log.info(
+                "AZIONE GIMBAL $action · DOPO",
+                verification?.describe() ?: "Anteprima non confrontabile: guarda lo schermo della camera.",
+                imageJpeg = WaypointImageVerifier.annotatedCurrentJpeg(after, verification),
+            )
+            showMessage("Azione $action inviata · confronta le due miniature nel log")
+        }
+    }
+
+    /** Scrive il codice dell'azione selfie trovata con la prova qui sopra. */
+    fun setSelfieActionCode(code: Int) {
+        updateGimbal { it.copy(selfieActionCode = code.coerceIn(0, 127)) }
     }
 
     fun goToWaypoint(waypoint: Waypoint, seconds: Float = 3f) {
@@ -1763,6 +1824,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val STATUS_POLL_MS = 3_000L
+
+        /** Attesa fra l'azione di prova e la miniatura di confronto: il gimbal deve arrivare. */
+        const val GIMBAL_ACTION_PROBE_WAIT_MS = 4_000L
 
         /** Quanto resta valido un elenco della libreria prima di rifare il giro. */
         const val GALLERY_FRESH_MS = 60_000L

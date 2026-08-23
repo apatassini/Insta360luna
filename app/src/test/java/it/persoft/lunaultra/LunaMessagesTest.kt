@@ -28,6 +28,26 @@ class LunaMessagesTest {
         assertEquals("0830080f080b", Hex.encode(body).replace(" ", "").lowercase())
     }
 
+    /**
+     * Lo zero hardware è `08 02`: un solo campo, nessun asse. È il payload osservato in
+     * cattura, e resta il metro di paragone per le altre azioni che si provano a mano.
+     */
+    @Test
+    fun `lo zero hardware e l'azione 2 senza assi`() {
+        assertEquals("0802", Hex.encode(LunaMessages.gimbalBackCenter()).replace(" ", "").lowercase())
+        assertEquals(
+            Hex.encode(LunaMessages.gimbalBackCenter()),
+            Hex.encode(LunaMessages.gimbalAction(LunaMessages.GimbalAction.BACK_CENTER)),
+        )
+    }
+
+    @Test
+    fun `un'azione arbitraria porta solo il campo 1`() {
+        val fields = ProtoReader(LunaMessages.gimbalAction(7)).fields()
+        assertEquals(1, fields.size)
+        assertEquals(1, fields.single().number)
+    }
+
     @Test
     fun `stop capture mette la modalita nel campo 2 non nel campo 1`() {
         val start = ProtoReader(LunaMessages.startCapture(1)).fields()

@@ -126,6 +126,8 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
 
         GimbalCodeCard(viewModel)
 
+        GimbalActionCard(viewModel)
+
         ProbeCard(viewModel, probe)
 
         ShapeCard(viewModel)
@@ -242,6 +244,71 @@ private fun GimbalCodeCard(viewModel: MainViewModel) {
             text = "Il valore predefinito ${LunaProtocolCodes.NOTIFICATION_PTZ_STATE_OBSERVED} " +
                 "viene da traffico osservato durante il movimento del gimbal, compatibile con " +
                 "CAMERA_NOTIFICATION_PTZ_STATE. È un indizio forte, non una certezza.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+
+/**
+ * Le azioni del gimbal, per numero.
+ *
+ * Del campo 1 di `GIMBAL_CONTROL` conosciamo due valori: 1 muove, 2 torna allo zero hardware.
+ * L'app ufficiale ha anche il mezzo giro per il selfie, quindi un terzo valore quasi certamente
+ * esiste — ma nessuna cattura pubblica lo mostra, e indovinarlo nel codice sarebbe inventarlo.
+ * Qui lo si prova sulla camera: ogni invio lascia nel log la miniatura prima e dopo, e quando
+ * una gira l'inquadratura di 180° si scrive il suo numero qui sotto.
+ */
+@Composable
+private fun GimbalActionCard(viewModel: MainViewModel) {
+    val settings by viewModel.settings.collectAsState()
+    var action by remember { mutableStateOf("3") }
+
+    SectionCard(title = "Azioni del gimbal") {
+        Text(
+            text = "Il comando 226 porta nel campo 1 un'azione: 1 è il movimento, 2 lo zero " +
+                "hardware. Prova gli altri numeri con l'anteprima accesa e la camera libera di " +
+                "girare: il log tiene la miniatura prima e dopo ogni invio.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            NumberField(
+                label = "Azione",
+                value = action,
+                onValueChange = { action = it },
+                modifier = Modifier.weight(1f),
+            )
+            Button(
+                onClick = { action.trim().toIntOrNull()?.let(viewModel::probeGimbalAction) },
+                modifier = Modifier.weight(1f),
+            ) { Text("Prova") }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = { action.trim().toIntOrNull()?.let(viewModel::setSelfieActionCode) },
+                modifier = Modifier.weight(1f),
+            ) { Text("È il selfie") }
+            OutlinedButton(
+                onClick = { viewModel.setSelfieActionCode(0) },
+                modifier = Modifier.weight(1f),
+            ) { Text("Nessuna") }
+        }
+        LabeledValue(
+            "Azione selfie",
+            if (settings.gimbal.selfieActionCode > 0) settings.gimbal.selfieActionCode.toString()
+            else "non trovata · mezzo giro calcolato",
+        )
+        Text(
+            text = "Finché l'azione nativa non è nota, il pulsante selfie del mirino ruota il " +
+                "pan di ${settings.gimbal.selfieTurnDeg.toInt()}° usando il profilo di " +
+                "calibrazione, scegliendo il verso che resta dentro i fine corsa.",
             style = MaterialTheme.typography.bodySmall,
         )
     }

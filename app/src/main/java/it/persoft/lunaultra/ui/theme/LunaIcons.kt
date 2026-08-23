@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.GridOff
@@ -114,6 +115,9 @@ object LunaIcons {
     val Left: ImageVector = Icons.Filled.KeyboardArrowLeft
     val Right: ImageVector = Icons.Filled.KeyboardArrowRight
     val Center: ImageVector = Icons.Filled.MyLocation
+
+    /** Mezzo giro del pan: l'inquadratura passa dietro, come il selfie dell'app ufficiale. */
+    val Selfie: ImageVector = Icons.Filled.FlipCameraAndroid
     val Speed: ImageVector = Icons.Filled.Speed
     val Axis: ImageVector = Icons.Filled.SwapVert
     val Level: ImageVector = Icons.Filled.Straighten

@@ -7,7 +7,18 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-enum class LogLevel { DEBUG, INFO, TX, RX, WARN, ERROR }
+enum class LogLevel {
+    DEBUG, INFO, TX, RX, WARN, ERROR;
+
+    /**
+     * Righe che raccontano cosa è successo, non cosa è passato sul filo.
+     *
+     * La distinzione serve allo scarto del log circolare: una calibrazione manda migliaia di
+     * pacchetti e riceve altrettanti `RISPOSTA_OK` vuoti. In un log da 5.000 righe quel
+     * traffico è il 92% del totale e caccia fuori proprio le righe che spiegano l'esito.
+     */
+    val isNarrative: Boolean get() = this == INFO || this == WARN || this == ERROR
+}
 
 data class LogEntry(
     val timestampMs: Long,
@@ -42,6 +53,11 @@ data class LogEntry(
  * La capienza è ampia di proposito. Il log non serve a farsi un'idea mentre si guarda: serve a
  * essere esportato e letto dopo, per capire cosa la camera ha risposto davvero. Una sessione di
  * scansione produce centinaia di righe e troncarle vanificherebbe l'esportazione.
+ *
+ * Quando è pieno non scarta la riga più vecchia e basta: scarta prima il traffico
+ * (`TX`/`RX`/`DEBUG`) e tocca le righe di racconto solo quando non è rimasto altro. Un log di
+ * calibrazione arrivato pieno di `RISPOSTA_OK` vuoti perdeva l'avvio della calibrazione pur
+ * avendo spazio da vendere: quello spazio era occupato da conferme senza payload.
  */
 class EventLog(private val capacity: Int = 5_000) {
 
@@ -51,10 +67,23 @@ class EventLog(private val capacity: Int = 5_000) {
     fun log(level: LogLevel, message: String, detail: String? = null, imageJpeg: ByteArray? = null) {
         // La copia rende l'entry immutabile anche se il buffer del JPEG viene riutilizzato.
         val entry = LogEntry(System.currentTimeMillis(), level, message, detail, imageJpeg?.copyOf())
-        _entries.update { current ->
-            val next = current + entry
-            if (next.size > capacity) next.subList(next.size - capacity, next.size) else next
+        _entries.update { current -> trim(current + entry) }
+    }
+
+    /** Toglie il necessario per rientrare nella capienza, sacrificando prima il traffico. */
+    private fun trim(entries: List<LogEntry>): List<LogEntry> {
+        val excess = entries.size - capacity
+        if (excess <= 0) return entries
+        val dropped = HashSet<Int>(excess * 2)
+        entries.forEachIndexed { index, entry ->
+            if (dropped.size < excess && !entry.level.isNarrative) dropped += index
         }
+        if (dropped.size < excess) {
+            entries.indices.forEach { index ->
+                if (dropped.size < excess) dropped += index
+            }
+        }
+        return entries.filterIndexed { index, _ -> index !in dropped }
     }
 
     fun debug(message: String, detail: String? = null, imageJpeg: ByteArray? = null) =

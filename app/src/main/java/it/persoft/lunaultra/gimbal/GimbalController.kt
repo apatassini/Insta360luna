@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sign
 
 /**
@@ -148,7 +149,14 @@ class GimbalController(
         }
     }
 
-    /** Usa lo zero meccanico del firmware; non simula il ritorno integrando impulsi. */
+    /**
+     * Usa lo zero meccanico del firmware; non simula il ritorno integrando impulsi.
+     *
+     * Quello zero è il fronte del corpo camera e **non** il centro della corsa: l'intervallo
+     * è -57°…+235°, quindi 0° sta a un sesto della corsa. Se la camera è appoggiata con il
+     * fronte rivolto a chi la usa, dopo questo comando lo inquadra: è dove guarda lo zero,
+     * non un comando sbagliato. Per girarsi dall'altra parte c'è [selfieTurn].
+     */
     suspend fun recenter(): Result<Unit> {
         stop()
         val result = commands.gimbalBackCenter()
@@ -158,6 +166,56 @@ class GimbalController(
             appliedSinceNanos = System.nanoTime()
         }
         return result
+    }
+
+    /**
+     * Mezzo giro sul pan: l'inquadratura passa dall'altra parte, il tilt resta dov'è.
+     *
+     * Se l'azione nativa dell'app ufficiale è stata trovata e scritta nelle impostazioni la
+     * usa; altrimenti ruota di `selfieTurnDeg` con il profilo di calibrazione,
+     * scegliendo il verso che resta dentro i fine corsa — a +235°/-57° i due versi non sono
+     * intercambiabili, e girare dalla parte sbagliata finisce contro il limite a metà strada.
+     */
+    suspend fun selfieTurn(): Result<Unit> {
+        val cfg = settings.value.gimbal
+        if (cfg.selfieActionCode > 0) {
+            stop()
+            val result = commands.gimbalAction(cfg.selfieActionCode)
+            if (result.isSuccess) {
+                appliedPanPercent = 0f
+                appliedTiltPercent = 0f
+                appliedSinceNanos = System.nanoTime()
+                // Di un'azione nativa non sappiamo quanto muove: dirlo è meglio che scrivere
+                // una posizione inventata sopra a quella stimata. Il ricentraggio la rimette
+                // a posto, ed è quello che va fatto prima di memorizzare un waypoint.
+                log.warn(
+                    "Mezzo giro con l'azione nativa ${cfg.selfieActionCode}: la posizione stimata " +
+                        "non è più attendibile finché non ricentri.",
+                )
+            }
+            return result
+        }
+        integrateAppliedUntilNow()
+        val current = _position.value
+        val limits = panTravelLimits()
+        val target = selfiePanTarget(current.pan, cfg.selfieTurnDeg, limits.first, limits.second)
+        if (abs(target - current.pan) < MIN_SELFIE_TURN_DEG) {
+            return Result.failure(
+                IllegalStateException(
+                    "Non c'è corsa per il mezzo giro: il pan è a %.0f° e il limite è %.0f°"
+                        .format(current.pan, if (target >= current.pan) limits.second else limits.first),
+                ),
+            )
+        }
+        return moveToPosition(target, current.tilt)
+    }
+
+    /** Fine corsa del pan: quelli misurati se la calibrazione è valida, altrimenti gli ufficiali. */
+    private fun panTravelLimits(): Pair<Float, Float> {
+        val measured = calibration.value.panLimits
+        if (measured.isValid) return measured.minimumDeg to measured.maximumDeg
+        val cfg = settings.value.gimbal
+        return cfg.panMinDeg to cfg.panMaxDeg
     }
 
     /**
@@ -411,5 +469,30 @@ class GimbalController(
         private const val MAX_POSITION_STEPS = 3_600
         private const val VISUAL_MAX_SPEED = 0.35f
         private const val MIN_PROTOCOL_COMMAND = 0.01f
+        private const val MIN_SELFIE_TURN_DEG = 5f
     }
+}
+
+/**
+ * Verso del mezzo giro, scelto in modo che resti dentro i fine corsa.
+ *
+ * La corsa del pan è asimmetrica (-57°…+235°): dallo zero si può girare di 180° soltanto in
+ * avanti, e da 200° soltanto all'indietro. Quando nessuno dei due versi ci sta per intero
+ * vince quello che porta più lontano, fermandosi sul limite invece di sbatterci contro.
+ */
+internal fun selfiePanTarget(
+    currentPan: Float,
+    turnDeg: Float,
+    minimumDeg: Float,
+    maximumDeg: Float,
+): Float {
+    val turn = abs(turnDeg)
+    val low = min(minimumDeg, maximumDeg)
+    val high = max(minimumDeg, maximumDeg)
+    val start = currentPan.coerceIn(low, high)
+    val forward = start + turn
+    val backward = start - turn
+    if (forward <= high) return forward
+    if (backward >= low) return backward
+    return if (high - start >= start - low) high else low
 }

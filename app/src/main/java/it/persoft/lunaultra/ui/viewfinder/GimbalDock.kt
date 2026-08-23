@@ -35,7 +35,11 @@ import kotlin.math.roundToInt
 /**
  * Controllo gimbal da mirino: la levetta resta piccola nell'angolo in basso a destra e non
  * copre l'inquadratura. I tre puntini aprono solo quando serve il pannello con velocità,
- * memorizzazione del punto, azzeramento e stop.
+ * memorizzazione del punto e stop.
+ *
+ * Ricentra e mezzo giro stanno invece sempre in vista sopra la levetta: sono i due comandi
+ * che servono mentre si inquadra, e cercarli dentro un pannello da aprire ogni volta è
+ * esattamente il motivo per cui sembravano mancare.
  */
 @Composable
 fun GimbalDock(
@@ -52,6 +56,7 @@ fun GimbalDock(
     onRelease: () -> Unit,
     onStop: () -> Unit,
     onZero: () -> Unit,
+    onSelfie: () -> Unit,
     onCaptureWaypoint: () -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
@@ -59,7 +64,10 @@ fun GimbalDock(
     var optionsVisible by remember { mutableStateOf(false) }
     val joystickSize = if (compact) 76.dp else 88.dp
     val optionsWidth = if (compact) 214.dp else 236.dp
-    val totalHeight = if (optionsVisible) (if (compact) 342.dp else 360.dp) else joystickSize + 38.dp
+    val quickRowHeight = 42.dp
+    val totalHeight =
+        if (optionsVisible) (if (compact) 342.dp else 360.dp) + quickRowHeight
+        else joystickSize + 38.dp + quickRowHeight
 
     Box(
         modifier = modifier
@@ -78,7 +86,6 @@ fun GimbalDock(
                 onSpeedChange = onSpeedChange,
                 onHardwareSpeedChange = onHardwareSpeedChange,
                 onStop = onStop,
-                onZero = onZero,
                 onCaptureWaypoint = onCaptureWaypoint,
                 modifier = Modifier.align(Alignment.TopEnd).width(optionsWidth),
             )
@@ -89,6 +96,22 @@ fun GimbalDock(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                HudIconButton(
+                    icon = LunaIcons.Center,
+                    contentDescription = "Ricentra sullo zero della camera",
+                    onClick = onZero,
+                    enabled = enabled,
+                    size = 34.dp,
+                )
+                HudIconButton(
+                    icon = LunaIcons.Selfie,
+                    contentDescription = "Mezzo giro: inquadra dalla parte opposta",
+                    onClick = onSelfie,
+                    enabled = enabled,
+                    size = 34.dp,
+                )
+            }
             GimbalJoystick(
                 enabled = enabled,
                 onVector = onVector,
@@ -118,7 +141,6 @@ private fun GimbalOptions(
     onSpeedChange: (Int) -> Unit,
     onHardwareSpeedChange: (Int) -> Unit,
     onStop: () -> Unit,
-    onZero: () -> Unit,
     onCaptureWaypoint: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -178,13 +200,6 @@ private fun GimbalOptions(
             horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
             HudIconButton(
-                icon = LunaIcons.Center,
-                contentDescription = "Considera questa posizione come 0° / 0°",
-                onClick = onZero,
-                enabled = enabled,
-                size = 38.dp,
-            )
-            HudIconButton(
                 icon = LunaIcons.Waypoint,
                 contentDescription = "Memorizza punto e inquadratura",
                 onClick = onCaptureWaypoint,
@@ -209,6 +224,12 @@ private fun GimbalOptions(
                 tiltDegrees,
                 if (positionFromCamera) "" else " (stima)",
             ),
+            style = MaterialTheme.typography.labelSmall,
+            color = Luna.OnSurfaceDim,
+        )
+
+        Text(
+            text = "0° è il fronte del corpo camera, non il centro della corsa (-57°…+235°).",
             style = MaterialTheme.typography.labelSmall,
             color = Luna.OnSurfaceDim,
         )

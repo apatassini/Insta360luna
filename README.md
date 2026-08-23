@@ -331,7 +331,7 @@ invece che sotto — un tocco sull'immagine le toglie e l'anteprima si allarga a
 |---|---|
 | Fascia in alto | connessione (si tocca per connettere), distintivo della modalità, anteprima on/off, griglia, impostazioni, menu ⋮ |
 | Sull'immagine, in alto a sinistra | spazio libero, batteria, gimbal pronto o no, cronometro di registrazione |
-| Sull'immagine, in basso | azzera posizione, pastiglia del tempo che conta nella modalità, comandi del gimbal |
+| Sull'immagine, in basso | pastiglia del tempo che conta nella modalità, comandi del gimbal con **ricentra** e **mezzo giro** sempre in vista |
 | Fascia in basso | galleria (o memorizza punto) · **pulsante di scatto** · impostazioni **Camera** · **Automazioni gimbal**, e sotto la ghiera delle modalità |
 | Al centro | invito a connettersi, oppure il motivo per cui l'anteprima è ancora nera |
 
@@ -498,6 +498,52 @@ condivide lo stesso problema del comando di controllo — nome noto, numero no.
 
 Le velocità massime in °/s si tarano in Impostazioni → Movimento manuale (o in Diagnostica,
 insieme al resto della taratura fine): cronometra una rotazione completa e correggi. Da quelle dipende la corrispondenza fra la durata impostata e il movimento reale.
+
+### Ricentra e mezzo giro
+
+Lo **zero hardware** (`GIMBAL_CONTROL` con campo 1 = 2, payload `08 02`) è il fronte del corpo
+camera, **non** il centro della corsa: l'intervallo controllabile è -57°…+235°, quindi 0° sta a
+un sesto della corsa, non a metà. Se la camera è appoggiata con il fronte rivolto a chi la usa,
+ricentrare la fa guardare proprio lui — è dove guarda lo zero, non un comando sbagliato.
+
+Per questo il mirino ha due pulsanti **sempre in vista** sopra la levetta:
+
+| Pulsante | Cosa fa |
+|---|---|
+| **Ricentra** | zero hardware del firmware, lo stesso del doppio clic fisico |
+| **Mezzo giro** | l'inquadratura passa dalla parte opposta: il selfie |
+
+Del campo 1 di `GIMBAL_CONTROL` sono confermati due valori soltanto: 1 muove, 2 ricentra.
+L'azione nativa del mezzo giro dell'app ufficiale quasi certamente esiste con un terzo valore,
+ma nessuna cattura pubblica lo mostra e scriverlo nel codice sarebbe inventarlo. Finché non è
+noto il mezzo giro **ruota il pan di 180°** con il profilo di calibrazione, scegliendo il verso
+che resta dentro i fine corsa — a +235°/-57° i due versi non sono intercambiabili.
+
+Per trovarlo: Diagnostica → **Azioni del gimbal**, con l'anteprima accesa e la camera libera di
+girare. Ogni prova lascia nel log la miniatura prima e dopo; quando un numero gira
+l'inquadratura di 180°, *È il selfie* lo memorizza e da lì in poi il pulsante usa quello.
+
+### Calibrazione e ripetibilità dello zero
+
+La calibrazione misura due cose diverse, e conviene tenerle separate perché falliscono per
+motivi diversi:
+
+1. **la curva di risposta** — quanti gradi al secondo produce ogni intensità dall'1% al 100%.
+   Si misura sugli *spostamenti* fra un fotogramma e il successivo, a pochi secondi di
+   distanza l'uno dall'altro;
+2. **la ripetibilità dello zero** — se dopo un ricentraggio l'inquadratura torna dov'era.
+   Si misura confrontando due immagini prese a **minuti** di distanza.
+
+La seconda dipende dal mondo, non solo dal gimbal: in otto minuti le persone si spostano, la
+luce gira, il vento muove le foglie. Per questo il riferimento visivo dello zero viene ripreso
+all'inizio della validazione invece di essere ereditato dal primo fotogramma, lo scarto viene
+creduto solo con un consenso RANSAC forte (altrimenti il log dice *scena cambiata*), e **un
+esito negativo non butta via la curva**: viene registrato come avvertimento e il profilo si
+salva lo stesso. Una curva valida e uno zero che si sposta sono un risultato utile — dicono di
+rifare i waypoint, non di rifare gli otto minuti di misure.
+
+Se la ripetibilità serve davvero, la calibrazione va fatta inquadrando qualcosa di **fermo**:
+niente persone, niente traffico, niente rami al vento.
 
 L'interpolazione fra due waypoint segue le formule della specifica:
 

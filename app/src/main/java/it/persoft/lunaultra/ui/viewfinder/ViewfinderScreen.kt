@@ -213,6 +213,7 @@ fun ViewfinderScreen(
                     onRelease = viewModel::jogStop,
                     onStop = viewModel::jogStop,
                     onZero = viewModel::zeroPosition,
+                    onSelfie = viewModel::selfieTurn,
                     onCaptureWaypoint = viewModel::captureWaypoint,
                     compact = landscape,
                     modifier = Modifier

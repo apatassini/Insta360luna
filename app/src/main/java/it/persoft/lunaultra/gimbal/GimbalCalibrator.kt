@@ -452,8 +452,13 @@ class GimbalCalibrator(
     /**
      * Collaudo del modello prima del salvataggio. Per il pan destro esegue esplicitamente
      * il caso richiesto: 0° -> 200° teorici -> ultimi 35° circa -> notifica di fine corsa.
+     *
+     * Il riferimento visivo dello zero viene ripreso qui, non ereditato dall'avvio: fra la
+     * prima inquadratura e questo punto passano otto minuti, e in otto minuti la scena reale
+     * cambia da sola — le persone si spostano, la luce gira, il vento muove le foglie. Con un
+     * riferimento vecchio la ripetibilità dello zero misura il mondo, non il gimbal.
      */
-    private suspend fun validateMotionModel(profile: GimbalCalibrationProfile, zeroReference: ByteArray) {
+    private suspend fun validateMotionModel(profile: GimbalCalibrationProfile, startReference: ByteArray) {
         data class Target(val axis: String, val endpoint: Float, val checkpoint: Float)
         val targets = listOf(
             Target(GimbalCalibrationSample.AXIS_PAN, profile.panLimits.maximumDeg, 200f),
@@ -467,9 +472,14 @@ class GimbalCalibrator(
             message = "Verifico che gli impulsi previsti coincidano coi quattro fine corsa",
         )
 
+        recenterHardware("Zero di riferimento della validazione", 90, 90)
+        val zeroReference = awaitFrame("Attendo l'immagine dello zero di riferimento")
+        describeSceneDrift(startReference, zeroReference)
+
+        val zeroChecks = mutableListOf<ZeroCheck>()
         targets.forEachIndexed { index, target ->
             recenterHardware("Zero prima della verifica ${directionLabel(target.axis, target.endpoint)}", 90 + index * 2, 91 + index * 2)
-            verifyRepeatedZero(zeroReference, index + 1)
+            zeroChecks += verifyRepeatedZero(zeroReference, index + 1, targets.size + 1)
             val checkpoint = target.checkpoint.coerceIn(
                 min(0f, target.endpoint),
                 max(0f, target.endpoint),
@@ -537,53 +547,150 @@ class GimbalCalibrator(
         }
 
         recenterHardware("Verifica finale dello zero", 98, 99)
-        val zeroNow = awaitFrame("Attendo l'immagine dello zero hardware")
-        val zeroVerification = WaypointImageVerifier.verify(zeroReference, zeroNow)
-        val zeroRepeatable = zeroVerification != null && zeroVerification.confidence >= MIN_RESPONSE_CONFIDENCE &&
-            zeroVerification.displacementPixels <= ZERO_REPEATABILITY_RADIUS_PX
-        if (zeroVerification != null && zeroVerification.confidence >= MIN_RESPONSE_CONFIDENCE && !zeroRepeatable) {
-            throw IllegalStateException(
-                "Lo zero hardware non e ripetibile: scarto immagine %.1f px".format(zeroVerification.displacementPixels),
-            )
-        }
+        zeroChecks += verifyRepeatedZero(zeroReference, targets.size + 1, targets.size + 1)
+
+        val judged = zeroChecks.filter(ZeroCheck::comparable)
+        val mismatches = judged.count(ZeroCheck::mismatch)
+        val worst = zeroChecks.maxOfOrNull(ZeroCheck::displacementPixels) ?: 0f
         _state.value = _state.value.copy(
             overallPercent = 99,
-            positioningPercent = zeroVerification?.let(::returnPositionPercent) ?: 0,
-            shiftX = zeroVerification?.shiftX ?: 0f,
-            shiftY = zeroVerification?.shiftY ?: 0f,
-            verificationLabel = if (zeroRepeatable) "ZERO HARDWARE RIPETIBILE" else "ZERO HARDWARE · VERIFICA VISIVA INCERTA",
-            annotatedJpeg = WaypointImageVerifier.annotatedCurrentJpeg(zeroNow, zeroVerification),
+            verificationLabel = when {
+                judged.isEmpty() -> "ZERO HARDWARE · SCENA NON CONFRONTABILE"
+                mismatches == 0 -> "ZERO HARDWARE RIPETIBILE"
+                else -> "ZERO HARDWARE SPOSTATO IN $mismatches PROVE SU ${judged.size}"
+            },
         )
-        log.info(
-            "CALIBRAZIONE · ZERO RIPETIBILE",
-            zeroVerification?.describe() ?: "Ricentraggio hardware completato; immagine non confrontabile.",
-            imageJpeg = WaypointImageVerifier.annotatedCurrentJpeg(zeroNow, zeroVerification),
-        )
-    }
-
-    /** Ogni prova parte dal medesimo zero ottico, non soltanto da coordinate azzerate in memoria. */
-    private suspend fun verifyRepeatedZero(zeroReference: ByteArray, attempt: Int) {
-        val current = awaitFrame("Verifico che il centro hardware sia sempre lo stesso")
-        val verification = WaypointImageVerifier.verify(zeroReference, current)
-        val comparable = verification != null && verification.confidence >= MIN_RESPONSE_CONFIDENCE
-        if (comparable && verification!!.displacementPixels > ZERO_REPEATABILITY_RADIUS_PX) {
-            throw IllegalStateException(
-                "Il centro hardware della prova $attempt non coincide: scarto immagine %.1f px"
-                    .format(verification.displacementPixels),
+        val summary = buildString {
+            appendLine("Prove confrontabili: ${judged.size}/${zeroChecks.size} · scarto massimo %.1f px".format(worst))
+            append(
+                when {
+                    judged.isEmpty() ->
+                        "Nessuna prova era confrontabile: durante la calibrazione la scena è " +
+                            "cambiata. La curva è stata comunque misurata e viene salvata; per " +
+                            "avere anche la ripetibilità dello zero servono otto minuti di scena ferma."
+                    mismatches == 0 ->
+                        "Lo zero hardware è tornato ogni volta nello stesso punto."
+                    else ->
+                        "Lo zero hardware si è spostato in $mismatches prove su ${judged.size}. " +
+                            "La curva di velocità resta valida — è misurata sugli spostamenti, non " +
+                            "sul punto di partenza — ma i waypoint memorizzati prima di questa " +
+                            "calibrazione possono essere sfalsati: rifalli."
+                },
             )
         }
-        log.info(
-            "CALIBRAZIONE · ZERO PRIMA DELLA PROVA $attempt",
-            verification?.describe() ?: "Comando BACK_CENTER eseguito; scena non confrontabile.",
-            imageJpeg = WaypointImageVerifier.annotatedCurrentJpeg(current, verification),
-        )
+        if (mismatches > 0 || judged.isEmpty()) {
+            log.warn("CALIBRAZIONE · RIPETIBILITÀ DELLO ZERO", summary)
+        } else {
+            log.info("CALIBRAZIONE · RIPETIBILITÀ DELLO ZERO", summary)
+        }
+    }
+
+    /**
+     * Ogni prova parte dal medesimo zero ottico, non soltanto da coordinate azzerate in memoria.
+     *
+     * Lo scarto viene creduto solo se il confronto ha un consenso forte: con qualcuno che si
+     * muove davanti alla camera RANSAC trova comunque una traslazione, e quella traslazione
+     * non è il gimbal. Quando il consenso è debole si registra "scena cambiata" e si va avanti.
+     * In nessun caso la ripetibilità dello zero butta via la curva già misurata: dice dove
+     * guarda lo zero, non quanto è veloce il gimbal — sono due misure diverse.
+     */
+    private suspend fun verifyRepeatedZero(zeroReference: ByteArray, attempt: Int, attempts: Int): ZeroCheck {
+        val current = awaitFrame("Verifico che il centro hardware sia sempre lo stesso")
+        val verification = WaypointImageVerifier.verify(zeroReference, current)
+        val check = classifyZero(verification)
+        val annotated = WaypointImageVerifier.annotatedCurrentJpeg(current, verification)
+        val detail = buildString {
+            appendLine(verification?.describe() ?: "Comando BACK_CENTER eseguito; scena non confrontabile.")
+            append(check.explanation)
+        }
+        if (check.mismatch) {
+            log.warn("CALIBRAZIONE · ZERO PRIMA DELLA PROVA $attempt", detail, imageJpeg = annotated)
+        } else {
+            log.info("CALIBRAZIONE · ZERO PRIMA DELLA PROVA $attempt", detail, imageJpeg = annotated)
+        }
         _state.value = _state.value.copy(
             shiftX = verification?.shiftX ?: 0f,
             shiftY = verification?.shiftY ?: 0f,
             positioningPercent = verification?.let(::returnPositionPercent) ?: 0,
-            verificationLabel = if (comparable) "ZERO RIPETIBILE · PROVA $attempt/4" else "ZERO HARDWARE · IMMAGINE INCERTA",
-            annotatedJpeg = WaypointImageVerifier.annotatedCurrentJpeg(current, verification),
+            verificationLabel = when {
+                check.mismatch -> "ZERO SPOSTATO · PROVA $attempt/$attempts"
+                check.comparable -> "ZERO RIPETIBILE · PROVA $attempt/$attempts"
+                else -> "SCENA CAMBIATA · PROVA $attempt/$attempts"
+            },
+            annotatedJpeg = annotated,
         )
+        return check
+    }
+
+    /**
+     * Esito di un confronto con lo zero ottico.
+     *
+     * [comparable] vuol dire che il confronto ha davvero misurato qualcosa; [mismatch] che il
+     * gimbal non è tornato dove era. Un confronto non comparabile non è un fallimento del
+     * gimbal: è una scena che nel frattempo si è mossa.
+     */
+    private data class ZeroCheck(
+        val comparable: Boolean,
+        val mismatch: Boolean,
+        val displacementPixels: Float,
+        val explanation: String,
+    )
+
+    private fun classifyZero(verification: ImageVerification?): ZeroCheck {
+        if (verification == null) {
+            return ZeroCheck(false, false, 0f, "Nessun fotogramma confrontabile: verifica solo informativa.")
+        }
+        val inlierPercent = controlPointPercent(verification)
+        val trustworthy = verification.confidence >= ZERO_MIN_CONFIDENCE &&
+            verification.inlierMatches >= ZERO_MIN_INLIERS &&
+            inlierPercent >= ZERO_MIN_INLIER_PERCENT
+        if (!trustworthy) {
+            return ZeroCheck(
+                comparable = false,
+                mismatch = false,
+                displacementPixels = verification.displacementPixels,
+                explanation = "Consenso troppo debole per giudicare lo zero: " +
+                    "${verification.inlierMatches} punti coerenti, il $inlierPercent% delle " +
+                    "corrispondenze, confidenza %.0f%%. ".format(verification.confidence * 100f) +
+                    "A cambiare è stata la scena durante la calibrazione, non il gimbal.",
+            )
+        }
+        val mismatch = verification.displacementPixels > ZERO_REPEATABILITY_RADIUS_PX
+        return ZeroCheck(
+            comparable = true,
+            mismatch = mismatch,
+            displacementPixels = verification.displacementPixels,
+            explanation = if (mismatch) {
+                "Lo zero hardware non è tornato dov'era: scarto %.1f px, limite %.0f px. "
+                    .format(verification.displacementPixels, ZERO_REPEATABILITY_RADIUS_PX) +
+                    "La curva misurata resta valida; a spostarsi è il punto di partenza."
+            } else {
+                "Zero ripetibile entro %.0f px.".format(ZERO_REPEATABILITY_RADIUS_PX)
+            },
+        )
+    }
+
+    /**
+     * Confronto informativo fra la prima inquadratura e lo zero della validazione.
+     *
+     * Non giudica niente: serve a rispondere, leggendo il log, alla domanda "ma la camera
+     * guardava ancora dalla stessa parte?" senza doverla dedurre dalle miniature.
+     */
+    private fun describeSceneDrift(startReference: ByteArray, validationReference: ByteArray) {
+        val verification = WaypointImageVerifier.verify(startReference, validationReference)
+        val detail = buildString {
+            appendLine("Confronto fra la prima inquadratura e lo zero di adesso, solo informativo.")
+            appendLine(verification?.describe() ?: "Le due immagini non sono confrontabili.")
+            append(
+                if (verification == null || controlPointPercent(verification) < ZERO_MIN_INLIER_PERCENT) {
+                    "Scena diversa da quella di partenza: qualcosa si è mosso, oppure lo zero " +
+                        "hardware non è dove era all'avvio. La validazione userà questa immagine."
+                } else {
+                    "Stessa scena della partenza: lo zero hardware guarda ancora là."
+                },
+            )
+        }
+        log.info("CALIBRAZIONE · ZERO DI RIFERIMENTO DELLA VALIDAZIONE", detail, imageJpeg = validationReference)
     }
 
     private suspend fun movePredictedDegrees(
@@ -1058,5 +1165,11 @@ class GimbalCalibrator(
         const val VALIDATION_EXTRA_SEARCH_DEG = 16f
         const val VALIDATION_ENDPOINT_TOLERANCE_DEG = 10f
         const val ZERO_REPEATABILITY_RADIUS_PX = 12f
+
+        // Soglie per credere a uno scarto dello zero. Sotto queste, il confronto ha trovato
+        // una traslazione ma non un consenso: è la scena che si è mossa, non il gimbal.
+        const val ZERO_MIN_CONFIDENCE = 0.45f
+        const val ZERO_MIN_INLIERS = 10
+        const val ZERO_MIN_INLIER_PERCENT = 45
     }
 }

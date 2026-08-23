@@ -40,6 +40,18 @@ data class GimbalSettings(
     val visualWaypointCorrection: Boolean = true,
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
+    /**
+     * Azione nativa del gimbal che gira di 180° per il selfie, se è stata trovata.
+     *
+     * 0 significa "non la conosciamo": il selfie viene allora eseguito ruotando il pan di 180°
+     * con il profilo di calibrazione. Il valore si scopre con la carta *Azioni del gimbal*
+     * della Diagnostica e non viene indovinato qui.
+     */
+    val selfieActionCode: Int = 0,
+
+    /** Rotazione applicata dal comando selfie quando l'azione nativa non è nota. */
+    val selfieTurnDeg: Float = 180f,
+
     /** Intervallo controllabile ufficiale; una calibrazione valida lo misura e lo sostituisce. */
     val panMinDeg: Float = -57f,
     val panMaxDeg: Float = 235f,

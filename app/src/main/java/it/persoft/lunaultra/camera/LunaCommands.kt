@@ -428,11 +428,27 @@ class LunaCommands(
 
     suspend fun gimbalStop(): Result<Unit> = gimbalVelocity(0f, 0f)
 
-    /** Riporta entrambi gli assi allo zero fisico memorizzato dal firmware della Luna. */
-    suspend fun gimbalBackCenter(): Result<Unit> =
+    /**
+     * Riporta entrambi gli assi allo zero fisico memorizzato dal firmware della Luna.
+     *
+     * Quello zero è il fronte del corpo camera, non il centro della corsa: l'intervallo
+     * ufficiale è -57°…+235°, quindi lo 0° sta a un sesto della corsa, non a metà. Se la
+     * camera è appoggiata con il fronte verso chi la usa, il ritorno a 0° inquadra proprio
+     * lui — non è il comando sbagliato, è dove guarda lo zero.
+     */
+    suspend fun gimbalBackCenter(): Result<Unit> = gimbalAction(LunaMessages.GimbalAction.BACK_CENTER)
+
+    /**
+     * Azione del gimbal senza assi, per numero.
+     *
+     * Serve alla carta *Azioni del gimbal* della Diagnostica: dei valori del campo 1 di
+     * `GIMBAL_CONTROL` ne conosciamo due, e l'unico modo onesto di trovarne altri è
+     * provarli sulla camera guardando l'anteprima.
+     */
+    suspend fun gimbalAction(action: Int): Result<Unit> =
         session.request(
             LunaProtocolCodes.GIMBAL_CONTROL,
-            LunaMessages.gimbalBackCenter(),
+            LunaMessages.gimbalAction(action),
         ).map { }
 
     /**

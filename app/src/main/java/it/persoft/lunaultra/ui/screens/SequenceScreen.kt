@@ -35,6 +35,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -50,6 +51,7 @@ import it.persoft.lunaultra.timelapse.LunaOptics
 import it.persoft.lunaultra.timelapse.PhotoFrameAspect
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.Waypoint
+import it.persoft.lunaultra.timelapse.PanoramaPreset
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
@@ -220,21 +222,41 @@ fun SequenceScreen(viewModel: MainViewModel) {
         if (sequence.mode == ShootingMode.FOTO) {
             SectionCard(title = "Panorama a scatti", icon = LunaIcons.Panorama, accent = Luna.Pano) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Copertura panoramica predefinita")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        listOf(90f, 180f, 270f).forEach { degrees ->
-                            FilterChip(
-                                selected = sequence.panoramaHorizontalDegrees == degrees,
-                                onClick = { viewModel.setPanoramaHorizontalDegrees(degrees) },
-                                label = { Text("${degrees.toInt()}°") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
-                                    selectedLabelColor = Luna.Pano,
-                                ),
-                                modifier = Modifier.weight(1f),
+                    val activePreset = PanoramaPreset.matching(
+                        sequence.panoramaHorizontalDegrees,
+                        sequence.panoramaVerticalDegrees,
+                    )
+                    Text("Copertura")
+                    PanoramaPreset.entries.forEach { preset ->
+                        val selected = preset == activePreset
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    if (selected) Luna.Pano.copy(alpha = 0.16f) else Color.Transparent,
+                                )
+                                .clickable { viewModel.setPanoramaPreset(preset) }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = preset.label,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = if (selected) Luna.Pano else Color.White,
+                            )
+                            Text(
+                                text = preset.detail,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Luna.OnSurfaceDim,
                             )
                         }
                     }
+                    Text(
+                        text = if (activePreset == null) "PERSONALIZZATA" else "oppure a mano",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (activePreset == null) Luna.Pano else Luna.OnSurfaceDim,
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         NumberField(
                             label = "Angolo orizzontale finale",

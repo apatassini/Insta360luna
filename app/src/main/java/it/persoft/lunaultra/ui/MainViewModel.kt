@@ -24,6 +24,7 @@ import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.service.LunaConnectionService
 import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.timelapse.PanoramaPlanner
+import it.persoft.lunaultra.timelapse.PanoramaPreset
 import it.persoft.lunaultra.timelapse.PhotoFrameAspect
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
@@ -875,6 +876,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setPanoramaOverlap(percent: Int) =
         container.sequenceStore.update { it.copy(panoramaOverlapPercent = percent.coerceIn(10, 60)) }
+
+    /** Applica una copertura pronta: i due angoli insieme, perché è la coppia a dare la forma. */
+    fun setPanoramaPreset(preset: PanoramaPreset) {
+        container.sequenceStore.update {
+            it.copy(
+                panoramaHorizontalDegrees = preset.horizontalDegrees,
+                panoramaVerticalDegrees = preset.verticalDegrees,
+            )
+        }
+    }
 
     fun setPanoramaAspect(aspect: PhotoFrameAspect) =
         container.sequenceStore.update { it.copy(panoramaAspect = aspect) }

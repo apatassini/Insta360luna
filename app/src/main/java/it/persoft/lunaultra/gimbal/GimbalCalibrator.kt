@@ -118,38 +118,6 @@ internal fun backoffPulses(
 }
 
 /**
- * Se conviene contare gli impulsi verso il fine corsa lungo invece che verso quello corto.
- *
- * Il verso corto costa meno tempo ed è quello giusto quasi sempre. Ma alle intensità alte il
- * fine corsa corto arriva in due o tre impulsi, e mezzo impulso di incertezza su tre impulsi è
- * un errore del venti per cento: lì conviene il verso lungo, dove gli impulsi da contare sono
- * abbastanza da rendere trascurabile l'ultimo.
- *
- * La stima si fa in proporzione dall'intensità già misurata. Senza nessuna misura ancora — la
- * primissima, che è anche la più veloce — si va sul lungo, che è il verso in cui c'è più posto.
- * E se nemmeno il verso lungo entra nel tetto di sicurezza degli impulsi si torna al corto:
- * meglio una misura grossolana che nessuna misura.
- */
-internal fun useLongSide(
-    shortTravelDeg: Float,
-    longTravelDeg: Float,
-    intensityPercent: Int,
-    referenceIntensity: Int,
-    referenceDegPerPulse: Float,
-    minPulsesForPrecision: Int,
-    maxPulses: Int,
-): Boolean {
-    if (referenceDegPerPulse <= 0f || referenceIntensity <= 0 || intensityPercent <= 0) return true
-    val expectedDegPerPulse = referenceDegPerPulse * intensityPercent / referenceIntensity
-    if (expectedDegPerPulse <= 0f) return false
-    if (shortTravelDeg / expectedDegPerPulse >= minPulsesForPrecision) return false
-    return longTravelDeg / expectedDegPerPulse <= maxPulses * LONG_SIDE_PULSE_HEADROOM
-}
-
-/** Margine sul tetto degli impulsi: il verso lungo si sceglie solo se ci entra con comodo. */
-private const val LONG_SIDE_PULSE_HEADROOM = 0.8f
-
-/**
  * Posizione della casa lungo la corsa, dai soli tempi comandati.
  *
  * [toMinimumMs] è il tempo di comando speso per andare da casa al primo fine corsa, [spanMs]
@@ -424,31 +392,36 @@ class GimbalCalibrator(
     }
 
     /**
-     * La curva misurata contando gli impulsi contro il fine corsa. Niente immagini, niente
-     * cronometro.
+     * La curva misurata contando gli impulsi da un fine corsa all'altro.
      *
      * L'impulso è l'unità di misura, e dura sempre uguale: non c'è nessun tempo da leggere,
-     * c'è un numero da contare. Si parte dallo zero vero — ricentraggio hardware, non «vicino
-     * allo zero» — si va verso il fine corsa corto dando impulsi e contandoli. Quando il
-     * limite arriva, due fatti bastano: i gradi che separano lo zero dal limite, e quanti
-     * impulsi ci sono voluti. Gradi diviso impulsi sono i gradi per impulso di quell'intensità.
+     * c'è un numero da contare. La corsa fra i due fine corsa è nota — 292° in orizzontale,
+     * 177° in verticale — e i due estremi la camera li annuncia da sola sul codice 8302.
+     * Quindi si parte appoggiati a un limite, si conta fino all'altro, e i gradi della corsa
+     * divisi per gli impulsi contati sono i gradi per impulso di quell'intensità.
      *
-     * È l'unico metodo che non dipende da cosa c'e davanti all'obiettivo. Intorno a una camera
-     * non sempre c'è qualcosa di riconoscibile: una parete uniforme non ha punti da seguire, e
-     * una a motivo ripetuto ne ha troppi e tutti uguali. Ogni misura basata sulle immagini e
-     * una scommessa su come è fatta la stanza; questa no.
+     * Percorrere la corsa intera invece di metà è la scelta che dà la misura migliore: più
+     * impulsi da contare vuol dire che il mezzo impulso finale — quello che si appoggia al
+     * limite a metà strada — pesa meno. Al 100% dallo zero al fine corsa vicino ci sono due
+     * impulsi e mezzo, e mezzo impulso su due e mezzo è un errore del venti per cento; sulla
+     * corsa intera gli impulsi sono cinquanta e l'incertezza è l'uno per cento.
      *
-     * Le intensità lente non arriverebbero mai al fine corsa in un numero ragionevole di
-     * impulsi — all'1% ne servirebbero centinaia — e allora si contano solo gli ultimi. Ci si
-     * porta al limite con l'intensità di riferimento, si arretra di un tratto noto misurato
-     * in impulsi di quella stessa intensità, e da lì si conta quanti impulsi lenti servono per
-     * riappoggiarsi al limite. Sempre impulsi contro un fatto hardware, mai un'immagine.
+     * E soprattutto: fra una misura e l'altra non si ricentra mai. Il ricentraggio non è uno
+     * zero assoluto — va nella posizione di riposo più vicina, e le posizioni di riposo sono
+     * due, il fronte a 0° e il selfie a 180°. Dal fine corsa destro, che sta a +235°, il
+     * ricentraggio finisce nel selfie: l'app crede di essere a zero e invece guarda dall'altra
+     * parte, e tutte le misure successive sono contro il limite sbagliato. Qui si ricentra una
+     * volta sola, alla fine, e solo dal fine corsa vicino allo zero, che è l'unico punto da
+     * cui il ricentraggio è davvero uno zero.
      *
-     * Il verso si sceglie per intensità: quello corto costa meno tempo, ma alle intensità alte
-     * ci si arriva in due o tre impulsi e mezzo impulso di incertezza pesa troppo, e allora si
-     * conta sul verso lungo. L'assunto è che andare da una parte costi quanto andare
-     * dall'altra — ragionevole su un gimbal stabilizzato, dove il motore è lo stesso, e
-     * comunque la prova di andata e ritorno alla fine lo smentirebbe.
+     * Le intensità lente non attraverserebbero mai la corsa in un numero ragionevole di
+     * impulsi — all'1% ne servirebbero centinaia — e allora si contano solo gli ultimi: ci si
+     * stacca dal limite di un tratto noto, misurato in impulsi di un'intensità già calibrata,
+     * e si conta quanti impulsi lenti servono per riappoggiarsi.
+     *
+     * I versi si alternano da soli, perché ogni misura parte dove è finita la precedente. Se
+     * andare da una parte costasse più che andare dall'altra si vedrebbe come un'oscillazione
+     * fra intensità vicine, invece di restare nascosto in un assunto.
      */
     private suspend fun measureCurveByPulses(
         axis: String,
@@ -456,81 +429,74 @@ class GimbalCalibrator(
         phaseStartPercent: Int,
         phaseEndPercent: Int,
     ): PulseCurve {
-        val shortToMinimum = abs(limits.minimumDeg) <= abs(limits.maximumDeg)
-        val shortSide = CurveSide(
-            direction = if (shortToMinimum) -1f else 1f,
-            travelDeg = abs(if (shortToMinimum) limits.minimumDeg else limits.maximumDeg),
-        )
-        val longSide = CurveSide(
-            direction = -shortSide.direction,
-            travelDeg = abs(if (shortToMinimum) limits.maximumDeg else limits.minimumDeg),
-        )
+        // Il fine corsa "vicino" è quello dalla parte dello zero di accensione. Per il pan è
+        // l'unico dal quale un ricentraggio torna sul fronte invece che sul selfie.
+        val nearIsMinimum = abs(limits.minimumDeg) <= abs(limits.maximumDeg)
+        val nearDirection = if (nearIsMinimum) -1f else 1f
+        val nearTravelDeg = abs(if (nearIsMinimum) limits.minimumDeg else limits.maximumDeg)
+        val spanDeg = abs(limits.spanDeg)
         val pulseSeconds = CURVE_PULSE_MS / 1000f
         val measured = mutableListOf<Pair<Int, Float>>()
 
         log.info(
             "CALIBRAZIONE · CURVA A IMPULSI ${axisLabel(axis).uppercase()}",
-            ("Impulsi da %d ms contati contro i fine corsa: %.0f° verso %s, %.0f° verso %s. " +
-                "Niente cronometro e niente immagini.")
-                .format(
-                    CURVE_PULSE_MS,
-                    shortSide.travelDeg,
-                    directionLabel(axis, shortSide.direction),
-                    longSide.travelDeg,
-                    directionLabel(axis, longSide.direction),
-                ),
+            ("Impulsi da %d ms contati da un fine corsa all'altro: %.0f° di corsa. " +
+                "Nessun ricentraggio fra una misura e l'altra, perché il ricentraggio va nella " +
+                "posizione di riposo più vicina e da %s quella non è lo zero.")
+                .format(CURVE_PULSE_MS, spanDeg, directionLabel(axis, -nearDirection)),
         )
 
+        // Appoggiati al limite vicino: da qui ogni misura è una corsa fra due fatti.
+        if (pulsesToEndstop(axis, nearDirection, APPROACH_INTENSITY_PERCENT, MAX_CURVE_PULSES) <= 0) {
+            throw IllegalStateException(
+                "Il fine corsa ${directionLabel(axis, nearDirection)} non risponde: la curva non può partire",
+            )
+        }
+        var atNear = true
         var referenceIntensity = 0
         var referenceDegPerPulse = 0f
-        var zeroCheck = ZeroPulseCheck.NONE
 
         INTENSITY_PERCENTAGES.reversed().forEachIndexed { index, intensity ->
             val done = index + 1
             val slowPath = referenceDegPerPulse > 0f && intensity <= SLOW_INTENSITY_THRESHOLD
-            // Il verso corto costa meno tempo, ma alle intensità alte ci si arriva in due o
-            // tre impulsi, e su tre impulsi mezzo impulso di incertezza è il venti per cento.
-            // Quando succede si usa il verso lungo: più strada, più impulsi da contare, e la
-            // stessa incertezza diventa trascurabile.
-            val side = if (slowPath) {
-                shortSide
-            } else {
-                val long = useLongSide(
-                    shortTravelDeg = shortSide.travelDeg,
-                    longTravelDeg = longSide.travelDeg,
-                    intensityPercent = intensity,
-                    referenceIntensity = referenceIntensity,
-                    referenceDegPerPulse = referenceDegPerPulse,
-                    minPulsesForPrecision = MIN_PULSES_FOR_PRECISION,
-                    maxPulses = MAX_CURVE_PULSES,
-                )
-                if (long) longSide else shortSide
-            }
+            // Verso la corsa intera si va sempre via dal limite su cui si è appoggiati.
+            val direction = if (atNear) -nearDirection else nearDirection
             _state.value = _state.value.copy(
                 phaseLabel = "Curva a impulsi · ${axisLabel(axis)}",
                 overallPercent = phaseStartPercent +
                     (phaseEndPercent - phaseStartPercent) * done / INTENSITY_PERCENTAGES.size,
                 axisLabel = axisLabel(axis),
-                directionLabel = directionLabel(axis, side.direction),
+                directionLabel = directionLabel(axis, direction),
                 intensityPercent = intensity,
-                message = "$intensity% · conto gli impulsi fino al fine corsa",
+                message = if (slowPath) {
+                    "$intensity% · conto gli ultimi impulsi contro il fine corsa"
+                } else {
+                    "$intensity% · conto gli impulsi lungo la corsa intera"
+                },
                 verificationLabel = "CONTO IMPULSI · NESSUNA IMMAGINE",
             )
-            zeroByHardware("Zero prima del $intensity% ${axisLabel(axis)}")
 
             var degPerPulse = 0f
             var pulses = 0
             if (slowPath) {
+                // La misura lenta parte e finisce sullo stesso limite: [atNear] non cambia.
                 degPerPulse = measureSlowFromEndstop(
                     axis = axis,
-                    side = side,
+                    awayDirection = direction,
                     intensityPercent = intensity,
                     referenceIntensity = referenceIntensity,
                     referenceDegPerPulse = referenceDegPerPulse,
                 )
             } else {
-                pulses = pulsesToEndstop(axis, side.direction, intensity, MAX_CURVE_PULSES)
-                if (pulses > 0) degPerPulse = side.travelDeg / effectivePulses(pulses)
+                pulses = pulsesToEndstop(axis, direction, intensity, MAX_CURVE_PULSES)
+                if (pulses > 0) {
+                    degPerPulse = spanDeg / effectivePulses(pulses)
+                    atNear = !atNear
+                } else {
+                    // Rimasta a metà corsa: si torna sul limite da cui si era partiti, o la
+                    // misura successiva comincerebbe da un punto che nessuno conosce.
+                    pulsesToEndstop(axis, -direction, APPROACH_INTENSITY_PERCENT, MAX_CURVE_PULSES)
+                }
             }
 
             if (degPerPulse > 0f) {
@@ -540,20 +506,13 @@ class GimbalCalibrator(
                     if (slowPath) {
                         "%.3f °/impulso · contato sugli ultimi impulsi contro il fine corsa".format(degPerPulse)
                     } else {
-                        "%.3f °/impulso · %d impulsi per %.0f° verso %s"
-                            .format(degPerPulse, pulses, side.travelDeg, directionLabel(axis, side.direction))
+                        "%.3f °/impulso · %d impulsi per %.0f° di corsa verso %s"
+                            .format(degPerPulse, pulses, spanDeg, directionLabel(axis, direction))
                     },
                 )
                 if (intensity == REFERENCE_INTENSITY_PERCENT || referenceDegPerPulse <= 0f) {
                     referenceIntensity = intensity
                     referenceDegPerPulse = degPerPulse
-                }
-                // La prova a circuito chiuso si fa una volta per asse, sull'intensità di
-                // riferimento: è quella con cui il modello tornerà a casa, quindi è il suo
-                // errore che conta. Farla su tutte e dodici triplicherebbe la calibrazione
-                // per rimisurare la stessa cosa.
-                if (!slowPath && pulses > 0 && intensity == REFERENCE_INTENSITY_PERCENT) {
-                    zeroCheck = checkZeroByPulses(axis, side.direction, intensity, pulses, degPerPulse)
                 }
             } else {
                 log.warn(
@@ -562,26 +521,39 @@ class GimbalCalibrator(
                 )
             }
         }
-        zeroByHardware("Zero dopo la curva ${axisLabel(axis)}")
+
+        // Si chiude sul limite vicino, perché è l'unico da cui il ricentraggio è uno zero.
+        if (!atNear) {
+            pulsesToEndstop(axis, nearDirection, APPROACH_INTENSITY_PERCENT, MAX_CURVE_PULSES)
+        }
+        val zeroCheck = if (referenceDegPerPulse > 0f) {
+            checkZeroFromNearEndstop(
+                axis = axis,
+                nearDirection = nearDirection,
+                nearTravelDeg = nearTravelDeg,
+                intensityPercent = referenceIntensity,
+                degreesPerPulse = referenceDegPerPulse,
+            )
+        } else {
+            zeroByHardware("Zero dopo la curva ${axisLabel(axis)}")
+            ZeroPulseCheck.NONE
+        }
         return PulseCurve(points = measured, zero = zeroCheck)
     }
 
-    /** Un verso di misura: dove andare e quanti gradi ci sono da lì allo zero. */
-    private data class CurveSide(val direction: Float, val travelDeg: Float)
-
-    /** La curva di un asse è, insieme, quanto ha sbagliato il ritorno allo zero contato. */
+    /** La curva di un asse è, insieme, quanto ha sbagliato lo zero raggiunto col ricentraggio. */
     private data class PulseCurve(
         val points: List<Pair<Int, Float>>,
         val zero: ZeroPulseCheck,
     )
 
     /**
-     * Quanto sbaglia lo zero raggiunto contando gli impulsi.
+     * Quanto sbaglia lo zero del ricentraggio, misurato in impulsi contro il fine corsa.
      *
-     * [deltaPulses] è la differenza fra gli impulsi che sono serviti la prima volta per andare
-     * dallo zero vero al fine corsa e quelli che servono la seconda, dopo essere tornati
-     * indietro con lo stesso numero di impulsi. Se il ritorno fosse esatto sarebbe zero: ogni
-     * impulso di differenza è errore vero, e [deltaDegrees] lo dice in gradi.
+     * [deltaPulses] è la differenza fra gli impulsi che sono davvero serviti per andare dallo
+     * zero al fine corsa vicino e quelli che ci sarebbero voluti se lo zero fosse dove la
+     * camera dichiara. Se il ricentraggio fosse esatto sarebbe zero: ogni impulso di
+     * differenza è errore vero, e [deltaDegrees] lo dice in gradi.
      */
     private data class ZeroPulseCheck(
         val deltaPulses: Int,
@@ -594,9 +566,23 @@ class GimbalCalibrator(
         }
     }
 
-    /** Zero vero: ci si avvicina e poi si ricentra, perché «vicino allo zero» non è lo zero. */
+    /**
+     * Il ricentraggio come zero, con la sola precauzione che lo rende vero: partire da vicino.
+     *
+     * Il gimbal ha due posizioni di riposo, il fronte a 0° e il selfie a 180°, e il
+     * ricentraggio va nella più vicina delle due. Oltre i 90° dal fronte "centro" vuol dire
+     * selfie. Dal fine corsa vicino — a 57° dallo zero su entrambi gli assi — si è dentro quel
+     * confine con un margine largo, quindi il ricentraggio è uno zero e non un mezzo giro.
+     */
     private suspend fun zeroByHardware(label: String) {
-        gimbal.recenter().getOrElse { throw IllegalStateException("Ricentraggio non riuscito: ${it.message}", it) }
+        gimbal.recenter().recoverCatching {
+            // Un ricentraggio che non risponde entro il timeout non è per forza fallito: la
+            // camera può essere occupata a fermare il gimbal. Un secondo tentativo costa poco,
+            // e buttare tre minuti di misure per una risposta mancata costa molto.
+            log.warn("CALIBRAZIONE · RICENTRAGGIO SENZA RISPOSTA", "${it.message} · riprovo una volta.")
+            delay(HARDWARE_ZERO_RETRY_MS)
+            gimbal.recenter().getOrThrow()
+        }.getOrElse { throw IllegalStateException("Ricentraggio non riuscito: ${it.message}", it) }
         delay(HARDWARE_ZERO_SETTLE_MS)
         gimbal.setEstimated(0f, 0f)
         _state.value = _state.value.copy(theoreticalPan = 0f, theoreticalTilt = 0f, message = label)
@@ -639,14 +625,82 @@ class GimbalCalibrator(
     }
 
     /**
+     * Il circuito chiuso: lo zero del ricentraggio contro il fine corsa che gli sta di fronte.
+     *
+     * Si è appoggiati al limite vicino, si ricentra — e da lì il ricentraggio è uno zero vero —
+     * poi si torna al limite contando gli impulsi. La camera dichiara che quel limite sta a 57°
+     * dallo zero; la curva appena misurata dice quanti impulsi ci vogliono per fare 57°. Se i
+     * due numeri coincidono lo zero era giusto; se non coincidono, la differenza *è* l'errore,
+     * in impulsi e quindi in gradi.
+     *
+     * Non serve nessuna foto per saperlo, e nessuna interpretazione: sono numeri contati contro
+     * lo stesso fatto hardware.
+     */
+    private suspend fun checkZeroFromNearEndstop(
+        axis: String,
+        nearDirection: Float,
+        nearTravelDeg: Float,
+        intensityPercent: Int,
+        degreesPerPulse: Float,
+    ): ZeroPulseCheck {
+        zeroByHardware("Zero dal fine corsa ${directionLabel(axis, nearDirection)}")
+        _state.value = _state.value.copy(
+            message = "$intensityPercent% · torno al fine corsa e conto",
+            verificationLabel = "VERIFICA ZERO · CONTO IMPULSI",
+        )
+        val counted = pulsesToEndstop(axis, nearDirection, intensityPercent, MAX_CURVE_PULSES)
+        if (counted <= 0) {
+            log.warn(
+                "CALIBRAZIONE · VERIFICA ZERO ${axisLabel(axis).uppercase()} NON CONCLUSA",
+                "Dallo zero il fine corsa ${directionLabel(axis, nearDirection)} non è arrivato " +
+                    "entro $MAX_CURVE_PULSES impulsi.",
+            )
+            return ZeroPulseCheck.NONE
+        }
+
+        val expectedPulses = nearTravelDeg / degreesPerPulse
+        val measuredDeg = effectivePulses(counted) * degreesPerPulse
+        val deltaDegrees = measuredDeg - nearTravelDeg
+        val deltaPulses = (effectivePulses(counted) - expectedPulses).roundToInt()
+        val verdict = if (abs(deltaPulses) <= ZERO_TOLERANCE_PULSES) "zero corretto" else "zero da correggere"
+        log.info(
+            "CALIBRAZIONE · VERIFICA ZERO ${axisLabel(axis).uppercase()}",
+            ("Dallo zero al fine corsa %s: %d impulsi contati al %d%%, %.1f attesi per i %.0f° " +
+                "dichiarati. Misurati %.1f°, delta %+.1f° (%+d impulsi) · %s.")
+                .format(
+                    directionLabel(axis, nearDirection),
+                    counted,
+                    intensityPercent,
+                    expectedPulses,
+                    nearTravelDeg,
+                    measuredDeg,
+                    deltaDegrees,
+                    deltaPulses,
+                    verdict,
+                ),
+        )
+        // Si resta appoggiati al limite: il ricentraggio da qui torna sullo zero.
+        zeroByHardware("Zero dopo la verifica ${axisLabel(axis)}")
+        return ZeroPulseCheck(
+            deltaPulses = deltaPulses,
+            deltaDegrees = deltaDegrees,
+            intensityPercent = intensityPercent,
+            measured = true,
+        )
+    }
+
+    /**
      * Le intensità lente, misurate sugli ultimi impulsi contro il fine corsa.
      *
-     * All'1% arrivare al limite partendo dallo zero richiederebbe centinaia di impulsi, e
-     * dodici intensità così sono una calibrazione che nessuno finisce. Allora ci si porta al
-     * limite con l'intensità di riferimento, si arretra di un tratto noto — tanti impulsi di
-     * riferimento, e quanto vale un impulso di riferimento è già misurato — e da lì si conta
-     * quanti impulsi lenti servono per tornare ad appoggiarsi. Il tratto diviso gli impulsi
-     * lenti sono i gradi per impulso di quell'intensità.
+     * All'1% attraversare la corsa intera richiederebbe centinaia di impulsi, e dodici
+     * intensità così sono una calibrazione che nessuno finisce. Ma non serve attraversarla: si
+     * è già appoggiati a un limite, quindi ci si stacca di un tratto noto — tanti impulsi di
+     * un'intensità già calibrata, e quanto vale uno di quegli impulsi è già misurato — e da lì
+     * si conta quanti impulsi lenti servono per tornare ad appoggiarsi. Il tratto diviso gli
+     * impulsi lenti sono i gradi per impulso di quell'intensità.
+     *
+     * Si parte e si finisce sullo stesso limite, quindi la misura lenta non cambia da che parte
+     * si trova la camera e non ha bisogno di nessun ricentraggio.
      *
      * L'arretramento è dimensionato perché gli impulsi lenti da contare siano una ventina:
      * abbastanza da rendere trascurabile il mezzo impulso finale, pochi da non allungare la
@@ -654,84 +708,32 @@ class GimbalCalibrator(
      */
     private suspend fun measureSlowFromEndstop(
         axis: String,
-        side: CurveSide,
+        awayDirection: Float,
         intensityPercent: Int,
         referenceIntensity: Int,
         referenceDegPerPulse: Float,
     ): Float {
-        val direction = side.direction
-        if (pulsesToEndstop(axis, direction, referenceIntensity, MAX_CURVE_PULSES) <= 0) return 0f
-
         val backoff = backoffPulses(
             intensityPercent = intensityPercent,
             referenceIntensity = referenceIntensity,
             targetSlowPulses = TARGET_SLOW_PULSES,
             maxBackoffPulses = MAX_BACKOFF_PULSES,
         )
-        repeat(backoff) { pulseOnce(axis, -direction, referenceIntensity) }
+        repeat(backoff) { pulseOnce(axis, awayDirection, referenceIntensity) }
         val gapDegrees = backoff * referenceDegPerPulse
 
         _state.value = _state.value.copy(
             message = "$intensityPercent% · $backoff impulsi al $referenceIntensity% di stacco, poi conto i lenti",
         )
-        val slowPulses = pulsesToEndstop(axis, direction, intensityPercent, MAX_SLOW_PULSES)
-        if (slowPulses <= 0) return 0f
+        val slowPulses = pulsesToEndstop(axis, -awayDirection, intensityPercent, MAX_SLOW_PULSES)
+        if (slowPulses <= 0) {
+            // Non si è tornati sul limite: si rientra con l'intensità di riferimento, o la
+            // prossima misura partirebbe da un punto che nessuno conosce.
+            pulsesToEndstop(axis, -awayDirection, referenceIntensity, MAX_CURVE_PULSES)
+            return 0f
+        }
         return gapDegrees / effectivePulses(slowPulses)
     }
-
-
-    /**
-     * Il circuito chiuso: si torna allo zero contando, e si guarda di quanto si è sbagliato.
-     *
-     * Dal fine corsa si danno all'indietro esattamente gli impulsi che sono serviti per
-     * arrivarci: se il modello fosse esatto si sarebbe di nuovo sullo zero vero. Poi si conta
-     * di nuovo fino al fine corsa. Se il secondo conteggio è uguale al primo lo zero era
-     * giusto; se è diverso, quella differenza *è* l'errore — in impulsi, e quindi in gradi.
-     *
-     * Non serve nessuna foto per saperlo, e nessuna interpretazione: sono due numeri interi
-     * contati contro lo stesso fatto hardware.
-     */
-    private suspend fun checkZeroByPulses(
-        axis: String,
-        direction: Float,
-        intensityPercent: Int,
-        pulsesToLimit: Int,
-        degreesPerPulse: Float,
-    ): ZeroPulseCheck {
-        _state.value = _state.value.copy(
-            message = "$intensityPercent% · torno allo zero con $pulsesToLimit impulsi e ricontrollo",
-            verificationLabel = "VERIFICA ZERO · CONTO IMPULSI",
-        )
-        repeat(pulsesToLimit) { pulseOnce(axis, -direction, intensityPercent) }
-
-        val again = pulsesToEndstop(axis, direction, intensityPercent, MAX_CURVE_PULSES)
-        if (again <= 0) {
-            log.warn(
-                "CALIBRAZIONE · VERIFICA ZERO ${axisLabel(axis).uppercase()} NON CONCLUSA",
-                "Tornato indietro di $pulsesToLimit impulsi, il fine corsa non è più arrivato: " +
-                    "il ritorno ha superato lo zero di più di quanto la corsa consenta.",
-            )
-            return ZeroPulseCheck.NONE
-        }
-
-        val delta = again - pulsesToLimit
-        val deltaDegrees = delta * degreesPerPulse
-        val verdict = if (abs(delta) <= ZERO_TOLERANCE_PULSES) "zero corretto" else "zero da correggere"
-        log.info(
-            "CALIBRAZIONE · VERIFICA ZERO ${axisLabel(axis).uppercase()}",
-            ("Andata %d impulsi al %d%%, ritorno con gli stessi %d, ritorno al limite %d impulsi. " +
-                "Delta %+d impulsi = %+.2f° · %s.")
-                .format(pulsesToLimit, intensityPercent, pulsesToLimit, again, delta, deltaDegrees, verdict),
-        )
-        return ZeroPulseCheck(
-            deltaPulses = delta,
-            deltaDegrees = deltaDegrees,
-            intensityPercent = intensityPercent,
-            measured = true,
-        )
-    }
-
-
 
 
     /**
@@ -1517,10 +1519,10 @@ class GimbalCalibrator(
     private fun zeroCheckSummary(axisName: String, check: ZeroPulseCheck): String = when {
         !check.measured -> "Verifica zero $axisName: non conclusa."
         abs(check.deltaPulses) <= ZERO_TOLERANCE_PULSES ->
-            "Verifica zero $axisName: %+d impulsi (%+.2f°) al %d%% · lo zero contato è corretto."
+            "Verifica zero $axisName: %+d impulsi (%+.2f°) al %d%% · il ricentraggio è uno zero."
                 .format(check.deltaPulses, check.deltaDegrees, check.intensityPercent)
         else ->
-            "Verifica zero $axisName: %+d impulsi (%+.2f°) al %d%% · questo è l'errore dello zero contato."
+            "Verifica zero $axisName: %+d impulsi (%+.2f°) al %d%% · questo è l'errore del ricentraggio."
                 .format(check.deltaPulses, check.deltaDegrees, check.intensityPercent)
     }
 
@@ -1594,7 +1596,10 @@ class GimbalCalibrator(
         const val CURVE_PULSE_MS = 400L
 
         /** Tetto di sicurezza: oltre questi impulsi il fine corsa non sta arrivando. */
-        const val MAX_CURVE_PULSES = 100
+        const val MAX_CURVE_PULSES = 130
+
+        /** L'intensità con cui ci si riporta su un fine corsa senza misurare niente. */
+        const val APPROACH_INTENSITY_PERCENT = 40
 
         /** Le intensità lente possono richiederne di più, ma non all'infinito. */
         const val MAX_SLOW_PULSES = 80
@@ -1605,15 +1610,20 @@ class GimbalCalibrator(
         /** L'arretramento non supera questo, altrimenti la corsa non basta a contenerlo. */
         const val MAX_BACKOFF_PULSES = 15
 
-        /** Sotto questi impulsi il mezzo impulso finale pesa troppo: si passa al verso lungo. */
-        const val MIN_PULSES_FOR_PRECISION = 8
 
         /** Sotto questo scarto il ritorno allo zero è dentro il mezzo impulso di incertezza. */
         const val ZERO_TOLERANCE_PULSES = 1
 
         const val SLOW_INTENSITY_THRESHOLD = 10
         const val REFERENCE_INTENSITY_PERCENT = 40
-        const val HARDWARE_ZERO_SETTLE_MS = 3_000L
+        /**
+         * Il ricentraggio parte dal fine corsa vicino, cioè da 57° dallo zero: va aspettato.
+         * Adesso succede due volte per asse invece di una per intensità, quindi può permetterselo.
+         */
+        const val HARDWARE_ZERO_SETTLE_MS = 5_000L
+
+        /** Pausa prima di riprovare un ricentraggio che non ha risposto. */
+        const val HARDWARE_ZERO_RETRY_MS = 1_500L
 
 
         // Soglie per credere a uno scarto dello zero. Sotto queste, il confronto ha trovato

@@ -2,7 +2,6 @@ package it.persoft.lunaultra
 
 import it.persoft.lunaultra.gimbal.backoffPulses
 import it.persoft.lunaultra.gimbal.effectivePulses
-import it.persoft.lunaultra.gimbal.useLongSide
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -82,71 +81,4 @@ class GimbalPulseCurveTest {
         assertEquals(5.846f, delta * degreesPerPulse, 0.001f)
     }
 
-    @Test
-    fun `alle intensita alte si conta sul verso lungo, dove gli impulsi sono abbastanza`() {
-        // Al 100% un impulso copre 36°: sui 57° del verso corto sarebbero un impulso e mezzo,
-        // sui 235° del lungo sono sei e mezzo. Su un impulso e mezzo, mezzo impulso di
-        // incertezza sarebbe un terzo della misura.
-        assertTrue(
-            useLongSide(
-                shortTravelDeg = 57f,
-                longTravelDeg = 235f,
-                intensityPercent = 90,
-                referenceIntensity = 100,
-                referenceDegPerPulse = 36f,
-                minPulsesForPrecision = 8,
-                maxPulses = 100,
-            ),
-        )
-    }
-
-    @Test
-    fun `quando il verso corto basta da solo, si sta sul corto`() {
-        // Un gimbal più tranquillo: al 40% un impulso copre 8°, quindi al 30% ne copre 6, e
-        // sui 57° del verso corto sono nove impulsi e mezzo. Abbastanza: percorrere i 235° del
-        // verso lungo sarebbe mezzo minuto in più per la stessa misura.
-        assertTrue(
-            !useLongSide(
-                shortTravelDeg = 57f,
-                longTravelDeg = 235f,
-                intensityPercent = 30,
-                referenceIntensity = 40,
-                referenceDegPerPulse = 8f,
-                minPulsesForPrecision = 8,
-                maxPulses = 100,
-            ),
-        )
-    }
-
-    @Test
-    fun `senza nessuna misura ancora si va sul lungo, che e dove c'e piu posto`() {
-        assertTrue(
-            useLongSide(
-                shortTravelDeg = 57f,
-                longTravelDeg = 235f,
-                intensityPercent = 100,
-                referenceIntensity = 0,
-                referenceDegPerPulse = 0f,
-                minPulsesForPrecision = 8,
-                maxPulses = 100,
-            ),
-        )
-    }
-
-    @Test
-    fun `se il verso lungo non entra nel tetto degli impulsi si torna al corto`() {
-        // Il corto darebbe solo cinque impulsi — pochi — ma il lungo ne vorrebbe ventidue con
-        // un tetto di venti: non ci sta. Una misura grossolana è meglio di nessuna misura.
-        assertTrue(
-            !useLongSide(
-                shortTravelDeg = 57f,
-                longTravelDeg = 235f,
-                intensityPercent = 30,
-                referenceIntensity = 100,
-                referenceDegPerPulse = 36f,
-                minPulsesForPrecision = 8,
-                maxPulses = 20,
-            ),
-        )
-    }
 }

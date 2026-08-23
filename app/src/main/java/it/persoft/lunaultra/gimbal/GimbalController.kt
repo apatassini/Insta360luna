@@ -187,11 +187,25 @@ class GimbalController(
      */
     suspend fun recenter(): Result<Unit> {
         stop()
+        val landing = recenterLandsAtPan(_position.value.pan)
         val result = commands.gimbalBackCenter()
         if (result.isSuccess) {
             appliedPanPercent = 0f
             appliedTiltPercent = 0f
             appliedSinceNanos = System.nanoTime()
+            // Il lato non si deduce dal nulla, ma un ricentraggio oltre il confine lo mette
+            // nel selfie di sicuro: quello si può alzare. Abbassarlo resta compito di chi
+            // commuta apposta, perché nel lato selfie l'app conta il pan da 0 lo stesso.
+            if (landing != 0f) {
+                _selfieEngaged.value = true
+                log.warn(
+                    "Ricentraggio dal lato selfie",
+                    ("Il pan era a %.0f°, oltre i %.0f° che separano il fronte dal selfie: " +
+                        "il ricentraggio va a %.0f°, non a zero. Per lo zero di accensione serve " +
+                        "prima riportarsi entro mezzo giro dal fronte.")
+                        .format(_position.value.pan, SIDE_BOUNDARY_DEG, landing),
+                )
+            }
         }
         return result
     }
@@ -215,9 +229,10 @@ class GimbalController(
             integrateAppliedUntilNow()
             val current = _position.value
             if (abs(current.pan) > SELFIE_CENTER_TOLERANCE_DEG || abs(current.tilt) > SELFIE_CENTER_TOLERANCE_DEG) {
-                recenter().getOrElse { return Result.failure(it) }
-                delay(RECENTER_SETTLE_MS)
-                setEstimated(0f, 0f)
+                // Ricentrare oltre il confine dei 90° porta al selfie, non allo zero: da lì
+                // l'interruttore partirebbe dal lato sbagliato. Si torna dentro il confine
+                // prima, che è l'unico modo di sapere da dove si commuta.
+                returnToBootZero().getOrElse { return Result.failure(it) }
             }
             stop()
             val result = commands.gimbalAction(cfg.selfieActionCode)
@@ -248,32 +263,38 @@ class GimbalController(
     /**
      * Riporta la camera allo zero di accensione: quello vero, non quello del lato corrente.
      *
-     * Misurato sulla camera: il ricentraggio (azione 2) agisce **sul lato in cui ci si trova**,
-     * e il lato dipende da dove è arrivato il pan — girando oltre il mezzo giro dalla partenza
-     * si passa nel lato selfie, e da lì "centro" vuol dire 180°, non 0°. È per questo che dopo
-     * una corsa completa del pan il ricentraggio inquadrava tutt'altro: non era il comando
-     * sbagliato, era l'altro lato.
+     * Il ragionamento è tutto qui. Il gimbal ha due posizioni di riposo — il fronte a 0°, dove
+     * si accende, e il selfie a 180° — e il ricentraggio va nella più vicina delle due. Il
+     * confine sta a metà strada, cioè a 90°: dentro quell'angolo il ricentraggio è uno zero,
+     * fuori è un mezzo giro. E la corsa del pan arriva a +235°, quindi il fuori esiste
+     * eccome — è tutta la parte destra della corsa.
      *
-     * L'azione 3 commuta il lato. Quindi: se siamo nel lato selfie la si manda una volta per
-     * tornare sul fronte, poi si ricentra. Lo stato del lato è quello che l'app crede — la
-     * camera non lo pubblica — quindi resta una convinzione, e il log dice cosa è stato fatto.
+     * Quindi non si ricentra e basta: prima si torna dentro il confine usando la curva
+     * misurata, e solo da lì si ricentra. È l'unico ordine che funziona sempre, e non ha
+     * bisogno di sapere in che lato si crede di essere: la posizione stimata basta, e anche
+     * se fosse sbagliata di qualche decina di gradi il margine fino ai 90° la assorbe.
      */
     suspend fun returnToBootZero(): Result<Unit> {
-        val cfg = settings.value.gimbal
-        if (cfg.selfieActionCode > 0 && _selfieEngaged.value) {
-            stop()
-            commands.gimbalAction(cfg.selfieActionCode).getOrElse { return Result.failure(it) }
-            _selfieEngaged.value = false
+        integrateAppliedUntilNow()
+        val current = _position.value
+        if (abs(recenterLandsAtPan(current.pan)) > 0f) {
+            log.info(
+                "Rientro dal lato selfie prima di ricentrare",
+                ("Il pan è a %.0f°, oltre i %.0f° che separano il fronte dal selfie: ricentrare " +
+                    "da qui porterebbe a %.0f°. Prima torno entro il confine con la curva misurata.")
+                    .format(current.pan, SIDE_BOUNDARY_DEG, recenterLandsAtPan(current.pan)),
+            )
+            moveToPosition(0f, current.tilt).getOrElse { return Result.failure(it) }
             delay(RECENTER_SETTLE_MS)
         }
         val result = recenter()
         if (result.isSuccess) {
             delay(RECENTER_SETTLE_MS)
             setEstimated(0f, 0f)
+            _selfieEngaged.value = false
             log.info(
                 "Gimbal riportato allo zero di accensione",
-                "Lato fronte, poi ricentraggio. Se la camera è stata girata dal suo schermo " +
-                    "questo può non bastare: il lato che l'app conosce è una convinzione.",
+                "Rientrato entro mezzo giro dal fronte e poi ricentrato: da lì il centro è lo zero.",
             )
         }
         return result
@@ -572,6 +593,29 @@ class GimbalController(
         private const val RECENTER_SETTLE_MS = 2_500L
     }
 }
+
+/**
+ * Dove finisce un ricentraggio partendo da un pan qualsiasi.
+ *
+ * Il gimbal ha due posizioni di riposo: il fronte a 0°, dove la camera si accende, e il selfie
+ * a 180°. Il ricentraggio va nella più vicina delle due, quindi il confine sta a 90° — non a
+ * 180°. Già a 91° dallo zero «centro» vuol dire selfie, e chi manda il ricentraggio dal fine
+ * corsa destro, che sta a +235°, si ritrova girato dall'altra parte convinto di essere a zero.
+ *
+ * È la regola che decide dove si può ricentrare e dove no: dentro ±90° il ricentraggio è uno
+ * zero, fuori è un mezzo giro.
+ */
+internal fun recenterLandsAtPan(currentPan: Float): Float = when {
+    currentPan > SIDE_BOUNDARY_DEG -> SELFIE_PAN_DEG
+    currentPan < -SIDE_BOUNDARY_DEG -> -SELFIE_PAN_DEG
+    else -> 0f
+}
+
+/** Il ricentraggio torna sullo zero di accensione solo entro questo angolo. */
+internal const val SIDE_BOUNDARY_DEG = 90f
+
+/** Il centro del lato selfie: mezzo giro dal fronte. */
+internal const val SELFIE_PAN_DEG = 180f
 
 /**
  * Verso del mezzo giro, scelto in modo che resti dentro i fine corsa.

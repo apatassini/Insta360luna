@@ -364,6 +364,24 @@ class GimbalCalibrator(
                             ),
                         )
                     }
+                    appendLine(
+                        "Comando più veloce: %d%% in orizzontale (%.1f °/s), %d%% in verticale (%.1f °/s)".format(
+                            corrected.fastestCommandPercent(true),
+                            corrected.maxAngularRate(true),
+                            corrected.fastestCommandPercent(false),
+                            corrected.maxAngularRate(false),
+                        ),
+                    )
+                    listOf(true to "orizzontale", false to "verticale").forEach { (panAxis, name) ->
+                        corrected.nonMonotonicPoints(panAxis).forEach { (intensity, loss) ->
+                            appendLine(
+                                ("Attenzione: sul %s il %d%% muove %.1f °/s in meno di un comando " +
+                                    "più basso. Non è un errore di misura: la camera fa così, e il " +
+                                    "profilo lo tiene invece di lisciarlo.")
+                                    .format(name, intensity, loss),
+                            )
+                        }
+                    }
                     appendLine("Ritardo comando: ${profile.responseOverheadMs} ms · assestamento: ${profile.settleMs} ms")
                     appendLine(
                         "Fine corsa pan: %.1f°…%+.1f° · %.1f s al %d%%".format(

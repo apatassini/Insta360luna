@@ -192,13 +192,63 @@ data class GimbalCalibrationProfile(
         return rate(lower, panAxis) + (rate(upper, panAxis) - rate(lower, panAxis)) * t
     }
 
+    /**
+     * Velocità misurata a una data intensità, in gradi se ci sono, in pixel per i profili vecchi.
+     *
+     * È il numero con cui si risponde a «quanto muove questo comando»: la curva in gradi viene
+     * da un conteggio di impulsi contro un fine corsa, quella in pixel da come si spostava
+     * l'immagine. La prima è una misura, la seconda una deduzione, quindi vince la prima.
+     */
+    fun responseRateAt(intensityPercent: Float, panAxis: Boolean): Float {
+        val degrees = degreesRateAt(intensityPercent, panAxis)
+        return if (degrees > 0f) degrees else abs(imageRateAt(intensityPercent, panAxis))
+    }
+
+    /**
+     * Il comando più veloce della curva. Non è detto che sia il 100%.
+     *
+     * Misurato sulla Luna Ultra: il comando 100 muove circa 11 °/s su entrambi gli assi, mentre
+     * il 90 ne fa 57 in orizzontale e 41 in verticale. Il 100 non è il massimo, è un valore che
+     * il firmware tratta a modo suo — e chiedere «vai al massimo» mandando 100 vuol dire andare
+     * quattro volte più piano credendo di andare al massimo.
+     */
+    fun fastestCommandPercent(panAxis: Boolean): Int =
+        responsePoints
+            .filter { responseRateAt(it.intensityPercent.toFloat(), panAxis) > 0f }
+            .maxByOrNull { responseRateAt(it.intensityPercent.toFloat(), panAxis) }
+            ?.intensityPercent
+            ?: 100
+
+    /** La velocità del comando più veloce: il fondo scala vero della curva. */
+    fun fullScaleRate(panAxis: Boolean): Float =
+        responseRateAt(fastestCommandPercent(panAxis).toFloat(), panAxis)
+
     /** Frazione della velocità massima realmente prodotta da un comando [-1, 1]. */
     fun motionFraction(command: Float, panAxis: Boolean): Float {
         if (!isValid || command == 0f) return command
-        val full = abs(imageRateAt(100f, panAxis))
+        val full = fullScaleRate(panAxis)
         if (full < MIN_RATE) return command
-        val measured = abs(imageRateAt(abs(command) * 100f, panAxis)) / full
+        val measured = responseRateAt(abs(command) * 100f, panAxis) / full
         return measured.coerceIn(0f, 1f) * sign(command)
+    }
+
+    /**
+     * Le intensità dove chiedere di più ottiene di meno, con quanto costa in gradi al secondo.
+     *
+     * Non è rumore da lisciare: è un fatto della camera, e va scritto invece che nascosto.
+     * Finché veniva corretto in silenzio, il profilo dichiarava per il 100% la velocità del 90%
+     * e ogni spostamento «al massimo» arrivava a poco più di un quarto della strada.
+     */
+    fun nonMonotonicPoints(panAxis: Boolean): List<Pair<Int, Float>> {
+        val points = responsePoints.sortedBy(GimbalResponsePoint::intensityPercent)
+        var best = 0f
+        val found = mutableListOf<Pair<Int, Float>>()
+        points.forEach { point ->
+            val rate = responseRateAt(point.intensityPercent.toFloat(), panAxis)
+            if (rate > 0f && best > 0f && rate < best) found += point.intensityPercent to (best - rate)
+            if (rate > best) best = rate
+        }
+        return found
     }
 
     /** Velocità angolare assoluta ricavata dal tempo di attraversamento dei fine corsa. */
@@ -238,7 +288,9 @@ data class GimbalCalibrationProfile(
             (upper.degreesPerSecond(panAxis) - lower.degreesPerSecond(panAxis)) * t
     }
 
-    fun maxAngularRate(panAxis: Boolean): Float = angularRateAt(100f, panAxis)
+    /** La velocità massima è quella del comando più veloce misurato, non quella del 100%. */
+    fun maxAngularRate(panAxis: Boolean): Float =
+        angularRateAt(fastestCommandPercent(panAxis).toFloat(), panAxis)
 
     fun limitsFor(panAxis: Boolean): GimbalAxisLimits = if (panAxis) panLimits else tiltLimits
 
@@ -246,18 +298,21 @@ data class GimbalCalibrationProfile(
     fun commandForMotionFraction(desiredFraction: Float, panAxis: Boolean): Float {
         if (!isValid || desiredFraction == 0f) return desiredFraction.coerceIn(-1f, 1f)
         val desired = abs(desiredFraction).coerceIn(0f, 1f)
-        val full = abs(imageRateAt(100f, panAxis))
+        val fastest = fastestCommandPercent(panAxis)
+        val full = fullScaleRate(panAxis)
         if (full < MIN_RATE) return desiredFraction.coerceIn(-1f, 1f)
         val targetRate = desired * full
         val points = listOf(GimbalResponsePoint(0, 0f, 0f, 0, 0)) +
             responsePoints.sortedBy(GimbalResponsePoint::intensityPercent)
-        val upperIndex = points.indexOfFirst { abs(rate(it, panAxis)) >= targetRate }
-        if (upperIndex < 0) return sign(desiredFraction)
+        // Il primo comando che raggiunge la velocità chiesta, che non è per forza il più alto:
+        // se il 100 muove meno del 90, chiedere il massimo deve mandare il 90.
+        val upperIndex = points.indexOfFirst { responseRateAt(it.intensityPercent.toFloat(), panAxis) >= targetRate }
+        if (upperIndex < 0) return fastest / 100f * sign(desiredFraction)
         if (upperIndex == 0) return 0f
         val upper = points[upperIndex]
         val lower = points[upperIndex - 1]
-        val lowRate = abs(rate(lower, panAxis))
-        val highRate = abs(rate(upper, panAxis))
+        val lowRate = responseRateAt(lower.intensityPercent.toFloat(), panAxis)
+        val highRate = responseRateAt(upper.intensityPercent.toFloat(), panAxis)
         val t = if (highRate - lowRate < 0.001f) 1f else (targetRate - lowRate) / (highRate - lowRate)
         val percent = lower.intensityPercent + (upper.intensityPercent - lower.intensityPercent) * t
         return (percent / 100f).coerceIn(0.01f, 1f) * sign(desiredFraction)
@@ -322,27 +377,10 @@ object GimbalCalibrationBuilder {
             firmware = firmware,
             validSamples = points.size * 2,
             totalSamples = (panCurve.size + tiltCurve.size),
-            responsePoints = monotonicDegrees(points),
+            responsePoints = points.sortedBy(GimbalResponsePoint::intensityPercent),
             panLimits = panLimits,
             tiltLimits = tiltLimits,
         )
-    }
-
-    /**
-     * Una curva non può rallentare quando il comando cresce.
-     *
-     * Se succede è rumore del cronometro — un impulso in più o in meno sull'ultimo tratto — e
-     * lasciarlo passare significherebbe che chiedere il 70% muove meno del 60%. Si tiene il
-     * valore più alto già visto salendo di intensità.
-     */
-    private fun monotonicDegrees(points: List<GimbalResponsePoint>): List<GimbalResponsePoint> {
-        var pan = 0f
-        var tilt = 0f
-        return points.sortedBy(GimbalResponsePoint::intensityPercent).map { point ->
-            pan = max(pan, point.panDegreesPerSecond)
-            tilt = max(tilt, point.tiltDegreesPerSecond)
-            point.copy(panDegreesPerSecond = pan, tiltDegreesPerSecond = tilt)
-        }
     }
 
     fun build(

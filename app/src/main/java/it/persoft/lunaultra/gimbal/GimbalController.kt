@@ -130,9 +130,15 @@ class GimbalController(
                 val cfg = settings.value.gimbal
                 val rateHz = cfg.commandRateHz.coerceIn(1, 50)
                 val periodMs = (1000L / rateHz).coerceAtLeast(20L)
-                val speedFraction = cfg.manualSpeedPercent.coerceIn(1, 100) / 100f
-                val panPercent = jogPan * speedFraction
-                val tiltPercent = jogTilt * speedFraction
+                // Il cursore non può chiedere più del comando più veloce misurato: sulla Luna
+                // Ultra il 100 muove meno del 90, quindi portare il cursore a fondo corsa
+                // rallenterebbe il gimbal invece di accelerarlo.
+                val profile = activeProfile()
+                val requested = cfg.manualSpeedPercent.coerceIn(1, 100)
+                val panCeiling = if (profile.isValid) profile.fastestCommandPercent(true) else 100
+                val tiltCeiling = if (profile.isValid) profile.fastestCommandPercent(false) else 100
+                val panPercent = jogPan * min(requested, panCeiling) / 100f
+                val tiltPercent = jogTilt * min(requested, tiltCeiling) / 100f
                 sendVelocity(panPercent, tiltPercent)
                     .onFailure {
                         log.error("Movimento gimbal non riuscito: ${it.message}")
@@ -367,13 +373,21 @@ class GimbalController(
     }
 
     /**
-     * Spostamento fra fotografie: usa il 100% sull'asse ancora lontano e lo ferma appena entra
-     * nella tolleranza. Riduce al minimo il tempo fra due scatti; video e timelapse continuano
-     * invece a ricavare dalla durata la velocità più bassa sufficiente.
+     * Spostamento fra fotografie: comando più veloce sull'asse ancora lontano, e stop appena
+     * entra nella tolleranza. Riduce al minimo il tempo fra due scatti; video e timelapse
+     * continuano invece a ricavare dalla durata la velocità più bassa sufficiente.
+     *
+     * «Più veloce» viene dalla curva misurata, non dal numero 100. Sulla Luna Ultra il comando
+     * 100 muove circa 11 °/s mentre il 90 ne fa 57: mandare 100 credendo di andare al massimo
+     * significa percorrere un quarto della strada nel tempo previsto e fermarsi lì — che è
+     * esattamente perché una panoramica sembrava non muovere la camera.
      */
     suspend fun moveToPositionAtMaximum(targetPan: Float, targetTilt: Float): Result<Unit> {
         stop()
         val cfg = settings.value.gimbal
+        val profile = activeProfile()
+        val panFull = if (profile.isValid) profile.fastestCommandPercent(true) / 100f else 1f
+        val tiltFull = if (profile.isValid) profile.fastestCommandPercent(false) / 100f else 1f
         val periodMs = (1000L / cfg.commandRateHz.coerceIn(1, 50)).coerceAtLeast(20L)
         val panTolerance = (maximumAngularSpeed(true) * periodMs / 1000f).coerceAtLeast(0.35f)
         val tiltTolerance = (maximumAngularSpeed(false) * periodMs / 1000f).coerceAtLeast(0.35f)
@@ -385,8 +399,8 @@ class GimbalController(
             val current = _position.value
             val panError = targetPan - current.pan
             val tiltError = targetTilt - current.tilt
-            val panCommand = if (abs(panError) <= panTolerance) 0f else sign(panError)
-            val tiltCommand = if (abs(tiltError) <= tiltTolerance) 0f else sign(tiltError)
+            val panCommand = if (abs(panError) <= panTolerance) 0f else sign(panError) * panFull
+            val tiltCommand = if (abs(tiltError) <= tiltTolerance) 0f else sign(tiltError) * tiltFull
             if (panCommand == 0f && tiltCommand == 0f) {
                 stop()
                 return Result.success(Unit)

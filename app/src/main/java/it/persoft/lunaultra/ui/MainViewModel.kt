@@ -440,6 +440,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Prova a scrivere sulla scheda della camera e dice cosa ha risposto.
+     *
+     * Serve a rispondere a una domanda che non si può dedurre: i file si scaricano in HTTP,
+     * quindi sulla camera gira un server, ma un server che serve file è quasi sempre in sola
+     * lettura — e «quasi sempre» non è una risposta. Il risultato, con ogni tentativo e ogni
+     * codice ricevuto, finisce nel log della Diagnostica.
+     */
+    fun probeCameraWrite() {
+        viewModelScope.launch {
+            showMessage("Provo a scrivere sulla camera…")
+            val result = container.writeProbe.probe(settings.value.host)
+            showMessage(
+                if (result.canWrite) {
+                    "La camera accetta la scrittura su ${result.writablePath}"
+                } else {
+                    "La camera non accetta la scrittura: i dettagli sono nel log"
+                },
+            )
+        }
+    }
+
     private fun observeConnection() {
         viewModelScope.launch {
             connectionState.collect { state ->

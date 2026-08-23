@@ -11,6 +11,7 @@ import it.persoft.lunaultra.gimbal.GimbalController
 import it.persoft.lunaultra.gimbal.GimbalCalibrator
 import it.persoft.lunaultra.gimbal.GimbalLimitMonitor
 import it.persoft.lunaultra.media.Favorites
+import it.persoft.lunaultra.media.CameraWriteProbe
 import it.persoft.lunaultra.media.MediaRepository
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
@@ -67,6 +68,9 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val calibrator = GimbalCalibrator(gimbal, gimbalLimits, preview, calibrationStore, log, scope)
     val engine = TimelapseEngine(commands, gimbal, preview, settingsStore.state, calibrationStore.state, log, scope)
     val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log)
+
+    /** Risponde alla domanda «si può scrivere sulla scheda della camera?» provandoci. */
+    val writeProbe = CameraWriteProbe(wifiBinder, log)
 
     suspend fun load() {
         settingsStore.load()

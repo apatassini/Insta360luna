@@ -36,9 +36,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.CodeProbe
+import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.net.LogLevel
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.ui.MainViewModel
+import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
 import it.persoft.lunaultra.ui.components.SectionCard
@@ -55,6 +57,8 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
     val probe by viewModel.probe.collectAsState()
     val sightings by viewModel.sightings.collectAsState()
     val log by viewModel.logEntries.collectAsState()
+    val connection by viewModel.connectionState.collectAsState()
+    val connected = connection == ConnectionState.CONNECTED
     val context = LocalContext.current
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
@@ -135,6 +139,31 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
         ShapeCard(viewModel)
 
         GimbalTuningCard(viewModel)
+
+        SectionCard(title = "Scrittura sulla camera", icon = LunaIcons.Storage, accent = Luna.Path) {
+            Text(
+                text = "I file si scaricano in HTTP dal loro percorso, quindi sulla camera gira " +
+                    "un server. Se accettasse anche di ricevere, una panoramica unita sul " +
+                    "telefono potrebbe tornare sulla scheda insieme agli scatti che l'hanno " +
+                    "generata. Ma un server che serve file è quasi sempre in sola lettura, e " +
+                    "«quasi sempre» non è una risposta: questa prova chiede OPTIONS, poi tenta " +
+                    "PUT e POST su radice, DCIM e cartella degli scatti, e legge cosa espone " +
+                    "l'interfaccia OSC. Ogni risposta finisce nel log qui sotto.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(
+                onClick = viewModel::probeCameraWrite,
+                enabled = connected,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                ButtonLabel(LunaIcons.Storage, "Prova a scrivere sulla scheda")
+            }
+            Text(
+                text = "Se qualcosa passa viene creato un file di prova con un nome " +
+                    "riconoscibile: cancellalo dalla galleria quando hai finito.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
 
         SectionCard(title = "Invio manuale", icon = LunaIcons.Share, accent = Luna.Amber) {
             var code by remember { mutableStateOf("") }

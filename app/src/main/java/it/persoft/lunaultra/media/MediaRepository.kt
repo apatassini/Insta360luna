@@ -30,6 +30,14 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
+ * La cartella della galleria del telefono dove finisce tutto quello che viene da questa camera.
+ *
+ * Una sola, condivisa: le foto scaricate e le panoramiche unite stanno insieme, e chi cerca
+ * qualcosa guarda in un posto solo.
+ */
+const val GALLERY_FOLDER = "Luna Ultra"
+
+/**
  * La libreria della camera: elencare, guardare, scaricare.
  *
  * Due trasporti, ognuno per quello che sa fare. L'elenco passa dalla sessione di controllo,
@@ -648,6 +656,5 @@ class MediaRepository(
         const val OSC_PAGE_SIZE = 40
         const val CONNECT_TIMEOUT_MS = 8_000
         const val READ_TIMEOUT_MS = 20_000
-        const val GALLERY_FOLDER = "Luna Ultra"
     }
 }

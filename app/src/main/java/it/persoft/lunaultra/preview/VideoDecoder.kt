@@ -5,6 +5,21 @@ import android.media.MediaFormat
 import android.view.Surface
 import it.persoft.lunaultra.net.EventLog
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
+
+/** Corregge il preview anamorfizzato 1440x720 della Luna quando MediaCodec perde il SAR 8:9. */
+internal fun correctedPreviewAspectRatio(width: Int, height: Int, sarWidth: Int, sarHeight: Int): Float {
+    val safeHeight = height.coerceAtLeast(1)
+    val safeSarWidth = sarWidth.coerceAtLeast(1)
+    val safeSarHeight = sarHeight.coerceAtLeast(1)
+    val codedRatio = width.toFloat() / safeHeight
+    val codecDeclaredSquarePixels = safeSarWidth == 1 && safeSarHeight == 1
+    return if (codecDeclaredSquarePixels && abs(codedRatio - 2f) <= 0.03f) {
+        16f / 9f
+    } else {
+        width.toFloat() * safeSarWidth / (safeHeight.toFloat() * safeSarHeight)
+    }
+}
 
 /**
  * Decodifica lo stream elementare dell'anteprima su una [Surface].
@@ -42,6 +57,18 @@ class VideoDecoder(private val log: EventLog) {
 
     @Volatile
     var bytesReceived: Long = 0
+        private set
+
+    @Volatile
+    var displayWidth: Int = 0
+        private set
+
+    @Volatile
+    var displayHeight: Int = 0
+        private set
+
+    @Volatile
+    var displayAspectRatio: Float = PreviewState.DEFAULT_PREVIEW_ASPECT_RATIO
         private set
 
     val isRunning: Boolean get() = codec != null
@@ -85,8 +112,9 @@ class VideoDecoder(private val log: EventLog) {
 
     private fun start(surface: Surface, kind: AnnexB.Codec) {
         try {
-            // Dimensioni indicative: il decoder le corregge dallo SPS del flusso.
-            val format = MediaFormat.createVideoFormat(kind.mime, 1440, 720)
+            // Dimensioni soltanto indicative: il decoder le sostituisce con quelle dello SPS.
+            // Il vecchio 1440×720 era 2:1 e poteva deformare i primi fotogrammi.
+            val format = MediaFormat.createVideoFormat(kind.mime, 1280, 720)
             val created = MediaCodec.createDecoderByType(kind.mime)
             created.configure(format, surface, null, 0)
             created.start()
@@ -119,12 +147,49 @@ class VideoDecoder(private val log: EventLog) {
         val info = MediaCodec.BufferInfo()
         while (true) {
             val index = decoder.dequeueOutputBuffer(info, 0)
-            if (index < 0) break
-            // render = true: il fotogramma va direttamente sulla Surface.
-            decoder.releaseOutputBuffer(index, true)
-            framesDecoded++
+            when {
+                index >= 0 -> {
+                    // render = true: il fotogramma va direttamente sulla Surface.
+                    decoder.releaseOutputBuffer(index, true)
+                    framesDecoded++
+                }
+
+                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> updateDisplayFormat(decoder.outputFormat)
+                index == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
+                else -> return
+            }
         }
     }
+
+    /** Usa l'area visibile (crop SPS), non stride e buffer grezzi, per dimensionare la UI. */
+    private fun updateDisplayFormat(format: MediaFormat) {
+        val codedWidth = format.intOrNull(MediaFormat.KEY_WIDTH) ?: return
+        val codedHeight = format.intOrNull(MediaFormat.KEY_HEIGHT) ?: return
+        val cropLeft = format.intOrNull(MediaFormat.KEY_CROP_LEFT) ?: 0
+        val cropRight = format.intOrNull(MediaFormat.KEY_CROP_RIGHT) ?: (codedWidth - 1)
+        val cropTop = format.intOrNull(MediaFormat.KEY_CROP_TOP) ?: 0
+        val cropBottom = format.intOrNull(MediaFormat.KEY_CROP_BOTTOM) ?: (codedHeight - 1)
+        var width = (cropRight - cropLeft + 1).coerceAtLeast(1)
+        var height = (cropBottom - cropTop + 1).coerceAtLeast(1)
+        val rotation = format.intOrNull(MediaFormat.KEY_ROTATION) ?: 0
+        if (rotation == 90 || rotation == 270) {
+            val swapped = width
+            width = height
+            height = swapped
+        }
+        val sarWidth = format.intOrNull(SAR_WIDTH_KEY)?.coerceAtLeast(1) ?: 1
+        val sarHeight = format.intOrNull(SAR_HEIGHT_KEY)?.coerceAtLeast(1) ?: 1
+        displayWidth = width
+        displayHeight = height
+        displayAspectRatio = correctedPreviewAspectRatio(width, height, sarWidth, sarHeight)
+        log.info(
+            "Anteprima: formato visibile ${width}×${height}, rapporto " +
+                "%.3f".format(displayAspectRatio),
+        )
+    }
+
+    private fun MediaFormat.intOrNull(key: String): Int? =
+        if (!containsKey(key)) null else runCatching { getInteger(key) }.getOrNull()
 
     @Synchronized
     fun release() {
@@ -141,6 +206,8 @@ class VideoDecoder(private val log: EventLog) {
 
     private companion object {
         const val INPUT_TIMEOUT_US = 10_000L
+        const val SAR_WIDTH_KEY = "sar-width"
+        const val SAR_HEIGHT_KEY = "sar-height"
 
         /** Passo dei timestamp: la camera non ne manda, e a 30 fps questo è il valore giusto. */
         const val FRAME_INTERVAL_US = 33_333L

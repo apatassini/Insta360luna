@@ -21,16 +21,13 @@ Resta però un buco, ed è esattamente quello che serve qui:
 |---|---|
 | Framing UCD2, checksum, handshake, keep-alive, correlazione richiesta/risposta | **Noto e verificato sulla Luna Ultra** |
 | Stato camera, batteria, storage, avvio/stop registrazione, opzioni timelapse | **Numeri di comando e di campo noti** |
-| **Comando del gimbal (pan/tilt)** | **Nome noto, numero ignoto** — nessuna fonte pubblica lo riporta |
+| ISO, otturatore, EV, WB, Standard/i-Log/Dolby Vision, filtri Leica/cinema, risoluzioni/FPS | **Rimisurati sulla Luna Ultra reale** |
+| **Comando del gimbal (pan/tilt)** | **Verificato sulla Luna Ultra**: `0x00E2`, assi ZigZag e stop esplicito |
 | Lettura della posizione PTZ | Codice della notifica molto probabile (8302), contenuto non decodificato |
 
-`PHONE_COMMAND_GIMBAL_CONTROL` esiste con questo nome nell'app Insta360 2.30.0, insieme ad altri
-13 comandi PTZ. I loro **numeri** no: l'app Android è protetta da AppShield (bytecode cifrato a
-runtime), il firmware della camera è cifrato per intero e l'IPA iOS è protetta da FairPlay.
-Tutte e tre le strade statiche sono chiuse, ognuna per un motivo diverso.
-
-Per questo l'app **non inventa** il numero mancante. Finché non è noto rifiuta di muovere il
-gimbal, e la scheda **Diagnostica** contiene lo scanner che lo trova interrogando la camera.
+Il movimento è stato implementato sulla base delle catture e dell'adattatore Luna Ultra di
+[Insta360Linker](https://github.com/wuhaiqi0621/Insta360Linker), riproducendo il protocollo nella
+codebase Android senza copiare la sua interfaccia.
 
 ---
 
@@ -89,6 +86,16 @@ Comandi usati dall'app, tutti con numero noto:
 | 9 | `SET_PHOTOGRAPHY_OPTIONS` | proporzione della panoramica (sferica / 2:1) |
 | 13 | `GET_FILE_LIST` | elenco dei media sulla camera, a pagine |
 | 30 | `GET_MINI_THUMBNAIL` | miniatura di un file |
+| 226 / `0x00E2` | `GIMBAL_CONTROL` | vettore continuo pan/tilt e stop |
+
+### Gimbal Luna Ultra
+
+Il corpo del comando è `08 01 12 <len> <assi>`. L'app converte la levetta UI nel sistema della
+camera con `device_x = verticale` e `device_y = orizzontale`, quindi codifica i due valori
+`-100..100` come protobuf ZigZag. Il rilascio invia `08 01 12 00` quattro volte a 25 ms, così
+un singolo pacchetto perso non lascia il gimbal in movimento. Il pannello offre inoltre i tre
+livelli hardware della camera (lento, medio, veloce) tramite il comando fotografia 9 osservato
+nelle catture; l'intensità software della levetta resta un controllo separato.
 
 ### Le modalità della camera: due trappole misurate
 
@@ -108,6 +115,8 @@ bracketing e basta.
 | Foto | `SET_OPTIONS` `PHOTO_SUB_MODE(40)` = `PHOTO_SINGLE(0)` | `TAKE_PICTURE` con `Mode.NORMAL(0)` |
 | Panorama | `PHOTO_SUB_MODE(40)` = `PHOTO_INSTA_PANO(8)` | `TAKE_PICTURE`; sferica o 2:1 da `PANO_ASPECT` |
 | Video | `VIDEO_SUB_MODE(41)` = `VIDEO_NORMAL(0)` | `START` / `STOP_CAPTURE` con `Capture_MODE_NORMAL(1)` |
+| PureVideo | `VIDEO_SUB_MODE(41)` = `VIDEO_PURE(11)` | `START` / `STOP_CAPTURE` con `Capture_MODE_PURE_VIDEO(11)` |
+| Slow-motion | `VIDEO_SUB_MODE(41)` = `VIDEO_SLOW_MOTION(9)` | `START` / `STOP_CAPTURE` con `Capture_MODE_SLOWMOTION(9)` |
 | Timelapse | `VIDEO_SUB_MODE(41)` = `VIDEO_TIMELAPSE(2)` | `START` / `STOP_TIMELAPSE` |
 
 La panoramica è **una sola sotto-modalità** anche se le proporzioni sono due: la scelta viaggia
@@ -117,6 +126,20 @@ I valori sono `PANO_ASPECT_360 = 1` e `PANO_ASPECT_2_1 = 4`.
 
 La camera lascia l'altra sotto-modalità al suo valore sentinella (`*_NONE = 100`) invece di
 azzerarla: per sapere in che modalità è, il video vince quando è diverso da `VIDEO_NONE`.
+
+### Opzioni Foto e Video
+
+Il tasto con i cursori apre le regolazioni native della camera; le automazioni di movimento del
+gimbal restano nel menu dedicato. Il pannello Video separa le tre scelte del formato
+(risoluzione, rapporto e FPS) e, in modalità Pro, mostra ISO, otturatore, EV, bilanciamento del
+bianco, profilo colore, filtro, intensità e nitidezza. PureVideo, Slow-motion e Timelapse
+limitano automaticamente le combinazioni a quelle offerte dalla modalità reale.
+
+I valori Luna-specifici sono stati confrontati con le misurazioni pubbliche di
+[`Ripwords/insta360-luna-ultra-desktop`](https://github.com/Ripwords/insta360-luna-ultra-desktop):
+fra le correzioni rispetto alle enum 2020 ci sono Standard=1, i-Log=2, Dolby Vision=5, i codici
+2,7K 242–248, 48 fps e i crop 4K 2,35:1. Il protocollo di base deriva dalle estrazioni pubbliche
+collegate da quel progetto e da [`RigacciOrg/insta360-wifi-api`](https://github.com/RigacciOrg/insta360-wifi-api).
 
 ### Galleria e scaricamento
 
@@ -206,6 +229,22 @@ Due cose diverse, tutte e due necessarie:
   crescenti (2, 4, 8, 16 secondi…) finché non riesce o finché non si arrende dopo sei tentativi.
   Smette solo quando sei tu a premere «disconnetti».
 
+Prima di richiedere un cambio rete, l'app controlla tutte le reti Wi-Fi attive e riutilizza
+direttamente la Luna se il telefono è già collegato: in questo caso non apre il selettore di
+Android. Riconosce sia l'SSID sia il collegamento/gateway verso `192.168.42.1`, compresi i
+firmware che oscurano l'SSID nelle API moderne. Se la Luna non è ancora attiva, la selezione
+iniziale usa l'SSID esatto trovato dalla scansione. La
+Luna protegge l'access point con una password modificabile: Android non consente a un'app di
+leggere quella già salvata nel telefono. Per questo basta una delle due strade:
+
+- inserire una volta la **Password Wi-Fi Luna** nelle impostazioni dell'app;
+- connettere una volta il telefono manualmente e poi premere Connetti: a sessione aperta l'app
+  legge `Options.WifiInfo` dalla camera e conserva la password per gli avvii successivi.
+
+La password non viene mai scritta nel log. Le richieste Wi-Fi sono serializzate e un vecchio
+`WifiNetworkSpecifier` viene chiuso prima di aprirne un altro, per evitare il ciclo
+connessione/disconnessione osservato su alcuni firmware Android.
+
 ---
 
 ## Compilare l'APK
@@ -228,6 +267,17 @@ Il `versionCode` cresce con il numero della run (`GITHUB_RUN_NUMBER`), perché A
 installa sopra una versione con numero uguale o più alto. Una build fatta in locale vale 1 e
 quindi **non** si installa sopra una build della CI: per provarla, disinstalla prima.
 
+### Aggiornamenti automatici
+
+All'avvio l'app interroga la release GitHub prima di qualsiasi collegamento alla camera.
+Non tenta più di connettersi automaticamente alla Luna: concluso il controllo resta sul tasto
+**Connetti**, che viene premuto dall'utente. Se il commit è cambiato,
+scarica automaticamente `app-debug.apk`, verifica il digest
+SHA-256 pubblicato da GitHub e apre l'installer di Android. La prima volta va consentito a Luna
+Ultra di installare app da questa origine; Android richiede comunque la conferma finale per ogni
+installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
+sistema. Se GitHub non è raggiungibile, il controllo non blocca la connessione alla camera.
+
 ### In locale
 
 Requisiti: JDK 17, Android SDK (compileSdk 35).
@@ -246,21 +296,22 @@ In alternativa, aprire la cartella con Android Studio (Ladybug o successivo).
 L'app è un mirino: l'anteprima occupa tutto lo schermo e i comandi ci stanno sopra, come in
 un'app di ripresa. Un tocco sull'immagine nasconde i comandi e lascia solo l'inquadratura.
 
-1. Collegare il telefono alla rete Wi-Fi della Luna Ultra.
-2. Aprire l'app e premere **Connetti**, al centro dell'anteprima
-   (l'app forza il routing dei socket sulla rete Wi-Fi anche se non offre Internet).
+1. Aprire l'app mentre il telefono ha Internet: viene controllata prima la disponibilità di un
+   aggiornamento. L'app non cambia rete da sola.
+2. Collegare manualmente il telefono al Wi-Fi della Luna Ultra e premere **Connetti**.
+3. L'app forza il routing dei socket sulla rete Wi-Fi della camera anche se non offre Internet.
    Batteria, spazio e stato compaiono subito nella riga in alto: se li vedi, il protocollo gira.
-3. **Accendi l'anteprima** con il primo tasto della colonna dei comandi rapidi, a destra.
-4. **La prima volta**: menu ⋮ → **Diagnostica** → trovare il codice del comando gimbal
+4. **Accendi l'anteprima** con il primo tasto della colonna dei comandi rapidi, a destra.
+5. **La prima volta**: menu ⋮ → **Diagnostica** → trovare il codice del comando gimbal
    (vedi sotto). È l'unico passo di configurazione, e finché manca i comandi di movimento
    restano visibili ma inerti.
-5. Scegliere la **modalità** sulla ghiera in basso: foto, video e timelapse comandano la camera
+6. Scegliere la **modalità** sulla ghiera in basso: foto, video e timelapse comandano la camera
    e basta; sequenza, sequenza TL e panorama percorrono i punti memorizzati.
-6. Con la **levetta** (o la croce, che muove un asse alla volta) portare il gimbal sulla prima
+7. Con la **levetta** (o la croce, che muove un asse alla volta) portare il gimbal sulla prima
    inquadratura e premere il tasto con la **bandierina**. Ripetere per gli altri punti.
-7. Nel pannello **Sequenza** impostare durata e, in modalità panorama, scatti per tratto e
+8. Nel pannello **Sequenza** impostare durata e, in modalità panorama, scatti per tratto e
    attesa prima dello scatto.
-8. Premere il **pulsante di scatto**: fa la cosa che dice la ghiera, e nelle modalità guidate
+9. Premere il **pulsante di scatto**: fa la cosa che dice la ghiera, e nelle modalità guidate
    l'anello attorno mostra l'avanzamento.
 9. **STOP** — sul pulsante stesso o nella scheda dell'avanzamento — interrompe tutto
    immediatamente: ferma il gimbal e la registrazione.
@@ -281,7 +332,7 @@ invece che sotto — un tocco sull'immagine le toglie e l'anteprima si allarga a
 | Fascia in alto | connessione (si tocca per connettere), distintivo della modalità, anteprima on/off, griglia, impostazioni, menu ⋮ |
 | Sull'immagine, in alto a sinistra | spazio libero, batteria, gimbal pronto o no, cronometro di registrazione |
 | Sull'immagine, in basso | azzera posizione, pastiglia del tempo che conta nella modalità, comandi del gimbal |
-| Fascia in basso | galleria (o memorizza punto, nelle modalità guidate) · **pulsante di scatto** · sequenza e tempi · interpolazione, e sotto la ghiera delle modalità |
+| Fascia in basso | galleria (o memorizza punto) · **pulsante di scatto** · impostazioni **Camera** · **Automazioni gimbal**, e sotto la ghiera delle modalità |
 | Al centro | invito a connettersi, oppure il motivo per cui l'anteprima è ancora nera |
 
 Ogni modalità ha un colore e lo porta ovunque: la voce accesa nella ghiera, il pieno del
@@ -295,7 +346,7 @@ Ruotando il telefono la fascia di scatto passa sul lato destro e il pannello del
 rimpicciolisce: in orizzontale l'altezza è il bene scarso.
 
 Quattro pannelli si aprono sopra il mirino e si chiudono con Indietro: **Galleria**,
-**Sequenza e punti**
+**Automazioni gimbal**
 (riepilogo a numeri grandi, punti in griglia con la bussola di dove guardano),
 **Impostazioni** (camera, anteprima, movimento manuale) e **Diagnostica**.
 
@@ -332,6 +383,12 @@ ghiera adotta la modalità in cui la camera si trova già.
 Le tre modalità guidate hanno bisogno di almeno due punti: senza, il pulsante di scatto resta
 spento. Sceglierne una dalla ghiera equivale a sceglierla nel pannello della sequenza, e
 viceversa: è la stessa impostazione detta in due posti.
+
+Le impostazioni native e le funzioni aggiuntive non sono mescolate: il tasto con i cursori apre
+il menu **Camera** (per il video: risoluzione, rapporto e FPS; per la foto: timer, formato e
+regolazioni Auto/Pro), mentre il tasto con il percorso apre **Automazioni gimbal**. Il firmware
+codifica risoluzione e FPS in un solo `VideoResolution`: il menu propone quindi solo
+combinazioni atomiche realmente descrivibili dal protocollo, da 8K a 1080p.
 
 ---
 

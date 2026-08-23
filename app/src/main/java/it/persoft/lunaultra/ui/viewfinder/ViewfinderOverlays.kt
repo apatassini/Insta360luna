@@ -111,11 +111,13 @@ fun RunCard(
 @Composable
 fun ConnectCta(
     connection: ConnectionState,
-    host: String,
+    searchingWifi: Boolean,
     onConnect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val busy = connection == ConnectionState.CONNECTING || connection == ConnectionState.HANDSHAKE
+    val busy = searchingWifi ||
+        connection == ConnectionState.CONNECTING ||
+        connection == ConnectionState.HANDSHAKE
     val failed = connection == ConnectionState.ERROR
     val shape = RoundedCornerShape(26.dp)
 
@@ -142,22 +144,17 @@ fun ConnectCta(
                 modifier = Modifier.size(20.dp),
             )
         }
-        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            Text(
-                text = when {
-                    busy -> "Connessione…"
-                    failed -> "Riprova a connetterti"
-                    else -> "Connetti alla camera"
-                },
-                style = MaterialTheme.typography.labelLarge,
-                color = Color.White,
-            )
-            Text(
-                text = host,
-                style = MaterialTheme.typography.labelSmall,
-                color = Luna.OnSurfaceDim,
-            )
-        }
+        Text(
+            text = when {
+                searchingWifi -> "Ricerca Luna Ultra…"
+                connection == ConnectionState.CONNECTING ||
+                    connection == ConnectionState.HANDSHAKE -> "Connessione…"
+                failed -> "Riprova a connetterti"
+                else -> "Connetti alla camera"
+            },
+            style = MaterialTheme.typography.labelLarge,
+            color = Color.White,
+        )
     }
 }
 

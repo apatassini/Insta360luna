@@ -39,10 +39,9 @@ fun PreviewSurface(
     fillScreen: Boolean = false,
 ) {
     val frame = state.frame
-    val sourceRatio = when {
-        frame != null && frame.height > 0 -> frame.width.toFloat() / frame.height.toFloat()
-        else -> 16f / 9f
-    }
+    val sourceRatio = state.displayAspectRatio
+        .takeIf { it.isFinite() && it > 0f }
+        ?: PreviewState.DEFAULT_PREVIEW_ASPECT_RATIO
 
     BoxWithConstraints(
         modifier = modifier

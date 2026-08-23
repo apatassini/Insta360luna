@@ -141,7 +141,7 @@ fun ViewfinderTopBar(
                         menuOpen = false
                         onOpenGallery()
                     }
-                    MenuRow(label = "Sequenza e punti", icon = LunaIcons.Sequence) {
+                    MenuRow(label = "Automazioni gimbal", icon = LunaIcons.Sequence) {
                         menuOpen = false
                         onOpenSequence()
                     }
@@ -264,6 +264,11 @@ private fun StatRow(
 /** Riga di contesto per il distintivo: punti memorizzati o stato della camera. */
 fun badgeDetailFor(mode: CaptureMode, waypoints: Int, status: CameraStatus): String? = when {
     mode.usesSequence -> "${waypoints}P"
-    status.captureMode != null -> status.captureMode
+    status.recording == true -> "REC"
+    // Valori interni come NOT_CAPTURE/NOT_CAPTURING occupavano metà barra senza dare
+    // informazioni: a camera ferma la modalità è già scritta nel distintivo principale.
+    status.captureMode?.startsWith("NOT_", ignoreCase = true) == true -> null
+    status.captureMode.equals("IDLE", ignoreCase = true) -> null
+    status.captureMode != null -> status.captureMode.replace('_', ' ').lowercase()
     else -> null
 }

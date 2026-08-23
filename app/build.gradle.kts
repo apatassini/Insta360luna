@@ -11,6 +11,7 @@ plugins {
  * ogni aggiornamento sarebbe un reinstall a mano.
  */
 val buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toIntOrNull() ?: 0
+val gitSha = System.getenv("GITHUB_SHA") ?: "local"
 
 android {
     namespace = "it.persoft.lunaultra"
@@ -22,6 +23,7 @@ android {
         targetSdk = 35
         versionCode = 1 + buildNumber
         versionName = "0.2.$buildNumber"
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
     }
 
     /**
@@ -73,6 +75,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {

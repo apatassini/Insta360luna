@@ -124,13 +124,15 @@ private fun PanelHost(
                     onClick = onClose,
                     size = 42.dp,
                 )
-                Icon(
-                    imageVector = panel.icon,
-                    contentDescription = null,
-                    tint = Luna.Accent,
-                    modifier = Modifier.size(20.dp),
-                )
-                Text(text = panel.title, style = MaterialTheme.typography.titleLarge)
+                if (panel != Panel.GALLERY) {
+                    Icon(
+                        imageVector = panel.icon,
+                        contentDescription = null,
+                        tint = Luna.Accent,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Text(text = panel.title, style = MaterialTheme.typography.titleLarge)
+                }
             }
             Box(modifier = Modifier.weight(1f)) { content() }
         }

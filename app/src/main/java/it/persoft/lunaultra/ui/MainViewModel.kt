@@ -4,12 +4,16 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import it.persoft.lunaultra.AppContainer
+import it.persoft.lunaultra.BuildConfig
 import it.persoft.lunaultra.camera.CameraMode
 import it.persoft.lunaultra.camera.CameraStatus
 import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
+import it.persoft.lunaultra.data.PhotoSettings
+import it.persoft.lunaultra.data.LunaVideoProfiles
+import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.preview.PreviewState
@@ -17,11 +21,15 @@ import it.persoft.lunaultra.protocol.Hex
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.service.LunaConnectionService
 import it.persoft.lunaultra.timelapse.InterpolationMode
+import it.persoft.lunaultra.timelapse.PanoramaPlanner
+import it.persoft.lunaultra.timelapse.PhotoFrameAspect
 import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
+import it.persoft.lunaultra.update.UpdateManager
 import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -30,6 +38,8 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /** Una notifica spontanea osservata sul canale di controllo. */
 data class NotificationSighting(
@@ -136,6 +146,7 @@ data class ViewerState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val container = AppContainer(application, viewModelScope)
+    private val updateManager = UpdateManager(application)
 
     val settings: StateFlow<AppSettings> = container.settingsStore.state
     val sequence: StateFlow<TimelapseSequence> = container.sequenceStore.state
@@ -144,6 +155,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val logEntries = container.log.entries
     val ptz = container.gimbal.position
     val gimbalMoving = container.gimbal.moving
+    val gimbalPosition = container.gimbal.position
+    val gimbalCalibration = container.calibrationStore.state
+    val gimbalCalibrationState = container.calibrator.state
     val runState = container.engine.state
     val preview: StateFlow<PreviewState> = container.preview.state
 
@@ -156,6 +170,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Modalità selezionata sulla ghiera: decide cosa fa il pulsante di scatto. */
     private val _captureMode = MutableStateFlow(CaptureMode.VIDEO)
     val captureMode: StateFlow<CaptureMode> = _captureMode
+
+    private val _wifiConnecting = MutableStateFlow(false)
+    val wifiConnecting: StateFlow<Boolean> = _wifiConnecting
+
+    private val _photoCountdownSeconds = MutableStateFlow(0)
+    val photoCountdownSeconds: StateFlow<Int> = _photoCountdownSeconds
 
     /**
      * Istante in cui è partita la ripresa, per il cronometro dell'HUD. Zero = ferma.
@@ -205,13 +225,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val payloadsByCode = mutableMapOf<Int, MutableSet<String>>()
     private val countsByCode = mutableMapOf<Int, Int>()
 
-    /** Ultimo avviso sul codice gimbal ignoto: senza questo, la levetta ne stampa uno per tocco. */
-    private var lastGimbalWarningMs = 0L
-
     /** L'utente vuole essere connesso: resta vero finché non preme «disconnetti». */
     private var wantConnected = false
     private var reconnectAttempts = 0
     private var reconnectJob: Job? = null
+    private var connectionJob: Job? = null
+    private var updateCheckStarted = false
+    private var photoCountdownJob: Job? = null
 
     private var pollJob: Job? = null
     private var viewerJob: Job? = null
@@ -236,9 +256,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun observeForegroundService() {
         viewModelScope.launch {
-            combine(connectionState, _recordingSinceMs, runState, _status) { connection, recordingSince, run, status ->
+            combine(
+                connectionState,
+                _recordingSinceMs,
+                runState,
+                _status,
+                gimbalCalibrationState,
+            ) { connection, recordingSince, run, status, calibration ->
                 when {
                     connection != ConnectionState.CONNECTED -> null
+                    calibration.running -> if (calibration.pausedForPreview) {
+                        "Calibrazione gimbal in pausa — riapri l'app per l'anteprima"
+                    } else {
+                        "Calibrazione gimbal — ${(calibration.progress * 100).toInt()}%"
+                    }
                     run.running ->
                         "Sequenza in corso — tratto ${run.legIndex + 1}/${run.legCount.coerceAtLeast(1)}"
 
@@ -255,16 +286,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---------------------------------------------------------------- connessione
 
-    fun connect() {
+    /**
+     * Prima di chiedere la rete locale della camera usa la normale connessione Internet per
+     * controllare la release GitHub. Il download è automatico; Android mostra comunque la sua
+     * conferma di installazione, che un'app normale non può aggirare.
+     */
+    fun checkForUpdate(onReadyToInstall: (File) -> Unit) {
+        if (updateCheckStarted) return
+        updateCheckStarted = true
+        viewModelScope.launch {
+            showMessage("Controllo aggiornamenti…")
+            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA)
+                .onSuccess { update ->
+                    if (update != null) {
+                        showMessage("Aggiornamento scaricato: conferma l'installazione")
+                        onReadyToInstall(update.apk)
+                    } else {
+                        showMessage("App aggiornata · premi Connetti quando vuoi")
+                    }
+                }
+                .onFailure {
+                    container.log.warn("Controllo aggiornamenti non riuscito: ${it.message}")
+                    showMessage("Aggiornamento non verificabile · premi Connetti quando vuoi")
+                }
+        }
+    }
+
+    fun connect() = beginConnect(showFailure = true)
+
+    private fun beginConnect(showFailure: Boolean) {
+        if (connectionState.value == ConnectionState.CONNECTED) return
+        if (connectionJob?.isActive == true) return
         wantConnected = true
         reconnectAttempts = 0
-        viewModelScope.launch {
-            container.log.info("Acquisizione rete Wi-Fi…")
-            container.wifiBinder.acquire()
+        connectionJob = viewModelScope.launch {
+            _wifiConnecting.value = true
+            container.log.info("Ricerca della rete Luna Ultra…")
+            val currentSettings = settings.value
+            val network = container.wifiBinder.acquire(
+                password = currentSettings.cameraWifiPassword,
+                cameraHost = currentSettings.host,
+            )
+            _wifiConnecting.value = false
+            if (network == null) {
+                wantConnected = false
+                if (showFailure) {
+                    val detail = if (currentSettings.cameraWifiPassword.isBlank()) {
+                        "collegati una volta alla Luna oppure inserisci la password nelle Impostazioni"
+                    } else {
+                        "Android non ha autorizzato il cambio rete; verifica password e conferma di sistema"
+                    }
+                    showMessage("Connessione Wi-Fi automatica non riuscita: $detail")
+                }
+                return@launch
+            }
             container.session.connect()
-                .onFailure { showMessage("Connessione fallita: ${it.message}") }
+                .onFailure {
+                    if (showFailure) showMessage("Connessione fallita: ${it.message}")
+                    else container.log.warn("Connessione automatica non riuscita: ${it.message}")
+                }
                 .onSuccess {
-                    showMessage("Connesso a ${settings.value.host}")
+                    learnCameraWifiPassword()
+                    if (showFailure) showMessage("Luna Ultra connessa")
                     refreshStatus()
                     syncCameraMode()
                 }
@@ -275,6 +358,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         wantConnected = false
         reconnectJob?.cancel()
         reconnectJob = null
+        connectionJob?.cancel()
+        connectionJob = null
+        photoCountdownJob?.cancel()
+        photoCountdownJob = null
+        _photoCountdownSeconds.value = 0
+        _wifiConnecting.value = false
         viewModelScope.launch {
             container.engine.stop("Disconnessione")
             container.session.disconnect()
@@ -301,6 +390,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 when (state) {
                     ConnectionState.CONNECTED -> {
                         reconnectAttempts = 0
+                        // La connessione resta manuale, ma una volta riuscita il mirino deve
+                        // mostrare subito l'immagine senza richiedere un secondo pulsante.
+                        container.preview.start()
+                        container.log.info("Anteprima avviata automaticamente dopo la connessione")
                         pollJob = viewModelScope.launch {
                             while (isActive) {
                                 delay(STATUS_POLL_MS)
@@ -313,7 +406,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    ConnectionState.DISCONNECTED, ConnectionState.ERROR -> scheduleReconnect()
+                    ConnectionState.DISCONNECTED, ConnectionState.ERROR -> {
+                        container.preview.stop()
+                        scheduleReconnect()
+                    }
                     else -> Unit
                 }
             }
@@ -342,15 +438,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.log.warn("Sessione caduta: riprovo fra ${wait / 1000}s (tentativo $attempt)")
             delay(wait)
             if (!wantConnected) return@launch
-            container.wifiBinder.acquire()
+            val currentSettings = settings.value
+            val network = container.wifiBinder.acquire(
+                password = currentSettings.cameraWifiPassword,
+                cameraHost = currentSettings.host,
+            )
+            if (network == null) {
+                container.log.warn("Riconnessione Wi-Fi non riuscita")
+                return@launch
+            }
             container.session.connect()
                 .onSuccess {
+                    learnCameraWifiPassword()
                     showMessage("Riconnessa alla camera")
                     refreshStatus()
                     syncCameraMode()
                 }
                 .onFailure { container.log.warn("Riconnessione non riuscita: ${it.message}") }
         }
+    }
+
+    /**
+     * Dopo una prima connessione manuale la camera stessa ci consegna la sua password Wi-Fi.
+     * Non viene mai scritta nel log; serve soltanto ai successivi `WifiNetworkSpecifier`.
+     */
+    private suspend fun learnCameraWifiPassword() {
+        container.commands.fetchWifiInfo()
+            .onSuccess { info ->
+                val learned = info.password?.takeIf { it.isNotBlank() } ?: return@onSuccess
+                if (learned != settings.value.cameraWifiPassword) {
+                    container.settingsStore.update { it.copy(cameraWifiPassword = learned) }
+                    container.log.info("Credenziali Wi-Fi Luna memorizzate per le connessioni automatiche")
+                }
+            }
+            .onFailure { container.log.warn("Informazioni Wi-Fi della camera non leggibili: ${it.message}") }
     }
 
     /**
@@ -364,9 +485,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 container.commands.statusFromNotification(frame)?.let {
                     _status.value = _status.value.mergedWith(it)
                 }
-                if (frame.code == settings.value.gimbal.ptzNotificationCode) {
+                if (
+                    settings.value.gimbal.useExperimentalPtzPosition &&
+                    frame.code == settings.value.gimbal.ptzNotificationCode
+                ) {
                     container.commands.parsePtz(frame)?.let { container.gimbal.onCameraPosition(it) }
                 }
+                // La notifica L/M/V viene registrata in Diagnostica ma non modifica più la UI:
+                // le prove reali mostrano che i tre livelli producono lo stesso movimento.
                 recordSighting(frame.code, frame.describePayload(), Hex.encode(frame.payload, limit = 32))
             }
         }
@@ -419,7 +545,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ---------------------------------------------------------------- gimbal
 
     fun jogStart(pan: Float, tilt: Float) {
-        if (!gimbalReady()) return
         container.gimbal.startJog(pan, tilt)
     }
 
@@ -431,62 +556,105 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * sessanta volte al secondo, con la camera che vede raffiche di start invece di un movimento.
      */
     fun jogVector(pan: Float, tilt: Float) {
-        if (!gimbalReady()) return
         container.gimbal.setJog(pan, tilt)
     }
 
-    /**
-     * Il gimbal si muove solo se il numero del comando è noto.
-     *
-     * L'avviso è a intervalli perché la levetta chiamerebbe questa guardia a ogni tocco, e una
-     * fila di notifiche identiche copre l'anteprima proprio mentre si cerca di inquadrare.
-     */
-    private fun gimbalReady(): Boolean {
-        if (settings.value.gimbal.isControlCodeKnown) return true
-        val now = System.currentTimeMillis()
-        if (now - lastGimbalWarningMs > GIMBAL_WARNING_INTERVAL_MS) {
-            lastGimbalWarningMs = now
-            showMessage("Comando gimbal non ancora noto: trovalo dalla scheda Diagnostica")
-        }
-        return false
+    fun setManualSpeed(percent: Int) {
+        val value = percent.coerceIn(1, 100)
+        val preset = when (value) { 25 -> 1; 50 -> 2; 75 -> 3; else -> 0 }
+        updateGimbal { it.copy(manualSpeedPercent = value, hardwareSpeedLevel = preset) }
     }
 
-    fun setManualSpeed(percent: Int) =
-        updateGimbal { it.copy(manualSpeedPercent = percent.coerceIn(1, 100)) }
+    fun setGimbalHardwareSpeed(level: Int) {
+        val percent = when (level) { 1 -> 25; 2 -> 50; else -> 75 }
+        updateGimbal { it.copy(hardwareSpeedLevel = level, manualSpeedPercent = percent) }
+        showMessage("Intensità joystick: $percent% (${gimbalSpeedLabel(level)})")
+    }
+
+    fun startGimbalCalibration() {
+        if (connectionState.value != ConnectionState.CONNECTED) {
+            showMessage("Connettiti alla camera prima della calibrazione")
+            return
+        }
+        if (runState.value.running || gimbalCalibrationState.value.running) {
+            showMessage("Ferma la sequenza in corso prima della calibrazione")
+            return
+        }
+        container.calibrator.start(
+            cameraModel = status.value.model.orEmpty(),
+            firmware = status.value.firmware.orEmpty(),
+        )
+        showMessage("Calibrazione avviata · non muovere camera o scena")
+    }
+
+    fun cancelGimbalCalibration() {
+        container.calibrator.cancel()
+        showMessage("Interruzione calibrazione…")
+    }
+
+    private fun gimbalSpeedLabel(level: Int): String = when (level) {
+        1 -> "lenta"
+        2 -> "media"
+        else -> "veloce"
+    }
 
     fun jogStop() {
         viewModelScope.launch { container.gimbal.stop() }
     }
 
     fun zeroPosition() {
-        container.gimbal.setEstimated(0f, 0f)
-        showMessage("Posizione corrente impostata come 0°/0°")
+        viewModelScope.launch {
+            container.gimbal.recenter()
+                .onSuccess {
+                    container.gimbal.setEstimated(0f, 0f)
+                    showMessage("Gimbal ricentrato sullo zero hardware")
+                }
+                .onFailure { showMessage("Ricentraggio non riuscito: ${it.message}") }
+        }
     }
 
     fun goToWaypoint(waypoint: Waypoint, seconds: Float = 3f) {
         viewModelScope.launch {
-            val start = ptz.value
-            val steps = (seconds * 10).toInt().coerceAtLeast(1)
-            repeat(steps) { i ->
-                val t = (i + 1f) / steps
-                val pan = start.pan + (waypoint.pan - start.pan) * t
-                val tilt = start.tilt + (waypoint.tilt - start.tilt) * t
-                container.gimbal.driveTo(pan, tilt, 0.1f)
-                delay(100)
-            }
-            container.gimbal.stop()
+            container.gimbal.moveToPosition(waypoint.pan, waypoint.tilt, minimumSeconds = seconds)
+                .onFailure { showMessage("Punto non raggiunto: ${it.message}") }
         }
     }
 
     // ---------------------------------------------------------------- waypoint
 
     fun captureWaypoint() {
-        val current = ptz.value
-        container.sequenceStore.update { seq ->
-            val name = nextWaypointName(seq.waypoints.size)
-            seq.copy(waypoints = seq.waypoints + Waypoint(name = name, pan = current.pan, tilt = current.tilt))
+        viewModelScope.launch {
+            // Acquisisce la posizione solo dopo il vettore zero: così il tempo fra l'ultimo
+            // comando e lo stop entra nella stima e non sposta il punto.
+            container.gimbal.stop()
+            val current = ptz.value
+            val jpeg = container.preview.captureThumbnailJpeg()
+            val pointIndex = sequence.value.waypoints.size
+            val name = nextWaypointName(pointIndex)
+            container.sequenceStore.update { seq ->
+                seq.copy(
+                    waypoints = seq.waypoints + Waypoint(
+                        name = name,
+                        pan = current.pan,
+                        tilt = current.tilt,
+                        positionModelVersion = Waypoint.CURRENT_POSITION_MODEL_VERSION,
+                        previewJpegBase64 = Waypoint.encodePreview(jpeg),
+                    ),
+                )
+            }
+            container.log.info(
+                message = "WAYPOINT ${pointIndex + 1} MEMORIZZATO · $name",
+                detail = buildString {
+                    appendLine("Ordine percorso: ${pointIndex + 1}")
+                    appendLine("Pan stimato: %.3f°".format(current.pan))
+                    appendLine("Tilt stimato: %.3f°".format(current.tilt))
+                    append("Posizione da camera: ${current.fromCamera}")
+                    if (jpeg == null) append("\nMiniatura: non disponibile (attiva l'anteprima prima di memorizzare)")
+                },
+                imageJpeg = jpeg,
+            )
+            showMessage("Punto memorizzato a %.1f° / %.1f°".format(current.pan, current.tilt))
         }
-        showMessage("Punto memorizzato a %.1f° / %.1f°".format(current.pan, current.tilt))
     }
 
     fun removeWaypoint(id: String) = container.sequenceStore.update { seq ->
@@ -512,13 +680,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateWaypointToCurrent(id: String) {
-        val current = ptz.value
-        container.sequenceStore.update { seq ->
-            seq.copy(
-                waypoints = seq.waypoints.map {
-                    if (it.id == id) it.copy(pan = current.pan, tilt = current.tilt) else it
-                }
+        viewModelScope.launch {
+            container.gimbal.stop()
+            val current = ptz.value
+            val jpeg = container.preview.captureThumbnailJpeg()
+            val previous = sequence.value.waypoints.firstOrNull { it.id == id }
+            val pointIndex = sequence.value.waypoints.indexOfFirst { it.id == id }
+            container.sequenceStore.update { seq ->
+                seq.copy(
+                    waypoints = seq.waypoints.map {
+                        if (it.id == id) {
+                            it.copy(
+                                pan = current.pan,
+                                tilt = current.tilt,
+                                positionModelVersion = Waypoint.CURRENT_POSITION_MODEL_VERSION,
+                                previewJpegBase64 = Waypoint.encodePreview(jpeg),
+                            )
+                        } else it
+                    },
+                )
+            }
+            container.log.info(
+                message = "WAYPOINT ${pointIndex + 1} AGGIORNATO · ${previous?.name ?: id}",
+                detail = buildString {
+                    previous?.let {
+                        appendLine("Prima: pan %.3f° · tilt %.3f°".format(it.pan, it.tilt))
+                    }
+                    appendLine("Adesso: pan %.3f° · tilt %.3f°".format(current.pan, current.tilt))
+                    append("Posizione da camera: ${current.fromCamera}")
+                    if (jpeg == null) append("\nMiniatura: non disponibile (attiva l'anteprima prima di aggiornare)")
+                },
+                imageJpeg = jpeg,
             )
+            showMessage("Punto aggiornato a %.1f° / %.1f°".format(current.pan, current.tilt))
         }
     }
 
@@ -564,13 +758,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setSettleSeconds(seconds: Float) =
         container.sequenceStore.update { it.copy(settleSeconds = seconds.coerceIn(0f, 30f)) }
 
+    fun setPanoramaHorizontalDegrees(degrees: Float) =
+        container.sequenceStore.update { it.copy(panoramaHorizontalDegrees = degrees.coerceIn(1f, 360f)) }
+
+    fun setPanoramaVerticalDegrees(degrees: Float) =
+        container.sequenceStore.update { it.copy(panoramaVerticalDegrees = degrees.coerceIn(0f, 180f)) }
+
+    fun setPanoramaOverlap(percent: Int) =
+        container.sequenceStore.update { it.copy(panoramaOverlapPercent = percent.coerceIn(10, 60)) }
+
+    fun setPanoramaAspect(aspect: PhotoFrameAspect) =
+        container.sequenceStore.update { it.copy(panoramaAspect = aspect) }
+
+    /** Crea la griglia a serpentina solo se tutta la copertura rientra nei fine corsa misurati. */
+    fun createPanoramaPlan() {
+        val profile = gimbalCalibration.value
+        if (!profile.isValid) {
+            showMessage("Esegui prima la calibrazione completa dei fine corsa")
+            return
+        }
+        val seq = sequence.value
+        val current = container.gimbal.position.value
+        val zoom = settings.value.photo.zoomScale
+        val result = runCatching {
+            PanoramaPlanner.plan(
+                centerPan = current.pan,
+                centerTilt = current.tilt,
+                horizontalCoverage = seq.panoramaHorizontalDegrees,
+                verticalCoverage = seq.panoramaVerticalDegrees,
+                overlapPercent = seq.panoramaOverlapPercent,
+                zoomScale = zoom,
+                aspect = seq.panoramaAspect,
+                panLimits = profile.panLimits,
+                tiltLimits = profile.tiltLimits,
+            ).getOrThrow()
+        }
+        result.onSuccess { plan ->
+            container.sequenceStore.update {
+                it.copy(
+                    mode = ShootingMode.FOTO,
+                    waypoints = plan.waypoints,
+                    shotsPerLeg = 2,
+                    useTotalDuration = false,
+                )
+            }
+            _captureMode.value = CaptureMode.forSequence(ShootingMode.FOTO)
+            container.log.info(
+                "PANORAMA PIANIFICATO",
+                buildString {
+                    appendLine("Copertura: ${seq.panoramaHorizontalDegrees.toInt()}° × ${seq.panoramaVerticalDegrees.toInt()}°")
+                    appendLine("Zoom: ${zoom}× · FOV stimato %.1f° × %.1f°".format(
+                        plan.fieldOfView.horizontalDegrees,
+                        plan.fieldOfView.verticalDegrees,
+                    ))
+                    appendLine("Sovrapposizione: ${seq.panoramaOverlapPercent}%")
+                    append("Griglia: ${plan.columns} × ${plan.rows} · ${plan.totalShots} scatti")
+                },
+            )
+            showMessage("Panorama pronto: ${plan.columns}×${plan.rows}, ${plan.totalShots} scatti")
+        }.onFailure { error ->
+            showMessage(error.message ?: "Il panorama non entra nei fine corsa disponibili")
+        }
+    }
+
+    fun setStartHoldSeconds(seconds: Float) =
+        container.sequenceStore.update { it.copy(startHoldSeconds = seconds.coerceIn(0f, 30f)) }
+
+    fun setEndHoldSeconds(seconds: Float) =
+        container.sequenceStore.update { it.copy(endHoldSeconds = seconds.coerceIn(0f, 30f)) }
+
     /**
      * Avvia la sequenza, oppure spiega perché non può partire.
      *
-     * Le tre condizioni sono diverse fra loro e vanno dette per nome: senza camera non c'è
-     * niente da comandare, senza due punti non c'è un percorso, e senza il numero del comando
-     * gimbal il percorso non si può percorrere. Un pulsante che non fa niente e non dice niente
-     * è il modo peggiore di comunicare una qualunque delle tre.
+     * Le condizioni rimaste sono connessione e almeno due punti del percorso. Il comando gimbal
+     * non è più una configurazione sperimentale: `0x00E2` è fissato dal protocollo verificato.
      */
     fun startRun() {
         val seq = sequence.value
@@ -582,8 +843,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             showMessage("Servono almeno due punti: inquadra e premi il tasto con la bandierina")
             return
         }
-        if (!settings.value.gimbal.isControlCodeKnown) {
-            showMessage("Comando gimbal non ancora noto: la sequenza non può muovere nulla. Cercalo in Diagnostica.")
+        if (seq.hasLegacyWaypoints) {
+            showMessage("Aggiorna i vecchi punti con ‘Qui’ oppure rimemorizzali: usano la stima precedente")
+            return
+        }
+        if (seq.hasUnverifiedManualWaypoints) {
+            showMessage("Aggiorna ogni punto con ‘Qui’: serve la foto di controllo per verificare partenza e arrivo")
             return
         }
         viewModelScope.launch {
@@ -606,7 +871,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startCapture(cameraTimelapse: Boolean) {
         viewModelScope.launch {
-            container.commands.startRecording(cameraTimelapse)
+            val capture = _captureMode.value.cameraMode.captureMode ?: LunaProtocolCodes.CaptureMode.NORMAL
+            container.commands.startRecording(cameraTimelapse, capture)
                 .onSuccess {
                     _recordingSinceMs.value = System.currentTimeMillis()
                     _status.value = _status.value.mergedWith(CameraStatus(recording = true))
@@ -618,7 +884,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun stopCapture(cameraTimelapse: Boolean) {
         viewModelScope.launch {
-            container.commands.stopRecording(cameraTimelapse)
+            val capture = _captureMode.value.cameraMode.captureMode ?: LunaProtocolCodes.CaptureMode.NORMAL
+            container.commands.stopRecording(cameraTimelapse, capture)
                 .onSuccess {
                     _recordingSinceMs.value = 0L
                     _status.value = _status.value.mergedWith(CameraStatus(recording = false))
@@ -653,6 +920,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * una registrazione da avviare o fermare, oppure la sequenza sui punti memorizzati.
      */
     fun onShutter() {
+        if (photoCountdownJob?.isActive == true) {
+            photoCountdownJob?.cancel()
+            photoCountdownJob = null
+            _photoCountdownSeconds.value = 0
+            showMessage("Timer annullato")
+            return
+        }
         if (connectionState.value != ConnectionState.CONNECTED) {
             showMessage("Connettiti alla camera prima di scattare")
             return
@@ -660,6 +934,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val mode = _captureMode.value
         if (mode.usesSequence) {
             if (runState.value.running) emergencyStop() else startRun()
+            return
+        }
+        val timerSeconds = settings.value.photo.timerSeconds
+        if (mode.cameraMode.isPhoto && timerSeconds > 0) {
+            photoCountdownJob = viewModelScope.launch {
+                for (second in timerSeconds downTo 1) {
+                    _photoCountdownSeconds.value = second
+                    delay(1_000)
+                }
+                _photoCountdownSeconds.value = 0
+                ensureCameraMode(mode)
+                shoot(mode)
+                photoCountdownJob = null
+            }
             return
         }
         viewModelScope.launch {
@@ -706,6 +994,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.commands.setPanoAspect(settings.value.panoAspect)
                 .onFailure { container.log.warn("Proporzione panoramica non accettata: ${it.message}") }
         }
+        if (applied && mode.cameraMode.isPhoto) {
+            container.commands.applyPhotoSettings(settings.value.photo, mode.cameraMode)
+                .onFailure { container.log.warn("Regolazioni foto non accettate: ${it.message}") }
+        }
+        if (applied && !mode.cameraMode.isPhoto) {
+            val selected = LunaVideoProfiles.selected(settings.value.video.profileCode, mode.cameraMode)
+            val current = settings.value.video.copy(profileCode = selected.code)
+            container.commands.applyVideoSettings(videoSettingsForMode(current, mode.cameraMode), mode.cameraMode)
+                .onFailure { container.log.warn("Formato video non accettato: ${it.message}") }
+            container.commands.setZoomScale(settings.value.photo.zoomScale, mode.cameraMode)
+                .onFailure { container.log.warn("Zoom non accettato: ${it.message}") }
+        }
         return applied
     }
 
@@ -715,8 +1015,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.commands.fetchCameraMode()
                 .onSuccess { cameraMode ->
                     if (cameraMode == null) return@onSuccess
-                    if (_captureMode.value.cameraMode == cameraMode) return@onSuccess
-                    _captureMode.value = CaptureMode.forCamera(cameraMode)
+                    if (_captureMode.value.cameraMode != cameraMode) {
+                        _captureMode.value = CaptureMode.forCamera(cameraMode)
+                    }
+                    // La scala è un'impostazione persistente dell'app: riallinea la camera
+                    // appena connessa anche se questa era rimasta su uno zoom diverso.
+                    container.commands.setZoomScale(settings.value.photo.zoomScale, cameraMode)
+                        .onFailure { container.log.warn("Zoom iniziale non accettato: ${it.message}") }
                 }
                 .onFailure { container.log.warn("Modalità della camera non leggibile: ${it.message}") }
         }
@@ -752,10 +1057,115 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setPort(port: Int) = container.settingsStore.update { it.copy(port = port) }
 
+    fun setCameraWifiPassword(password: String) =
+        container.settingsStore.update { it.copy(cameraWifiPassword = password.trim()) }
+
+    fun setPhotoTimer(seconds: Int) = updatePhotoSettings { it.copy(timerSeconds = seconds.coerceIn(0, 20)) }
+
+    fun setPhotoProMode(enabled: Boolean) = updatePhotoSettings { it.copy(proMode = enabled) }
+
+    fun setPhotoRawCapture(type: Int) = updatePhotoSettings {
+        it.copy(rawCaptureType = type.coerceIn(LunaProtocolCodes.RawCaptureType.OFF, LunaProtocolCodes.RawCaptureType.DNG))
+    }
+
+    fun setPhotoBrightness(value: Int) = updatePhotoSettings { it.copy(brightness = value.coerceIn(-2, 2)) }
+
+    fun setPhotoExposureBias(thirds: Int) =
+        updatePhotoSettings { it.copy(exposureBiasThirds = thirds.coerceIn(-6, 6)) }
+
+    fun setPhotoWhiteBalance(kelvin: Int) = updatePhotoSettings {
+        it.copy(whiteBalanceKelvin = if (kelvin == 0) 0 else kelvin.coerceIn(2_000, 10_000))
+    }
+
+    fun setPhotoZoom(scale: Int) {
+        val zoom = scale.takeIf { it in listOf(1, 2, 3, 6, 12) } ?: 1
+        container.settingsStore.update { it.copy(photo = it.photo.copy(zoomScale = zoom)) }
+        if (connectionState.value != ConnectionState.CONNECTED) return
+        viewModelScope.launch {
+            container.commands.setZoomScale(zoom, _captureMode.value.cameraMode)
+                .onSuccess { showMessage("Zoom ${zoom}×") }
+                .onFailure { showMessage("Zoom non accettato: ${it.message}") }
+        }
+    }
+
+    private fun updatePhotoSettings(transform: (PhotoSettings) -> PhotoSettings) {
+        container.settingsStore.update { it.copy(photo = transform(it.photo)) }
+        val mode = _captureMode.value
+        if (connectionState.value != ConnectionState.CONNECTED || !mode.cameraMode.isPhoto) return
+        viewModelScope.launch {
+            container.commands.applyPhotoSettings(settings.value.photo, mode.cameraMode)
+                .onFailure { showMessage("Regolazione non accettata: ${it.message}") }
+        }
+    }
+
+    fun setVideoProfile(code: Int) {
+        val mode = _captureMode.value.cameraMode
+        val selected = LunaVideoProfiles.forMode(mode).firstOrNull { it.code == code } ?: return
+        container.settingsStore.update { it.copy(video = it.video.copy(profileCode = selected.code)) }
+        if (connectionState.value != ConnectionState.CONNECTED || mode.isPhoto) return
+        viewModelScope.launch {
+            val current = settings.value.video.copy(profileCode = selected.code)
+            container.commands.applyVideoSettings(videoSettingsForMode(current, mode), mode)
+                .onSuccess { showMessage("Video ${selected.resolution} · ${selected.fps} fps") }
+                .onFailure { showMessage("Formato video non accettato: ${it.message}") }
+        }
+    }
+
+    fun setVideoProMode(enabled: Boolean) = updateVideoSettings { it.copy(proMode = enabled) }
+
+    fun setVideoIso(value: Int) = updateVideoSettings { it.copy(iso = value.coerceIn(0, 6400)) }
+
+    fun setVideoShutter(seconds: Double) = updateVideoSettings {
+        it.copy(shutterSeconds = seconds.coerceIn(0.0, 60.0))
+    }
+
+    fun setVideoExposureBias(thirds: Int) = updateVideoSettings {
+        it.copy(exposureBiasThirds = thirds.coerceIn(-12, 12))
+    }
+
+    fun setVideoWhiteBalance(kelvin: Int) = updateVideoSettings {
+        it.copy(whiteBalanceKelvin = if (kelvin == 0) 0 else kelvin.coerceIn(2_000, 10_000))
+    }
+
+    fun setVideoColorMode(value: Int) = updateVideoSettings {
+        val allowed = setOf(
+            LunaProtocolCodes.ColorMode.STANDARD,
+            LunaProtocolCodes.ColorMode.I_LOG,
+            LunaProtocolCodes.ColorMode.DOLBY_VISION,
+        )
+        it.copy(
+            colorMode = if (value in allowed) value else LunaProtocolCodes.ColorMode.STANDARD,
+            filter = if (value == LunaProtocolCodes.ColorMode.DOLBY_VISION) {
+                LunaProtocolCodes.Filter.ORIGINAL
+            } else it.filter,
+        )
+    }
+
+    fun setVideoFilter(value: Int) = updateVideoSettings { it.copy(filter = value) }
+
+    fun setVideoFilterIntensity(value: Int) = updateVideoSettings {
+        it.copy(filterIntensity = value.coerceIn(LunaProtocolCodes.FilterIntensity.LOW, LunaProtocolCodes.FilterIntensity.HIGH))
+    }
+
+    fun setVideoSharpness(value: Int) = updateVideoSettings { it.copy(sharpness = value.coerceIn(0, 4)) }
+
+    private fun updateVideoSettings(transform: (VideoSettings) -> VideoSettings) {
+        container.settingsStore.update { it.copy(video = transform(it.video)) }
+        val mode = _captureMode.value.cameraMode
+        if (connectionState.value != ConnectionState.CONNECTED || mode.isPhoto) return
+        viewModelScope.launch {
+            val current = settings.value.video
+            container.commands.applyVideoSettings(videoSettingsForMode(current, mode), mode)
+                .onFailure { showMessage("Regolazione video non accettata: ${it.message}") }
+        }
+    }
+
+    /** PureVideo, Slow-mo e Timelapse espongono soltanto Standard sulla camera reale. */
+    private fun videoSettingsForMode(value: VideoSettings, mode: CameraMode): VideoSettings =
+        if (mode == CameraMode.VIDEO) value else value.copy(colorMode = LunaProtocolCodes.ColorMode.STANDARD)
+
     fun updateGimbal(transform: (GimbalSettings) -> GimbalSettings) =
         container.settingsStore.update { it.copy(gimbal = transform(it.gimbal)) }
-
-    fun setGimbalControlCode(code: Int) = updateGimbal { it.copy(controlCode = code) }
 
     fun setTimelapseMode(mode: Int) = container.settingsStore.update { it.copy(timelapseMode = mode) }
 
@@ -1288,18 +1698,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * gimbal in uso: senza quel contesto le righe del log si leggono a metà.
      */
     fun shareLog(context: android.content.Context) {
-        val header = listOf(
+        LogSharing.share(context, container.log.entries.value, logHeader())
+            .onSuccess { showMessage("Log pronto per la condivisione") }
+            .onFailure { showMessage("Condivisione non riuscita: ${it.message}") }
+    }
+
+    /** Salva il log in Download; viene azzerato esclusivamente dopo una scrittura riuscita. */
+    fun saveLogToDownloads(context: android.content.Context) {
+        val entries = container.log.entries.value
+        if (entries.isEmpty()) {
+            showMessage("Il log è vuoto")
+            return
+        }
+        val header = logHeader()
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                LogSharing.saveToDownloads(context, entries, header)
+            }
+            result
+                .onSuccess { path ->
+                    container.log.clear()
+                    showMessage("Log salvato in $path · log azzerato")
+                }
+                .onFailure { showMessage("Salvataggio log non riuscito: ${it.message}") }
+        }
+    }
+
+    private fun logHeader(): List<String> =
+        listOf(
             "camera: ${settings.value.host}:${settings.value.port}",
             "stato: ${connectionState.value}",
-            "codice gimbal: ${settings.value.gimbal.controlCode.takeIf { it != 0 } ?: "ignoto"}",
+            "codice gimbal: ${LunaProtocolCodes.GIMBAL_CONTROL} (0x00E2)",
             "notifica PTZ: ${settings.value.gimbal.ptzNotificationCode}",
             "modello: ${status.value.model ?: "?"} firmware: ${status.value.firmware ?: "?"}",
             "modalità sequenza: ${sequence.value.mode.name}",
         )
-        LogSharing.share(context, container.log.exportText(), header)
-            .onSuccess { showMessage("Log pronto per la condivisione") }
-            .onFailure { showMessage("Condivisione non riuscita: ${it.message}") }
-    }
 
     fun showMessage(text: String) {
         _message.value = text
@@ -1331,10 +1764,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val STATUS_POLL_MS = 3_000L
 
-        /** Ogni quanto ripetere l'avviso che il comando del gimbal non è ancora noto. */
-        const val GIMBAL_WARNING_INTERVAL_MS = 8_000L
-
-        /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano fino a otto volte. */
         /** Quanto resta valido un elenco della libreria prima di rifare il giro. */
         const val GALLERY_FRESH_MS = 60_000L
         const val THUMBNAIL_CONCURRENCY = 4
@@ -1345,6 +1774,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val PHOTO_VIEW_MAX_SIZE = 2_048
         const val PANO_VIEW_MAX_SIZE = 4_096
 
+        /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano. */
         const val RECONNECT_BASE_MS = 2_000L
         const val MAX_RECONNECT_ATTEMPTS = 6
 

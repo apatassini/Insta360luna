@@ -102,6 +102,14 @@ fun MediaViewer(
     var offset by remember(item.path) { mutableStateOf(Offset.Zero) }
     val sphere = remember(item.path) { SphereState() }
     var sphereMode by remember(item.path) { mutableStateOf(item.panoramic) }
+    val sphereAvailable = item.panoramic || state.photo?.let(::looksEquirectangular) == true
+
+    // Alcuni firmware chiamano le sferiche IMG_*.jpg invece di PANO_*.jpg. In quel caso il
+    // nome non aiuta, ma la proporzione equirettangolare 2:1 sì: appena arriva il bitmap si
+    // entra automaticamente nel visore navigabile.
+    LaunchedEffect(item.path, state.photo) {
+        if (sphereAvailable) sphereMode = true
+    }
 
     LaunchedEffect(item.path, chromeVisible) {
         if (chromeVisible) {
@@ -257,7 +265,7 @@ fun MediaViewer(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
-                    if (item.panoramic && state.photo != null) {
+                    if (sphereAvailable && state.photo != null) {
                         HudIconButton(
                             icon = LunaIcons.Panorama,
                             contentDescription = if (sphereMode) "Mostra piatta" else "Mostra a 360°",
@@ -321,6 +329,9 @@ fun MediaViewer(
         }
     }
 }
+
+private fun looksEquirectangular(bitmap: android.graphics.Bitmap): Boolean =
+    bitmap.height > 0 && bitmap.width.toFloat() / bitmap.height.toFloat() in 1.85f..2.15f
 
 /**
  * Toglie le barre di sistema finché il visore è aperto.

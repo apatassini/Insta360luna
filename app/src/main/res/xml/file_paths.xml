@@ -4,4 +4,7 @@
     <cache-path
         name="log"
         path="log/" />
+    <cache-path
+        name="updates"
+        path="updates/" />
 </paths>

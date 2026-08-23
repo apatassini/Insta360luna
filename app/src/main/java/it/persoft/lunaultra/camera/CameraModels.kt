@@ -44,6 +44,12 @@ data class CameraStatus(
     )
 }
 
+/** Credenziali che la camera espone dentro `Options.WifiInfo`. */
+data class CameraWifiInfo(
+    val ssid: String?,
+    val password: String?,
+)
+
 /** Posizione del gimbal in gradi. */
 data class PtzState(
     val pan: Float = 0f,

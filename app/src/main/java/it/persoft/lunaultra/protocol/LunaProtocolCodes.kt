@@ -6,7 +6,8 @@ package it.persoft.lunaultra.protocol
  * Questi numeri NON sono inventati: provengono dall'estrazione dei `.proto` fatta dai progetti
  * di reverse engineering citati nel README e sono gli stessi usati da client funzionanti sulla
  * Luna Ultra. Ciò che manca è indicato esplicitamente: i comandi del gimbal esistono con un
- * nome ma il loro numero non è pubblico, e per quelli l'app usa lo scanner (vedi [CodeProbe]).
+ * nome. Il comando di movimento del gimbal è stato poi confermato sulla Luna Ultra tramite
+ * catture UCD2 riproducibili del progetto Insta360Linker.
  */
 object LunaProtocolCodes {
 
@@ -28,6 +29,8 @@ object LunaProtocolCodes {
     const val SET_TIMELAPSE_OPTIONS = 18
     const val START_TIMELAPSE = 22
     const val STOP_TIMELAPSE = 23
+    /** `PHONE_COMMAND_GIMBAL_CONTROL`, confermato su Luna Ultra. */
+    const val GIMBAL_CONTROL = 0x00E2
 
     /**
      * Codici che la camera mette al posto del comando nelle risposte.
@@ -49,6 +52,8 @@ object LunaProtocolCodes {
     const val NOTIFICATION_CAPTURE_STOPPED = 8201
     const val NOTIFICATION_CURRENT_CAPTURE_STATUS = 8208
     const val NOTIFICATION_TIMELAPSE_STATUS_UPDATE = 8210
+    /** Conferma del livello hardware del gimbal: field 2 = 1 (lento), 2 (medio), 3 (veloce). */
+    const val NOTIFICATION_GIMBAL_SPEED = 0x206A
 
     /**
      * `CAMERA_NOTIFICATION_PTZ_STATE`. Unico numero del blocco gimbal con un riscontro:
@@ -92,6 +97,7 @@ object LunaProtocolCodes {
         const val TIME_ZONE = 13
         const val SERIAL_NUMBER = 15
         const val STORAGE_STATE = 20
+        const val WIFI_INFO = 36
         const val FIRMWARE_REVISION = 30
         const val PHOTO_SUB_MODE = 40
         const val VIDEO_SUB_MODE = 41
@@ -110,10 +116,17 @@ object LunaProtocolCodes {
         const val BATTERY_STATUS = 11
         const val SERIAL_NUMBER = 15
         const val STORAGE_STATE = 20
+        const val WIFI_INFO = 36
         const val FIRMWARE_REVISION = 30
         const val PHOTO_SUB_MODE = 40
         const val VIDEO_SUB_MODE = 41
         const val CAMERA_TYPE = 48
+    }
+
+    /** Numeri di campo di `Options.WifiInfo`. */
+    object WifiInfoField {
+        const val SSID = 1
+        const val PASSWORD = 2
     }
 
     /** Valori di `insta360.messages.MediaType` (`media.proto`). */
@@ -180,12 +193,97 @@ object LunaProtocolCodes {
 
     /** Valori di `insta360.messages.PhotographyOptionType` usati dall'app. */
     object PhotographyOptionType {
+        const val BRIGHTNESS = 2
+        const val SHARPNESS = 6
+        const val EXPOSURE_BIAS = 7
+        const val EXPOSURE_MODE = 8
+        const val WHITE_BALANCE = 13
+        const val VIDEO_GAMMA_MODE = 18
+        const val STILL_EXPOSURE_OPTIONS = 20
+        const val VIDEO_EXPOSURE_OPTIONS = 21
+        const val RAW_CAPTURE_TYPE = 25
+        const val RECORD_RESOLUTION = 31
+        const val COLOR_MODE = 35
+        const val WHITE_BALANCE_VALUE = 39
+        const val ZOOM_SCALE = 53
         const val PANO_ASPECT = 98
+        const val FILTER_INTENSITY = 104
     }
 
     /** Numeri di campo di `insta360.messages.PhotographyOptions` usati dall'app. */
     object PhotographyOptionsField {
+        const val BRIGHTNESS = 2
+        const val SHARPNESS = 6
+        const val EXPOSURE_BIAS = 7
+        const val EXPOSURE_MODE = 8
+        const val WHITE_BALANCE = 13
+        const val VIDEO_GAMMA_MODE = 18
+        const val STILL_EXPOSURE_OPTIONS = 20
+        const val VIDEO_EXPOSURE_OPTIONS = 21
+        const val RAW_CAPTURE_TYPE = 25
+        const val RECORD_RESOLUTION = 31
+        const val COLOR_MODE = 35
+        const val WHITE_BALANCE_VALUE = 39
+        const val ZOOM_SCALE = 53
         const val PANO_ASPECT = 98
+        const val FILTER_INTENSITY = 104
+    }
+
+    /** Campi di `ExposureOptions`: il firmware vuole i secondi reali, non l'enum otturatore. */
+    object ExposureOptionsField {
+        const val PROGRAM = 1
+        const val ISO = 2
+        const val SHUTTER_SPEED = 3
+    }
+
+    object ExposureProgram {
+        const val AUTO = 0
+        const val ISO_PRIORITY = 1
+        const val SHUTTER_PRIORITY = 2
+        const val MANUAL = 3
+    }
+
+    object ExposureMode {
+        const val AUTO = 0
+        const val MANUAL = 2
+    }
+
+    /** Valori rimisurati sulla Luna Ultra: la vecchia enum 0/1/2/3 non è valida qui. */
+    object ColorMode {
+        const val STANDARD = 1
+        const val I_LOG = 2
+        const val DOLBY_VISION = 5
+    }
+
+    /** Il campo storico `gamma_mode` è in realtà il selettore dei filtri sulla Luna Ultra. */
+    object Filter {
+        const val ORIGINAL = 0
+        const val LEICA_NATURAL = 15
+        const val LEICA_VIVID = 16
+        const val NC_FILM = 24
+        const val CC_FILM = 26
+        const val POS_FILM = 34
+        const val NEG_FILM = 35
+        const val LEICA_CHROME = 36
+        const val CINEMATIC = 37
+        const val FRESH = 38
+    }
+
+    object FilterIntensity {
+        const val LOW = 1
+        const val MEDIUM = 2
+        const val HIGH = 3
+    }
+
+    object WhiteBalance {
+        const val AUTO = 0
+        /** La camera usa il preset come flag e legge la temperatura reale dal campo 39. */
+        const val MANUAL_KELVIN = 3
+    }
+
+    object RawCaptureType {
+        const val OFF = 0
+        const val DNG = 1
     }
 
     /**
@@ -227,6 +325,8 @@ object LunaProtocolCodes {
     object CaptureMode {
         const val UNKNOWN = 0
         const val NORMAL = 1
+        const val SLOW_MOTION = 9
+        const val PURE_VIDEO = 11
     }
 
     /** Valori di `insta360.messages.TimelapseMode`. */
@@ -332,6 +432,8 @@ object LunaProtocolCodes {
         19 to "PHONE_COMMAND_GET_GYRO",
         22 to "PHONE_COMMAND_START_TIMELAPSE",
         23 to "PHONE_COMMAND_STOP_TIMELAPSE",
+        GIMBAL_CONTROL to "PHONE_COMMAND_GIMBAL_CONTROL",
+        NOTIFICATION_GIMBAL_SPEED to "CAMERA_NOTIFICATION_GIMBAL_SPEED",
         24 to "PHONE_COMMAND_ERASE_SD_CARD",
         25 to "PHONE_COMMAND_CALIBRATE_GYRO",
         26 to "PHONE_COMMAND_SCAN_BT_PERIPHERAL",

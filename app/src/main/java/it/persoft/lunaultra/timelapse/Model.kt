@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.timelapse
 
 import kotlinx.serialization.Serializable
+import java.util.Base64
 import java.util.UUID
 
 @Serializable
@@ -48,7 +49,26 @@ data class Waypoint(
     val tilt: Float,
     /** Durata del tratto verso il waypoint successivo, in secondi. Ignorata per l'ultimo punto. */
     val durationToNextSeconds: Float = 30f,
-)
+    /** 1 = vecchia stima; 2 = assi corretti e integrazione sul tempo reale. */
+    val positionModelVersion: Int = LEGACY_POSITION_MODEL_VERSION,
+    /** Inquadratura 256×256 vista quando il punto è stato memorizzato, JPEG in Base64. */
+    val previewJpegBase64: String? = null,
+    /** Punto assoluto generato dalla griglia panorama; non richiede una miniatura manuale. */
+    val generatedByPanoramaPlanner: Boolean = false,
+) {
+    val needsRecapture: Boolean get() = positionModelVersion < CURRENT_POSITION_MODEL_VERSION
+
+    fun previewJpeg(): ByteArray? = previewJpegBase64?.let { encoded ->
+        runCatching { Base64.getDecoder().decode(encoded) }.getOrNull()
+    }
+
+    companion object {
+        const val LEGACY_POSITION_MODEL_VERSION = 1
+        const val CURRENT_POSITION_MODEL_VERSION = 2
+
+        fun encodePreview(jpeg: ByteArray?): String? = jpeg?.let(Base64.getEncoder()::encodeToString)
+    }
+}
 
 @Serializable
 data class TimelapseSequence(
@@ -63,6 +83,12 @@ data class TimelapseSequence(
     /** Se true invia a monte durata e intervallo alla camera con SET_TIMELAPSE_OPTIONS. */
     val configureCameraTimelapse: Boolean = true,
 
+    /** Secondi registrati e fermi sul primo punto, prima di iniziare il movimento. */
+    val startHoldSeconds: Float = 1f,
+
+    /** Secondi registrati e fermi sull'ultimo punto, prima di fermare la ripresa. */
+    val endHoldSeconds: Float = 1f,
+
     /** Scatti per tratto in modalità [ShootingMode.FOTO], estremi inclusi. */
     val shotsPerLeg: Int = 6,
 
@@ -71,10 +97,21 @@ data class TimelapseSequence(
      * dopo un movimento produce scatti mossi, che in una panoramica si vedono all'unione.
      */
     val settleSeconds: Float = 1.5f,
+
+    /** Copertura finale richiesta: comprende anche il campo visivo del singolo fotogramma. */
+    val panoramaHorizontalDegrees: Float = 180f,
+    val panoramaVerticalDegrees: Float = 0f,
+    val panoramaOverlapPercent: Int = 30,
+    val panoramaAspect: PhotoFrameAspect = PhotoFrameAspect.FOUR_THREE,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)
 
     val isRunnable: Boolean get() = waypoints.size >= 2
+
+    val hasLegacyWaypoints: Boolean get() = waypoints.any(Waypoint::needsRecapture)
+
+    val hasUnverifiedManualWaypoints: Boolean
+        get() = waypoints.any { !it.generatedByPanoramaPlanner && it.previewJpegBase64 == null }
 
     /** Durata effettiva di ogni tratto, coerente con la modalità scelta. */
     fun legDurations(): List<Float> {
@@ -88,6 +125,10 @@ data class TimelapseSequence(
     }
 
     fun effectiveTotalSeconds(): Float = legDurations().sum()
+
+    /** Durata della ripresa continua: pause sui bordi più il movimento impostato. */
+    fun estimatedRecordingSeconds(): Float =
+        effectiveTotalSeconds() + startHoldSeconds.coerceAtLeast(0f) + endHoldSeconds.coerceAtLeast(0f)
 
     /** Scatti effettivi per tratto: almeno due, altrimenti non è un percorso. */
     fun effectiveShotsPerLeg(): Int = shotsPerLeg.coerceAtLeast(2)

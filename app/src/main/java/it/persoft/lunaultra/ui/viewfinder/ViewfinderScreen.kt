@@ -32,10 +32,8 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
-import it.persoft.lunaultra.timelapse.InterpolationMode
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.Panel
-import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.components.HudPill
 import it.persoft.lunaultra.ui.components.PreviewSurface
 import it.persoft.lunaultra.ui.formatClock
@@ -75,12 +73,20 @@ fun ViewfinderScreen(
     val moving by viewModel.gimbalMoving.collectAsState()
     val captureMode by viewModel.captureMode.collectAsState()
     val recordingSince by viewModel.recordingSinceMs.collectAsState()
+    val wifiConnecting by viewModel.wifiConnecting.collectAsState()
+    val photoCountdown by viewModel.photoCountdownSeconds.collectAsState()
 
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var gridVisible by rememberSaveable { mutableStateOf(false) }
     var fillScreen by rememberSaveable { mutableStateOf(false) }
-    var dockVisible by rememberSaveable { mutableStateOf(true) }
     var modeSheetOpen by remember { mutableStateOf(false) }
+    var photoSheetOpen by remember { mutableStateOf(false) }
+    var videoSheetOpen by remember { mutableStateOf(false) }
+
+    LaunchedEffect(captureMode) {
+        if (!captureMode.cameraMode.isPhoto) photoSheetOpen = false
+        if (captureMode.cameraMode.isPhoto) videoSheetOpen = false
+    }
 
     val connected = connection == ConnectionState.CONNECTED
     val recording = recordingSince > 0L || status.recording == true
@@ -101,7 +107,7 @@ fun ViewfinderScreen(
 
     val sequenceReady = sequence.isRunnable
     val shutterReady = connected && (!captureMode.usesSequence || sequenceReady || run.running)
-    val shutterActive = if (captureMode.usesSequence) run.running else recording
+    val shutterActive = if (captureMode.usesSequence) run.running else recording || photoCountdown > 0
     val shutterProgress = if (captureMode.usesSequence && run.running) run.overallProgress else 0f
 
     BoxWithConstraints(modifier = modifier.fillMaxSize().background(Luna.Bg)) {
@@ -147,7 +153,12 @@ fun ViewfinderScreen(
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onTap = {
-                            if (modeSheetOpen) modeSheetOpen = false else chromeVisible = !chromeVisible
+                            when {
+                                modeSheetOpen -> modeSheetOpen = false
+                                photoSheetOpen -> photoSheetOpen = false
+                                videoSheetOpen -> videoSheetOpen = false
+                                else -> chromeVisible = !chromeVisible
+                            }
                         },
                     )
                 },
@@ -159,26 +170,9 @@ fun ViewfinderScreen(
                 StatColumn(
                     freeSpace = status.freeSpaceBytes,
                     batteryPercent = status.batteryPercent,
-                    gimbalReady = settings.gimbal.isControlCodeKnown,
+                    gimbalReady = true,
                     recordingLabel = if (recording) formatClock(elapsedSeconds) else null,
                     modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp),
-                )
-
-                HudIconButton(
-                    icon = LunaIcons.Center,
-                    contentDescription = "Considera questa posizione come 0° / 0°",
-                    onClick = viewModel::zeroPosition,
-                    size = 46.dp,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 12.dp),
-                )
-                HudIconButton(
-                    icon = LunaIcons.Joystick,
-                    contentDescription = "Comandi del gimbal",
-                    onClick = { dockVisible = !dockVisible },
-                    size = 46.dp,
-                    selected = dockVisible,
-                    activeColor = Luna.Path,
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp),
                 )
 
                 // In panoramica la pastiglia è la scelta fra sferica e 2:1: è l'unica
@@ -205,37 +199,42 @@ fun ViewfinderScreen(
                         }
                 }
 
-                if (dockVisible) {
-                    GimbalDock(
-                        enabled = connected,
-                        codeKnown = settings.gimbal.isControlCodeKnown,
-                        moving = moving,
-                        panDegrees = ptz.pan,
-                        tiltDegrees = ptz.tilt,
-                        positionFromCamera = ptz.fromCamera,
-                        speedPercent = settings.gimbal.manualSpeedPercent,
-                        onSpeedChange = viewModel::setManualSpeed,
-                        onVector = viewModel::jogVector,
-                        onJog = viewModel::jogStart,
-                        onRelease = viewModel::jogStop,
-                        onStop = viewModel::jogStop,
-                        onZero = viewModel::zeroPosition,
-                        onCaptureWaypoint = viewModel::captureWaypoint,
-                        onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
-                        onClose = { dockVisible = false },
-                        compact = landscape,
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(start = 12.dp, bottom = 70.dp),
-                    )
-                }
+                GimbalDock(
+                    enabled = connected,
+                    moving = moving,
+                    panDegrees = ptz.pan,
+                    tiltDegrees = ptz.tilt,
+                    positionFromCamera = ptz.fromCamera,
+                    speedPercent = settings.gimbal.manualSpeedPercent,
+                    hardwareSpeedLevel = settings.gimbal.hardwareSpeedLevel,
+                    onSpeedChange = viewModel::setManualSpeed,
+                    onHardwareSpeedChange = viewModel::setGimbalHardwareSpeed,
+                    onVector = viewModel::jogVector,
+                    onRelease = viewModel::jogStop,
+                    onStop = viewModel::jogStop,
+                    onZero = viewModel::zeroPosition,
+                    onCaptureWaypoint = viewModel::captureWaypoint,
+                    compact = landscape,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 12.dp, bottom = 10.dp),
+                )
+
+                ZoomDock(
+                    selected = settings.photo.zoomScale,
+                    enabled = connected && !run.running,
+                    onSelect = viewModel::setPhotoZoom,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 12.dp, bottom = 14.dp),
+                )
             }
 
             val note = previewNote(preview.active, preview.framesDecoded, preview.message)
             when {
                 !connected -> ConnectCta(
                     connection = connection,
-                    host = settings.host,
+                    searchingWifi = wifiConnecting,
                     onConnect = viewModel::connect,
                     modifier = Modifier.align(Alignment.Center),
                 )
@@ -252,6 +251,48 @@ fun ViewfinderScreen(
                     mode = captureMode,
                     onStop = viewModel::emergencyStop,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                )
+            }
+
+            if (photoCountdown > 0) {
+                PhotoCountdown(photoCountdown, modifier = Modifier.align(Alignment.Center))
+            }
+
+            if (photoSheetOpen && chromeVisible) {
+                PhotoControlsSheet(
+                    settings = settings.photo,
+                    onProMode = viewModel::setPhotoProMode,
+                    onTimer = viewModel::setPhotoTimer,
+                    onRawCapture = viewModel::setPhotoRawCapture,
+                    onZoom = viewModel::setPhotoZoom,
+                    onBrightness = viewModel::setPhotoBrightness,
+                    onExposureBias = viewModel::setPhotoExposureBias,
+                    onWhiteBalance = viewModel::setPhotoWhiteBalance,
+                    onClose = { photoSheetOpen = false },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                )
+            }
+
+            if (videoSheetOpen && chromeVisible) {
+                VideoControlsSheet(
+                    settings = settings.video,
+                    mode = captureMode.cameraMode,
+                    onProfile = viewModel::setVideoProfile,
+                    onProMode = viewModel::setVideoProMode,
+                    onIso = viewModel::setVideoIso,
+                    onShutter = viewModel::setVideoShutter,
+                    onExposureBias = viewModel::setVideoExposureBias,
+                    onWhiteBalance = viewModel::setVideoWhiteBalance,
+                    onColorMode = viewModel::setVideoColorMode,
+                    onFilter = viewModel::setVideoFilter,
+                    onFilterIntensity = viewModel::setVideoFilterIntensity,
+                    onSharpness = viewModel::setVideoSharpness,
+                    onClose = { videoSheetOpen = false },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
                 )
             }
 
@@ -305,16 +346,24 @@ fun ViewfinderScreen(
                     onShutter = viewModel::onShutter,
                     waypointCount = sequence.waypoints.size,
                     onCaptureWaypoint = viewModel::captureWaypoint,
-                    onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
-                    onOpenGallery = { onOpenPanel(Panel.GALLERY) },
-                    interpolationLabel = if (sequence.interpolation == InterpolationMode.SMOOTH) "SMTH" else "LIN",
-                    onToggleInterpolation = {
-                        viewModel.setInterpolation(
-                            if (sequence.interpolation == InterpolationMode.SMOOTH) InterpolationMode.LINEAR
-                            else InterpolationMode.SMOOTH
-                        )
+                    onOpenCameraSettings = {
+                        if (captureMode.cameraMode.isPhoto) {
+                            photoSheetOpen = !photoSheetOpen
+                            videoSheetOpen = false
+                            modeSheetOpen = false
+                        } else {
+                            videoSheetOpen = !videoSheetOpen
+                            photoSheetOpen = false
+                            modeSheetOpen = false
+                        }
                     },
-                    onOpenModeSheet = { modeSheetOpen = !modeSheetOpen },
+                    onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
+                    onOpenGallery = { onOpenPanel(Panel.GALLERY) },
+                    onOpenModeSheet = {
+                        modeSheetOpen = !modeSheetOpen
+                        photoSheetOpen = false
+                        videoSheetOpen = false
+                    },
                     vertical = landscape,
                 )
             }
@@ -382,7 +431,8 @@ private fun infoPillText(
     CaptureMode.SEQUENZA_FOTO -> "attesa ${trim(settleSeconds)} s"
     CaptureMode.TIMELAPSE, CaptureMode.SEQUENZA_TL -> "intervallo ${trim(intervalSeconds)} s"
     CaptureMode.SEQUENZA_VIDEO -> "durata ${totalSeconds.roundToInt()} s"
-    CaptureMode.FOTO, CaptureMode.VIDEO, CaptureMode.PANORAMA -> null
+    CaptureMode.FOTO, CaptureMode.VIDEO, CaptureMode.PURE_VIDEO,
+    CaptureMode.SLOW_MOTION, CaptureMode.PANORAMA -> null
 }
 
 private fun trim(value: Float): String =

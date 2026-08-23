@@ -57,6 +57,24 @@ enum class CaptureMode(
         cameraMode = CameraMode.VIDEO,
         sequenceMode = null,
     ),
+    PURE_VIDEO(
+        label = "PureVideo",
+        shortLabel = "PURE",
+        icon = LunaIcons.Video,
+        color = Luna.Movie,
+        hint = "Ripresa ottimizzata per poca luce, in modalità Standard.",
+        cameraMode = CameraMode.PURE_VIDEO,
+        sequenceMode = null,
+    ),
+    SLOW_MOTION(
+        label = "Slow-motion",
+        shortLabel = "SLOW",
+        icon = LunaIcons.Video,
+        color = Luna.Movie,
+        hint = "Alta velocità: 4K/2,7K fino a 120 fps e 1080p fino a 240 fps.",
+        cameraMode = CameraMode.SLOW_MOTION,
+        sequenceMode = null,
+    ),
     TIMELAPSE(
         label = "Timelapse",
         shortLabel = "TL",
@@ -116,6 +134,8 @@ enum class CaptureMode(
             CameraMode.FOTO -> FOTO
             CameraMode.PANORAMA -> PANORAMA
             CameraMode.VIDEO -> VIDEO
+            CameraMode.PURE_VIDEO -> PURE_VIDEO
+            CameraMode.SLOW_MOTION -> SLOW_MOTION
             CameraMode.TIMELAPSE -> TIMELAPSE
         }
     }

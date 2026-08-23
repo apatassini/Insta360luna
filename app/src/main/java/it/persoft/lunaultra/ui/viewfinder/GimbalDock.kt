@@ -1,19 +1,17 @@
 package it.persoft.lunaultra.ui.viewfinder
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Icon
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,7 +25,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.ui.components.GimbalJoystick
-import it.persoft.lunaultra.ui.components.GimbalPad
 import it.persoft.lunaultra.ui.components.GlassPanel
 import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.components.SliderRow
@@ -36,205 +33,184 @@ import it.persoft.lunaultra.ui.theme.LunaIcons
 import kotlin.math.roundToInt
 
 /**
- * Il pannello del gimbal manuale, sovrapposto all'anteprima.
- *
- * Due comandi per lo stesso movimento, che non è una ripetizione: la levetta serve a inquadrare
- * a mano libera muovendo i due assi insieme, la croce a correggere un asse alla volta senza
- * toccare l'altro. Il cursore della velocità agisce mentre il gimbal si muove.
- *
- * Finché il numero del comando gimbal non è noto il pannello resta visibile ma inerte, e lo
- * dice: nasconderlo farebbe sembrare l'app incompleta invece che in attesa di un dato.
+ * Controllo gimbal da mirino: la levetta resta piccola nell'angolo in basso a destra e non
+ * copre l'inquadratura. I tre puntini aprono solo quando serve il pannello con velocità,
+ * memorizzazione del punto, azzeramento e stop.
  */
 @Composable
 fun GimbalDock(
     enabled: Boolean,
-    codeKnown: Boolean,
     moving: Boolean,
     panDegrees: Float,
     tiltDegrees: Float,
     positionFromCamera: Boolean,
     speedPercent: Int,
+    hardwareSpeedLevel: Int,
     onSpeedChange: (Int) -> Unit,
+    onHardwareSpeedChange: (Int) -> Unit,
     onVector: (Float, Float) -> Unit,
-    onJog: (Float, Float) -> Unit,
     onRelease: () -> Unit,
     onStop: () -> Unit,
     onZero: () -> Unit,
     onCaptureWaypoint: () -> Unit,
-    onOpenDiagnostics: () -> Unit,
-    onClose: () -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
-    var usePad by remember { mutableStateOf(false) }
-    val active = enabled && codeKnown
+    var optionsVisible by remember { mutableStateOf(false) }
+    val joystickSize = if (compact) 76.dp else 88.dp
+    val optionsWidth = if (compact) 214.dp else 236.dp
+    val totalHeight = if (optionsVisible) (if (compact) 342.dp else 360.dp) else joystickSize + 38.dp
 
-    GlassPanel(
-        // In orizzontale l'altezza è poca e il pannello va rimpicciolito, non troncato: una
-        // levetta tagliata a metà dal bordo dello schermo non si usa.
+    Box(
         modifier = modifier
-            .width(if (compact) 214.dp else 252.dp)
-            .pointerInput(Unit) { detectTapGestures(onTap = {}) },
-        contentPadding = 10.dp,
-        verticalSpacing = 8.dp,
+            .width(optionsWidth)
+            .height(totalHeight),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(
-                        color = when {
-                            !codeKnown -> Luna.Warn
-                            moving -> Luna.Accent
-                            active -> Luna.Ok
-                            else -> Luna.OnSurfaceDim
-                        },
-                        shape = CircleShape,
-                    ),
-            )
-            Text(
-                text = "GIMBAL",
-                style = MaterialTheme.typography.labelMedium,
-                color = Color.White,
-                modifier = Modifier.weight(1f),
-            )
-            SmallToggle(
-                icon = LunaIcons.Joystick,
-                description = "Levetta analogica",
-                selected = !usePad,
-                onClick = { usePad = false },
-            )
-            SmallToggle(
-                icon = LunaIcons.DPad,
-                description = "Croce direzionale",
-                selected = usePad,
-                onClick = { usePad = true },
-            )
-            SmallToggle(
-                icon = LunaIcons.Close,
-                description = "Chiudi il pannello del gimbal",
-                selected = false,
-                onClick = onClose,
+        if (optionsVisible) {
+            GimbalOptions(
+                enabled = enabled,
+                moving = moving,
+                panDegrees = panDegrees,
+                tiltDegrees = tiltDegrees,
+                positionFromCamera = positionFromCamera,
+                speedPercent = speedPercent,
+                hardwareSpeedLevel = hardwareSpeedLevel,
+                onSpeedChange = onSpeedChange,
+                onHardwareSpeedChange = onHardwareSpeedChange,
+                onStop = onStop,
+                onZero = onZero,
+                onCaptureWaypoint = onCaptureWaypoint,
+                modifier = Modifier.align(Alignment.TopEnd).width(optionsWidth),
             )
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            modifier = Modifier.align(Alignment.BottomEnd),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (usePad) {
-                GimbalPad(
-                    enabled = active,
-                    onJog = onJog,
-                    onRelease = onRelease,
-                    onStop = onStop,
-                    keySize = if (compact) 42.dp else 48.dp,
-                )
-            } else {
-                GimbalJoystick(
-                    enabled = active,
-                    onVector = onVector,
-                    onRelease = onRelease,
-                    diameter = if (compact) 122.dp else 152.dp,
-                )
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                HudIconButton(
-                    icon = LunaIcons.Center,
-                    contentDescription = "Considera questa posizione come 0° / 0°",
-                    onClick = onZero,
-                    size = 40.dp,
-                )
-                HudIconButton(
-                    icon = LunaIcons.Waypoint,
-                    contentDescription = "Memorizza il punto corrente",
-                    onClick = onCaptureWaypoint,
-                    size = 40.dp,
-                )
-                HudIconButton(
-                    icon = LunaIcons.Stop,
-                    contentDescription = "Ferma il movimento",
-                    onClick = onStop,
-                    size = 40.dp,
-                    selected = moving,
-                    activeColor = Luna.Rec,
-                )
-            }
-        }
-
-        SliderRow(
-            label = "Velocità",
-            value = speedPercent.toFloat(),
-            onValueChange = { onSpeedChange(it.roundToInt()) },
-            valueRange = 1f..100f,
-            valueLabel = "$speedPercent%",
-            icon = LunaIcons.Speed,
-            enabled = active,
-        )
-
-        Text(
-            text = "pan %.1f°  ·  tilt %.1f°%s".format(
-                panDegrees,
-                tiltDegrees,
-                if (positionFromCamera) "" else "  (stima)",
-            ),
-            style = MaterialTheme.typography.labelSmall,
-            color = Luna.OnSurfaceDim,
-        )
-
-        if (!codeKnown) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Luna.Warn.copy(alpha = 0.14f), RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenDiagnostics)
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    imageVector = LunaIcons.Warning,
-                    contentDescription = null,
-                    tint = Luna.Warn,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    text = "Comando gimbal non ancora noto: cercalo in Diagnostica",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Luna.Warn,
-                )
-            }
+            GimbalJoystick(
+                enabled = enabled,
+                onVector = onVector,
+                onRelease = onRelease,
+                diameter = joystickSize,
+            )
+            HudIconButton(
+                icon = LunaIcons.More,
+                contentDescription = if (optionsVisible) "Chiudi opzioni gimbal" else "Apri opzioni gimbal",
+                onClick = { optionsVisible = !optionsVisible },
+                selected = optionsVisible,
+                size = 32.dp,
+            )
         }
     }
 }
 
 @Composable
-private fun SmallToggle(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    description: String,
-    selected: Boolean,
-    onClick: () -> Unit,
+private fun GimbalOptions(
+    enabled: Boolean,
+    moving: Boolean,
+    panDegrees: Float,
+    tiltDegrees: Float,
+    positionFromCamera: Boolean,
+    speedPercent: Int,
+    hardwareSpeedLevel: Int,
+    onSpeedChange: (Int) -> Unit,
+    onHardwareSpeedChange: (Int) -> Unit,
+    onStop: () -> Unit,
+    onZero: () -> Unit,
+    onCaptureWaypoint: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Box(
-        modifier = Modifier
-            .size(30.dp)
-            .background(
-                color = if (selected) Luna.Accent.copy(alpha = 0.22f) else Color.Transparent,
-                shape = CircleShape,
-            )
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+    GlassPanel(
+        modifier = modifier.pointerInput(Unit) { detectTapGestures(onTap = {}) },
+        contentPadding = 10.dp,
+        verticalSpacing = 7.dp,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = if (selected) Luna.Accent else Luna.OnSurfaceDim,
-            modifier = Modifier.size(17.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        when {
+                            moving -> Luna.Accent
+                            enabled -> Luna.Ok
+                            else -> Luna.OnSurfaceDim
+                        },
+                        CircleShape,
+                    ),
+            )
+            Text("OPZIONI GIMBAL", style = MaterialTheme.typography.labelMedium, color = Color.White)
+        }
+
+        SliderRow(
+            label = "Intensità joystick",
+            value = speedPercent.toFloat(),
+            onValueChange = { onSpeedChange(it.roundToInt()) },
+            valueRange = 1f..100f,
+            valueLabel = "$speedPercent%",
+            icon = LunaIcons.Speed,
+            enabled = enabled,
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Preset", style = MaterialTheme.typography.labelSmall, color = Luna.OnSurfaceDim)
+            listOf(1 to "25", 2 to "50", 3 to "75").forEach { (level, label) ->
+                FilterChip(
+                    selected = hardwareSpeedLevel == level,
+                    onClick = { onHardwareSpeedChange(level) },
+                    enabled = enabled,
+                    label = { Text(label) },
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            HudIconButton(
+                icon = LunaIcons.Center,
+                contentDescription = "Considera questa posizione come 0° / 0°",
+                onClick = onZero,
+                enabled = enabled,
+                size = 38.dp,
+            )
+            HudIconButton(
+                icon = LunaIcons.Waypoint,
+                contentDescription = "Memorizza punto e inquadratura",
+                onClick = onCaptureWaypoint,
+                enabled = enabled,
+                size = 38.dp,
+                activeColor = Luna.Path,
+            )
+            HudIconButton(
+                icon = LunaIcons.Stop,
+                contentDescription = "Ferma il gimbal",
+                onClick = onStop,
+                enabled = enabled,
+                selected = moving,
+                size = 38.dp,
+                activeColor = Luna.Rec,
+            )
+        }
+
+        Text(
+            text = "pan %.1f° · tilt %.1f°%s".format(
+                panDegrees,
+                tiltDegrees,
+                if (positionFromCamera) "" else " (stima)",
+            ),
+            style = MaterialTheme.typography.labelSmall,
+            color = Luna.OnSurfaceDim,
         )
     }
 }

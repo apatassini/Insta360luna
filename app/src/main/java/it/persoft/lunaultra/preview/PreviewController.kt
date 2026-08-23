@@ -1,6 +1,13 @@
 package it.persoft.lunaultra.preview
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.os.Handler
+import android.os.Looper
+import android.view.PixelCopy
 import android.view.Surface
 import it.persoft.lunaultra.camera.CameraSession
 import it.persoft.lunaultra.camera.LunaCommands
@@ -10,9 +17,14 @@ import it.persoft.lunaultra.net.SocketBinder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.ByteArrayOutputStream
+import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 /** Come sta arrivando l'anteprima. */
 enum class PreviewSource { NESSUNA, MJPEG, VIDEO }
@@ -24,9 +36,17 @@ data class PreviewState(
     val framesDecoded: Long = 0,
     val bytesReceived: Long = 0,
     val message: String? = null,
+    /** Rapporto reale dell'immagine, ricavato dal JPEG o dal formato di uscita del decoder. */
+    val displayAspectRatio: Float = DEFAULT_PREVIEW_ASPECT_RATIO,
+    val frameWidth: Int = 0,
+    val frameHeight: Int = 0,
 ) {
     /** Il flusso video disegna su una Surface, il MJPEG su una Image: la UI deve saperlo. */
     val usesSurface: Boolean get() = source == PreviewSource.VIDEO
+
+    companion object {
+        const val DEFAULT_PREVIEW_ASPECT_RATIO = 16f / 9f
+    }
 }
 
 /**
@@ -90,6 +110,9 @@ class PreviewController(
                 _state.value = _state.value.copy(
                     frame = bitmap,
                     framesDecoded = count,
+                    displayAspectRatio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1),
+                    frameWidth = bitmap.width,
+                    frameHeight = bitmap.height,
                     message = null,
                 )
             }
@@ -123,6 +146,9 @@ class PreviewController(
             _state.value = _state.value.copy(
                 framesDecoded = decoder.framesDecoded,
                 bytesReceived = decoder.bytesReceived,
+                displayAspectRatio = decoder.displayAspectRatio,
+                frameWidth = decoder.displayWidth,
+                frameHeight = decoder.displayHeight,
                 message = if (decoder.framesDecoded > 0) null else "In attesa del primo keyframe…",
             )
         }
@@ -132,9 +158,93 @@ class PreviewController(
         job?.cancel()
         job = null
         decoder.release()
-        if (_state.value.source == PreviewSource.VIDEO) {
+        if (_state.value.source == PreviewSource.VIDEO && session.state.value == it.persoft.lunaultra.camera.ConnectionState.CONNECTED) {
             scope.launch { commands.stopLiveStream() }
         }
         _state.value = PreviewState()
+    }
+
+    /**
+     * Congela l'inquadratura corrente in un JPEG quadrato e molto piccolo per la diagnostica.
+     *
+     * Con MJPEG il bitmap è già disponibile. Con lo stream H.265 il decoder disegna invece
+     * direttamente su una Surface: [PixelCopy] è l'unico modo affidabile per leggere proprio
+     * ciò che l'utente vede, senza avviare un secondo decoder. L'immagine completa viene
+     * adattata dentro 256×256 con bande nere, non tagliata: per confrontare due waypoint
+     * servono anche i bordi dell'inquadratura.
+     */
+    suspend fun captureThumbnailJpeg(size: Int = DIAGNOSTIC_THUMB_SIZE): ByteArray? {
+        val safeSize = size.coerceIn(64, 512)
+        if (!_state.value.active) start()
+        val deadline = System.nanoTime() + DIAGNOSTIC_FRAME_WAIT_MS * 1_000_000L
+        while (!hasCapturableFrame() && System.nanoTime() < deadline) delay(80L)
+        val source = when (_state.value.source) {
+            PreviewSource.MJPEG -> _state.value.frame
+            PreviewSource.VIDEO -> copySurfaceFrame()
+            PreviewSource.NESSUNA -> null
+        } ?: return null
+
+        val square = squareFit(source, safeSize)
+        return ByteArrayOutputStream().use { output ->
+            if (!square.compress(Bitmap.CompressFormat.JPEG, DIAGNOSTIC_JPEG_QUALITY, output)) null
+            else output.toByteArray()
+        }
+    }
+
+    private fun hasCapturableFrame(): Boolean = when (_state.value.source) {
+        PreviewSource.MJPEG -> _state.value.frame != null
+        PreviewSource.VIDEO -> _state.value.framesDecoded > 0 && surface?.isValid == true
+        PreviewSource.NESSUNA -> false
+    }
+
+    /** Registra in un solo evento coordinate e inquadratura reale, quando disponibile. */
+    suspend fun logSnapshot(message: String, detail: String): ByteArray? {
+        val jpeg = captureThumbnailJpeg()
+        val fullDetail = if (jpeg == null) "$detail\nMiniatura: non disponibile (anteprima spenta o senza frame)" else detail
+        log.info(message, fullDetail, jpeg)
+        return jpeg
+    }
+
+    private suspend fun copySurfaceFrame(): Bitmap? {
+        val target = surface?.takeIf(Surface::isValid) ?: return null
+        // Copia con lo stesso rapporto della Surface: forzare 16:9 deformava anche le immagini
+        // diagnostiche quando lo stream della modalità corrente aveva un altro formato.
+        val aspect = _state.value.displayAspectRatio.takeIf { it.isFinite() && it > 0f }
+            ?: PreviewState.DEFAULT_PREVIEW_ASPECT_RATIO
+        val bitmap = Bitmap.createBitmap(
+            DIAGNOSTIC_THUMB_SIZE,
+            (DIAGNOSTIC_THUMB_SIZE / aspect).roundToInt().coerceAtLeast(1),
+            Bitmap.Config.ARGB_8888,
+        )
+        val success = suspendCancellableCoroutine { continuation ->
+            PixelCopy.request(target, bitmap, { result ->
+                if (continuation.isActive) continuation.resume(result == PixelCopy.SUCCESS)
+            }, Handler(Looper.getMainLooper()))
+        }
+        return bitmap.takeIf { success }
+    }
+
+    private fun squareFit(source: Bitmap, size: Int): Bitmap {
+        val result = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(result)
+        canvas.drawColor(Color.BLACK)
+        val scale = minOf(size.toFloat() / source.width, size.toFloat() / source.height)
+        val width = source.width * scale
+        val height = source.height * scale
+        val left = (size - width) / 2f
+        val top = (size - height) / 2f
+        canvas.drawBitmap(
+            source,
+            null,
+            RectF(left, top, left + width, top + height),
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
+        )
+        return result
+    }
+
+    private companion object {
+        const val DIAGNOSTIC_THUMB_SIZE = 256
+        const val DIAGNOSTIC_JPEG_QUALITY = 78
+        const val DIAGNOSTIC_FRAME_WAIT_MS = 2_500L
     }
 }

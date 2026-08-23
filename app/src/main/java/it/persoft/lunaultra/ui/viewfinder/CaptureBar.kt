@@ -1,7 +1,6 @@
 package it.persoft.lunaultra.ui.viewfinder
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -56,10 +55,9 @@ fun CaptureBar(
     onShutter: () -> Unit,
     waypointCount: Int,
     onCaptureWaypoint: () -> Unit,
-    onOpenSequence: () -> Unit,
+    onOpenCameraSettings: () -> Unit,
+    onOpenAutomations: () -> Unit,
     onOpenGallery: () -> Unit,
-    interpolationLabel: String,
-    onToggleInterpolation: () -> Unit,
     onOpenModeSheet: () -> Unit,
     vertical: Boolean,
     modifier: Modifier = Modifier,
@@ -98,19 +96,27 @@ fun CaptureBar(
                     )
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 LeftSlot(
                     guided = selected.usesSequence,
                     waypointCount = waypointCount,
                     onCaptureWaypoint = onCaptureWaypoint,
                     onOpenGallery = onOpenGallery,
-                    size = 42.dp,
+                    size = 36.dp,
                 )
                 HudIconButton(
                     icon = LunaIcons.Tune,
-                    contentDescription = "Sequenza e tempi",
-                    onClick = onOpenSequence,
-                    size = 42.dp,
+                    contentDescription = "Impostazioni della camera",
+                    onClick = onOpenCameraSettings,
+                    size = 36.dp,
+                )
+                HudIconButton(
+                    icon = LunaIcons.Sequence,
+                    contentDescription = "Automazioni del gimbal",
+                    onClick = onOpenAutomations,
+                    size = 36.dp,
+                    selected = selected.usesSequence,
+                    activeColor = Luna.Path,
                 )
             }
             ShutterButton(
@@ -120,12 +126,6 @@ fun CaptureBar(
                 ready = shutterReady,
                 onClick = onShutter,
                 diameter = 70.dp,
-            )
-            RoundLabelButton(
-                label = interpolationLabel,
-                caption = "MOTO",
-                color = selected.color,
-                onClick = onToggleInterpolation,
             )
         }
     } else {
@@ -166,15 +166,17 @@ fun CaptureBar(
                 ) {
                     HudIconButton(
                         icon = LunaIcons.Tune,
-                        contentDescription = "Sequenza e tempi",
-                        onClick = onOpenSequence,
+                        contentDescription = "Impostazioni della camera",
+                        onClick = onOpenCameraSettings,
                         size = 44.dp,
                     )
-                    RoundLabelButton(
-                        label = interpolationLabel,
-                        caption = "MOTO",
-                        color = selected.color,
-                        onClick = onToggleInterpolation,
+                    HudIconButton(
+                        icon = LunaIcons.Sequence,
+                        contentDescription = "Automazioni del gimbal",
+                        onClick = onOpenAutomations,
+                        size = 44.dp,
+                        selected = selected.usesSequence,
+                        activeColor = Luna.Path,
                     )
                 }
             }
@@ -278,39 +280,5 @@ private fun ModeLabel(
                 .size(width = if (selected) 16.dp else 0.dp, height = 3.dp)
                 .background(mode.color, CircleShape),
         )
-    }
-}
-
-/** Pulsante tondo con una parola dentro, come il selettore automatico delle camere. */
-@Composable
-private fun RoundLabelButton(
-    label: String,
-    caption: String,
-    color: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .size(46.dp)
-            .background(color.copy(alpha = 0.16f), CircleShape)
-            .border(1.dp, color.copy(alpha = 0.6f), CircleShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                color = color,
-                maxLines = 1,
-            )
-            Text(
-                text = caption,
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White.copy(alpha = 0.55f),
-                maxLines = 1,
-            )
-        }
     }
 }

@@ -4,7 +4,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- L'SSID serve soltanto a riconoscere l'access point della camera. -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <!--
+        Android richiede ancora la posizione precisa per leggere SSID e BSSID dai risultati
+        della scansione Wi-Fi. Quei dati servono esclusivamente a scegliere l'access point
+        Luna esatto, evitando il selettore generico che fallisce su alcuni firmware OEM.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!--
         Il tipo "connectedDevice" è quello giusto per una sessione verso una camera sulla
@@ -17,6 +26,8 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Necessario per consegnare ad Android l'APK scaricato dalla release GitHub. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"

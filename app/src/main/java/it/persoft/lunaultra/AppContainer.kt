@@ -5,8 +5,11 @@ import it.persoft.lunaultra.camera.CameraSession
 import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
+import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.data.JsonFileStore
 import it.persoft.lunaultra.gimbal.GimbalController
+import it.persoft.lunaultra.gimbal.GimbalCalibrator
+import it.persoft.lunaultra.gimbal.GimbalLimitMonitor
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaRepository
 import it.persoft.lunaultra.net.EventLog
@@ -39,6 +42,13 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
         scope = scope,
     )
 
+    val calibrationStore = JsonFileStore(
+        file = File(appContext.filesDir, "gimbal_calibration.json"),
+        serializer = GimbalCalibrationProfile.serializer(),
+        default = GimbalCalibrationProfile(),
+        scope = scope,
+    )
+
     val favoritesStore = JsonFileStore(
         file = File(appContext.filesDir, "favorites.json"),
         serializer = Favorites.serializer(),
@@ -52,13 +62,16 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val commands = LunaCommands(session, settingsStore.state, log)
     val probe = CodeProbe(session, log)
     val preview = PreviewController(session, commands, settingsStore.state, wifiBinder, log, scope)
-    val gimbal = GimbalController(commands, settingsStore.state, log, scope)
-    val engine = TimelapseEngine(commands, gimbal, log, scope)
+    val gimbal = GimbalController(commands, settingsStore.state, calibrationStore.state, log, scope)
+    val gimbalLimits = GimbalLimitMonitor(session.notifications, scope)
+    val calibrator = GimbalCalibrator(gimbal, gimbalLimits, preview, calibrationStore, log, scope)
+    val engine = TimelapseEngine(commands, gimbal, preview, settingsStore.state, calibrationStore.state, log, scope)
     val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log)
 
     suspend fun load() {
         settingsStore.load()
         sequenceStore.load()
+        calibrationStore.load()
         favoritesStore.load()
     }
 }

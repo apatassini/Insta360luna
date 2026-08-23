@@ -59,11 +59,39 @@ class LunaMessagesTest {
     }
 
     @Test
-    fun `le velocita del gimbal usano lo zig-zag per i valori negativi`() {
-        val body = LunaMessages.gimbalVelocity(panField = 1, panValue = -40, tiltField = 2, tiltValue = 40)
-        val fields = ProtoReader(body).fields()
+    fun `i vettori gimbal riproducono byte per byte le catture di Insta360Linker`() {
+        fun assertBody(expected: String, horizontal: Int, vertical: Int) =
+            assertEquals(expected, Hex.encode(LunaMessages.gimbalMove(horizontal, vertical), separator = "").lowercase())
 
-        assertEquals(-40, (fields[0] as it.persoft.lunaultra.protocol.ProtoField.VarInt).asSInt)
-        assertEquals(40, (fields[1] as it.persoft.lunaultra.protocol.ProtoField.VarInt).asSInt)
+        assertBody("08011200", horizontal = 0, vertical = 0)
+        assertBody("080112020848", horizontal = 0, vertical = 36)
+        assertBody("080112020876", horizontal = 0, vertical = 59)
+        assertBody("0801120508b4011014", horizontal = 10, vertical = 90)
+        assertBody("0801120508c401101a", horizontal = 13, vertical = 98)
+        assertBody("08011205082910c001", horizontal = 96, vertical = -21)
+    }
+
+    @Test
+    fun `il ricentraggio gimbal usa la vera azione hardware`() {
+        assertEquals("0802", Hex.encode(LunaMessages.gimbalBackCenter(), separator = "").lowercase())
+    }
+
+    @Test
+    fun `la velocita hardware gimbal usa i pacchetti catturati`() {
+        val set = Hex.encode(LunaMessages.setGimbalSpeed(2), separator = "").lowercase()
+        val refresh = Hex.encode(LunaMessages.refreshGimbalSpeed(), separator = "").lowercase()
+
+        assertEquals("08551205aa050210021806", set)
+        assertEquals("08631006", refresh)
+    }
+
+    @Test
+    fun `il formato video usa il campo record resolution e il function mode`() {
+        val body = LunaMessages.setVideoProfile(profileCode = 154, functionMode = 7)
+        val reader = ProtoReader(body)
+
+        assertEquals(31, reader.intOrNull(1))
+        assertEquals(154, reader.intOrNull(2, 31))
+        assertEquals(7, reader.intOrNull(3))
     }
 }

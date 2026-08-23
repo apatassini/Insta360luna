@@ -6,28 +6,23 @@ import kotlinx.serialization.Serializable
 /**
  * Parametri del gimbal.
  *
- * A differenza del resto del protocollo, qui quasi tutto è ancora da confermare: il comando
- * `PHONE_COMMAND_GIMBAL_CONTROL` ha un nome documentato ma nessun numero pubblico, e la forma
- * del suo messaggio non è descritta da nessuna estrazione. Questi valori si correggono
- * dall'app, senza ricompilare, man mano che lo scanner e le prove sul campo li fissano.
+ * Il movimento usa il comando e il payload verificati dalle catture Luna Ultra di
+ * Insta360Linker. Restano configurabili soltanto le inversioni e i parametri di dead reckoning.
  */
 @Serializable
 data class GimbalSettings(
-    /**
-     * Numero di `PHONE_COMMAND_GIMBAL_CONTROL`. 0 = ancora ignoto: finché resta 0 l'app
-     * rifiuta di muovere il gimbal invece di sparare byte a un codice a caso.
-     */
-    val controlCode: Int = 0,
-
     /** Codice della notifica di stato PTZ; il predefinito è quello osservato in cattura. */
     val ptzNotificationCode: Int = LunaProtocolCodes.NOTIFICATION_PTZ_STATE_OBSERVED,
-
-    val panFieldNumber: Int = 1,
-    val tiltFieldNumber: Int = 2,
 
     /** Campi da cui leggere pan e tilt nella notifica PTZ, quando saranno identificati. */
     val ptzPanField: Int = 1,
     val ptzTiltField: Int = 2,
+
+    /**
+     * La notifica 8302 è reale, ma i suoi campi non sono ancora confermati come angoli.
+     * Tenerla disattivata impedisce a valori sperimentali di spostare i waypoint memorizzati.
+     */
+    val useExperimentalPtzPosition: Boolean = false,
 
     /** Fattore di scala fra gradi e unità del protocollo (1 = gradi, 10 = decimi di grado). */
     val angleScale: Float = 10f,
@@ -37,21 +32,73 @@ data class GimbalSettings(
     val maxTiltSpeedDegPerSec: Float = 20f,
 
     val manualSpeedPercent: Int = 40,
-    val commandRateHz: Int = 10,
+    /** Insta360Linker usa un tick di 25 ms; 40 Hz mantiene lo stesso ritmo. */
+    val commandRateHz: Int = 40,
+    /** Preset UI: 0=personalizzato, 1=25%, 2=50%, 3=75%; non è inviato alla camera. */
+    val hardwareSpeedLevel: Int = 3,
+    /** Usa le miniature dei waypoint per correggere visivamente partenza e arrivi. */
+    val visualWaypointCorrection: Boolean = true,
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
-    val panMinDeg: Float = -170f,
-    val panMaxDeg: Float = 170f,
-    val tiltMinDeg: Float = -90f,
-    val tiltMaxDeg: Float = 90f,
-) {
-    val isControlCodeKnown: Boolean get() = controlCode != 0
-}
+    /** Intervallo controllabile ufficiale; una calibrazione valida lo misura e lo sostituisce. */
+    val panMinDeg: Float = -57f,
+    val panMaxDeg: Float = 235f,
+    val tiltMinDeg: Float = -57f,
+    val tiltMaxDeg: Float = 120f,
+)
+
+/** Regolazioni fotografiche essenziali mostrate nel mirino. */
+@Serializable
+data class PhotoSettings(
+    /** Ritardo gestito dall'app prima di inviare lo scatto. */
+    val timerSeconds: Int = 0,
+    /** Auto azzera le regolazioni manuali senza dimenticare le ultime scelte Pro. */
+    val proMode: Boolean = false,
+    /** `RAW_CAPTURE_TYPE_OFF` = JPG, `RAW_CAPTURE_TYPE_DNG` = JPG + DNG. */
+    val rawCaptureType: Int = LunaProtocolCodes.RawCaptureType.OFF,
+    /** Scala della camera: -2…+2. */
+    val brightness: Int = 0,
+    /** Compensazione in terzi di stop: -6…+6 corrisponde a -2…+2 EV. */
+    val exposureBiasThirds: Int = 0,
+    /** Zero = automatico, altrimenti temperatura in kelvin. */
+    val whiteBalanceKelvin: Int = 0,
+    /** Arresti verificati dalla Luna: 1×, 2×, 3×, 6× e 12×. */
+    val zoomScale: Int = 1,
+)
+
+/** Impostazioni video verificate sulla Luna Ultra e applicate alla modalità attiva. */
+@Serializable
+data class VideoSettings(
+    /** `VideoResolution`: 24 corrisponde a 3840×2160 @ 30 fps. */
+    val profileCode: Int = 24,
+    val proMode: Boolean = false,
+    /** Zero significa ISO automatico. */
+    val iso: Int = 0,
+    /** Secondi reali; zero significa otturatore automatico. */
+    val shutterSeconds: Double = 0.0,
+    /** Compensazione in terzi di stop, da -12 a +12 (±4 EV). */
+    val exposureBiasThirds: Int = 0,
+    /** Zero = automatico; altrimenti 2000…10000 K. */
+    val whiteBalanceKelvin: Int = 0,
+    /** Standard=1, i-Log=2, Dolby Vision=5 sulla Luna Ultra. */
+    val colorMode: Int = LunaProtocolCodes.ColorMode.STANDARD,
+    /** Il campo `gamma_mode` è il filtro/Look, non una curva gamma. */
+    val filter: Int = LunaProtocolCodes.Filter.ORIGINAL,
+    val filterIntensity: Int = LunaProtocolCodes.FilterIntensity.MEDIUM,
+    val sharpness: Int = 1,
+)
 
 @Serializable
 data class AppSettings(
     val host: String = "192.168.42.1",
     val port: Int = 6666,
+
+    /**
+     * Credenziale dell'access point della camera. Android non espone alle app le password
+     * delle reti già salvate: dopo una prima connessione manuale la leggiamo dalla camera con
+     * `GET_OPTIONS(WIFI_INFO)` e la conserviamo per le connessioni automatiche successive.
+     */
+    val cameraWifiPassword: String = "",
 
     /** L'app ufficiale ripete l'handshake ogni 3 secondi come keep-alive. */
     val keepAliveSeconds: Int = 3,
@@ -65,6 +112,10 @@ data class AppSettings(
      * sotto-modalità e questa è la scelta che la distingue.
      */
     val panoAspect: Int = LunaProtocolCodes.PanoAspect.SPHERE_360,
+
+    val photo: PhotoSettings = PhotoSettings(),
+
+    val video: VideoSettings = VideoSettings(),
 
     /**
      * Modalità timelapse usata dai comandi `*_TIMELAPSE`

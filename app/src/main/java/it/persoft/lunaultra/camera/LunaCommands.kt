@@ -1,7 +1,9 @@
 package it.persoft.lunaultra.camera
 
 import it.persoft.lunaultra.data.AppSettings
-import it.persoft.lunaultra.data.GimbalSettings
+import it.persoft.lunaultra.data.PhotoSettings
+import it.persoft.lunaultra.data.LunaVideoProfiles
+import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.protocol.LunaMessages
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
@@ -17,22 +19,27 @@ import it.persoft.lunaultra.protocol.Ucd2Frame
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
 
+private val CINEMATIC_FILTERS = setOf(
+    LunaProtocolCodes.Filter.POS_FILM,
+    LunaProtocolCodes.Filter.NEG_FILM,
+    LunaProtocolCodes.Filter.CC_FILM,
+    LunaProtocolCodes.Filter.NC_FILM,
+    LunaProtocolCodes.Filter.FRESH,
+    LunaProtocolCodes.Filter.CINEMATIC,
+)
+
 /**
  * I comandi della camera, composti sui messaggi protobuf reali del namespace
  * `insta360.messages`.
  *
- * Tutto ciò che sta sopra il gimbal (stato, batteria, registrazione, timelapse) usa numeri di
- * comando e di campo noti. Il gimbal no: il suo comando ha un nome documentato
- * (`PHONE_COMMAND_GIMBAL_CONTROL`) ma nessun numero pubblico, quindi passa da
- * [GimbalSettings.controlCode], che si popola con lo scanner della schermata Diagnostica.
+ * Anche il gimbal usa ora il comando e il payload confermati dalle catture Luna Ultra del
+ * progetto Insta360Linker; non dipende più dallo scanner diagnostico.
  */
 class LunaCommands(
     private val session: CameraSession,
     private val settings: StateFlow<AppSettings>,
     private val log: EventLog,
 ) {
-
-    private val gimbal: GimbalSettings get() = settings.value.gimbal
 
     /** Nella risposta `GetOptionsResp` il messaggio `Options` sta nel campo 2. */
     private fun optionsReader(frame: Ucd2Frame): ProtoReader = ProtoReader(frame.payload)
@@ -53,6 +60,31 @@ class LunaCommands(
                 firmware = reader.stringOrNull(OPTIONS, OptionsField.FIRMWARE_REVISION),
                 lastUpdateMs = System.currentTimeMillis(),
                 rawDump = frame.describePayload(),
+            )
+        }
+
+    /**
+     * Legge SSID e password direttamente dalla camera quando la sessione Wi-Fi è già aperta.
+     * È lo stesso dato che l'app ufficiale riceve durante l'associazione; serve a trasformare
+     * una sola connessione manuale in connessioni automatiche successive.
+     */
+    suspend fun fetchWifiInfo(): Result<CameraWifiInfo> =
+        session.request(
+            LunaProtocolCodes.GET_OPTIONS,
+            LunaMessages.getOptions(OptionType.WIFI_INFO),
+        ).map { frame ->
+            val reader = optionsReader(frame)
+            CameraWifiInfo(
+                ssid = reader.stringOrNull(
+                    OPTIONS,
+                    OptionsField.WIFI_INFO,
+                    LunaProtocolCodes.WifiInfoField.SSID,
+                ),
+                password = reader.stringOrNull(
+                    OPTIONS,
+                    OptionsField.WIFI_INFO,
+                    LunaProtocolCodes.WifiInfoField.PASSWORD,
+                ),
             )
         }
 
@@ -169,6 +201,52 @@ class LunaCommands(
                 functionMode = LunaProtocolCodes.FunctionMode.NORMAL_POWER_PANO_IMAGE,
             ),
         ).map { }
+
+    /** Timer escluso: quello è gestito localmente per mostrare un conto alla rovescia preciso. */
+    suspend fun applyPhotoSettings(value: PhotoSettings, mode: CameraMode): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setPhotoControls(value, mode.functionMode),
+        ).map { }
+
+    /** Vale per foto e video: cambia il function mode, non il formato del messaggio. */
+    suspend fun setZoomScale(scale: Int, mode: CameraMode): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setZoomScale(scale, mode.functionMode),
+        ).map { }
+
+    suspend fun applyVideoSettings(value: VideoSettings, mode: CameraMode): Result<Unit> {
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setVideoControls(value, mode.functionMode),
+        ).getOrElse { return Result.failure(it) }
+
+        // Misurato sulla camera: il cambio colore deve viaggiare da solo.
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setVideoColorMode(value.colorMode, mode.functionMode),
+        ).getOrElse { return Result.failure(it) }
+
+        val profile = LunaVideoProfiles.all.firstOrNull { it.code == value.profileCode }
+        val filtersAvailable = value.colorMode != LunaProtocolCodes.ColorMode.DOLBY_VISION &&
+            profile != null && profile.width <= 3840 && profile.fps <= 60
+        if (!filtersAvailable) return Result.success(Unit)
+
+        // Il filtro è l'inverso: deve portare con sé il colore per ricostruire subito la pipeline.
+        session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setVideoFilter(value.filter, value.colorMode, mode.functionMode),
+        ).getOrElse { return Result.failure(it) }
+
+        if (value.filter in CINEMATIC_FILTERS) {
+            session.request(
+                LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+                LunaMessages.setVideoFilterIntensity(value.filterIntensity, value.colorMode, mode.functionMode),
+            ).getOrElse { return Result.failure(it) }
+        }
+        return Result.success(Unit)
+    }
 
     /** In che modalità è adesso la camera, letta dalle due sotto-modalità che riporta. */
     suspend fun fetchCameraMode(): Result<CameraMode?> =
@@ -317,37 +395,68 @@ class LunaCommands(
      * registrazione normale è spesso la scelta giusta (il timelapse interno accelera i tempi
      * e rende difficile far coincidere durata reale e durata della sequenza).
      */
-    suspend fun startRecording(useCameraTimelapse: Boolean): Result<Unit> =
-        if (useCameraTimelapse) startTimelapse() else startCapture()
+    suspend fun startRecording(
+        useCameraTimelapse: Boolean,
+        captureMode: Int = LunaProtocolCodes.CaptureMode.NORMAL,
+    ): Result<Unit> =
+        if (useCameraTimelapse) startTimelapse() else startCapture(captureMode)
 
-    suspend fun stopRecording(useCameraTimelapse: Boolean): Result<Unit> =
-        if (useCameraTimelapse) stopTimelapse() else stopCapture()
+    suspend fun stopRecording(
+        useCameraTimelapse: Boolean,
+        captureMode: Int = LunaProtocolCodes.CaptureMode.NORMAL,
+    ): Result<Unit> =
+        if (useCameraTimelapse) stopTimelapse() else stopCapture(captureMode)
 
     // ---- Gimbal ----
 
     /**
      * Movimento a velocità: [panPercent] e [tiltPercent] vanno da -1 a +1.
      *
-     * La forma del messaggio non è documentata. I numeri di campo sono quelli configurati in
-     * [GimbalSettings] e l'ipotesi di partenza (asse, direzione, velocità come varint piccoli)
-     * è quella suggerita dallo scanner: vanno confermati guardando la camera.
+     * Il vettore viene convertito in `-100..100`; [LunaMessages.gimbalMove] applica la rotazione
+     * degli assi verificata sul dispositivo e il protobuf ZigZag osservato nei PCAP.
      */
     suspend fun gimbalVelocity(panPercent: Float, tiltPercent: Float): Result<Unit> {
-        val cfg = gimbal
-        val code = cfg.controlCode
-        if (code == 0) return Result.failure(UnknownGimbalCodeException())
+        val cfg = settings.value.gimbal
         val pan = applySign(panPercent.coerceIn(-1f, 1f), cfg.invertPan)
         val tilt = applySign(tiltPercent.coerceIn(-1f, 1f), cfg.invertTilt)
-        val payload = LunaMessages.gimbalVelocity(
-            panField = cfg.panFieldNumber,
-            panValue = (pan * cfg.manualSpeedPercent).roundToInt(),
-            tiltField = cfg.tiltFieldNumber,
-            tiltValue = (tilt * cfg.manualSpeedPercent).roundToInt(),
+        val payload = LunaMessages.gimbalMove(
+            horizontal = (pan * 100f).roundToInt(),
+            vertical = (tilt * 100f).roundToInt(),
         )
-        return session.fire(code, payload)
+        return session.fire(LunaProtocolCodes.GIMBAL_CONTROL, payload)
     }
 
     suspend fun gimbalStop(): Result<Unit> = gimbalVelocity(0f, 0f)
+
+    /** Riporta entrambi gli assi allo zero fisico memorizzato dal firmware della Luna. */
+    suspend fun gimbalBackCenter(): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.GIMBAL_CONTROL,
+            LunaMessages.gimbalBackCenter(),
+        ).map { }
+
+    /**
+     * Imposta la velocità fisica del gimbal e aggiorna il contesto usato dalla camera.
+     * Sono i due comandi consecutivi osservati da Insta360Linker; non è una semplice scala UI.
+     */
+    suspend fun setGimbalHardwareSpeed(level: Int): Result<Unit> {
+        if (level !in 1..3) return Result.failure(IllegalArgumentException("Livello gimbal non valido: $level"))
+        val set = session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setGimbalSpeed(level),
+        )
+        if (set.isFailure) return Result.failure(set.exceptionOrNull() ?: IllegalStateException("Velocità non applicata"))
+        return session.request(
+            LunaProtocolCodes.GET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.refreshGimbalSpeed(),
+        ).map { }
+    }
+
+    /** Livello confermato dalla notifica `0x206A`, se il frame è quello atteso. */
+    fun gimbalSpeedFromNotification(frame: Ucd2Frame): Int? {
+        if (frame.code != LunaProtocolCodes.NOTIFICATION_GIMBAL_SPEED) return null
+        return ProtoReader(frame.payload).intOrNull(2)?.takeIf { it in 1..3 }
+    }
 
     /**
      * Legge lo stato PTZ da una notifica.
@@ -358,7 +467,7 @@ class LunaCommands(
      * non sono confermati questa funzione restituisce ciò che riesce a leggere e nulla più.
      */
     fun parsePtz(frame: Ucd2Frame): PtzState? {
-        val cfg = gimbal
+        val cfg = settings.value.gimbal
         val reader = ProtoReader(frame.payload)
         val pan = reader.floatOrNull(cfg.ptzPanField) ?: return null
         val tilt = reader.floatOrNull(cfg.ptzTiltField) ?: 0f
@@ -372,10 +481,6 @@ class LunaCommands(
     }
 
     private fun applySign(value: Float, invert: Boolean): Float = if (invert) -value else value
-
-    class UnknownGimbalCodeException : IllegalStateException(
-        "Il codice di PHONE_COMMAND_GIMBAL_CONTROL non è noto: trovalo con lo scanner in Diagnostica"
-    )
 
     data class CaptureSnapshot(val state: Int, val seconds: Int?)
 

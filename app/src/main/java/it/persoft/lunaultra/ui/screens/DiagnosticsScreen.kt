@@ -1,5 +1,7 @@
 package it.persoft.lunaultra.ui.screens
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -7,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -27,6 +30,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -152,8 +157,9 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
         SectionCard(title = "Log") {
             Text(
                 text = "Ogni comando inviato e ogni risposta ricevuta, con i byte grezzi e i campi " +
-                    "protobuf decodificati. \"Condividi\" lo salva su file e lo allega: è così " +
-                    "che va mandato per farlo analizzare.",
+                    "protobuf decodificati. Per waypoint e sequenze include anche le miniature e " +
+                    "il confronto dei punti di controllo. \"Condividi\" crea un unico HTML con " +
+                    "le immagini incorporate: è il file da mandare per l'analisi.",
                 style = MaterialTheme.typography.bodySmall,
             )
             // Il log arriva a migliaia di righe. Disegnarle tutte in una Column significa
@@ -196,6 +202,21 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
                                 modifier = Modifier.padding(start = 12.dp),
                             )
                         }
+                        entry.imageJpeg?.let { bytes ->
+                            val bitmap = remember(bytes) {
+                                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            }
+                            bitmap?.let {
+                                Image(
+                                    bitmap = it.asImageBitmap(),
+                                    contentDescription = "Miniatura diagnostica: ${entry.message}",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier
+                                        .padding(start = 12.dp, top = 4.dp, bottom = 6.dp)
+                                        .size(144.dp),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -207,30 +228,15 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
 private fun GimbalCodeCard(viewModel: MainViewModel) {
     val settings by viewModel.settings.collectAsState()
     val gimbal = settings.gimbal
-    var manual by remember(gimbal.controlCode) {
-        mutableStateOf(if (gimbal.controlCode == 0) "" else gimbal.controlCode.toString())
-    }
 
-    SectionCard(title = "Comando gimbal") {
+    SectionCard(title = "Protocollo gimbal") {
         Text(
-            text = if (gimbal.isControlCodeKnown) {
-                "In uso il codice ${gimbal.controlCode}. Se il gimbal non si muove, non è quello giusto."
-            } else {
-                "Ancora ignoto. PHONE_COMMAND_GIMBAL_CONTROL esiste con questo nome nell'app " +
-                    "Insta360, ma il suo numero non è pubblico: nessuna estrazione lo riporta. " +
-                    "Finché resta a 0 l'app non muove il gimbal, invece di sparare byte a caso."
-            },
+            text = "In uso PHONE_COMMAND_GIMBAL_CONTROL 226 (0x00E2), con assi e payload " +
+                "verificati sulle catture Luna Ultra pubblicate in Insta360Linker.",
             style = MaterialTheme.typography.bodyMedium,
         )
-        NumberField(
-            label = "Codice (0 = ignoto)",
-            value = manual,
-            onValueChange = { text ->
-                manual = text
-                viewModel.setGimbalControlCode(text.trim().toIntOrNull() ?: 0)
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
+        LabeledValue("Tick movimento", "${gimbal.commandRateHz} Hz")
+        LabeledValue("Stop", "4 vettori nulli ogni 25 ms")
         LabeledValue("Notifica PTZ", gimbal.ptzNotificationCode.toString())
         Text(
             text = "Il valore predefinito ${LunaProtocolCodes.NOTIFICATION_PTZ_STATE_OBSERVED} " +
@@ -319,11 +325,6 @@ private fun ProbeCard(viewModel: MainViewModel, probe: it.persoft.lunaultra.ui.P
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         Text(text = hit.reply.describe, style = MaterialTheme.typography.bodySmall)
-                    }
-                    if (hit.rank > 0) {
-                        OutlinedButton(onClick = { viewModel.setGimbalControlCode(hit.code) }) {
-                            Text("Usa per il gimbal")
-                        }
                     }
                 }
             }
@@ -675,29 +676,10 @@ private fun GimbalTuningCard(viewModel: MainViewModel) {
 
     SectionCard(title = "Taratura gimbal") {
         Text(
-            text = "La forma del messaggio del gimbal non è descritta da nessuna estrazione. " +
-                "Questi numeri sono l'ipotesi di partenza — due campi di velocità con segno — " +
-                "e si correggono guardando la camera.",
+            text = "Il messaggio e la rotazione degli assi sono fissi. Qui restano solo " +
+                "l'intensità manuale, la cadenza e la stima dei gradi percorsi.",
             style = MaterialTheme.typography.bodySmall,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NumberField(
-                label = "Campo pan",
-                value = gimbal.panFieldNumber.toString(),
-                onValueChange = { text ->
-                    text.toIntOrNull()?.let { n -> viewModel.updateGimbal { it.copy(panFieldNumber = n) } }
-                },
-                modifier = Modifier.weight(1f),
-            )
-            NumberField(
-                label = "Campo tilt",
-                value = gimbal.tiltFieldNumber.toString(),
-                onValueChange = { text ->
-                    text.toIntOrNull()?.let { n -> viewModel.updateGimbal { it.copy(tiltFieldNumber = n) } }
-                },
-                modifier = Modifier.weight(1f),
-            )
-        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             NumberField(
                 label = "Velocità manuale %",

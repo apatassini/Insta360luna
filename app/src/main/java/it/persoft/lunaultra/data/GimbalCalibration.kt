@@ -34,6 +34,18 @@ data class GimbalCalibrationSample(
     }
 }
 
+/**
+ * Un punto della curva: quanti gradi al secondo produce un'intensità, su ogni asse.
+ *
+ * I gradi al secondo sono la misura buona, e vengono dal cronometro contro i fine corsa: la
+ * camera annuncia il limite, la corsa fino a lì è nota, il tempo di comando si conta. Non
+ * serve riconoscere niente nell'inquadratura — ed è il punto, perché intorno alla camera non
+ * sempre c'è qualcosa di riconoscibile, e su una parete uniforme o a motivo ripetuto ogni
+ * misura basata sulle immagini è una scommessa.
+ *
+ * I pixel al secondo restano perché servono alla correzione visiva dei waypoint, dove il
+ * confronto ha senso: là si confronta la stessa posizione con sé stessa.
+ */
 @Serializable
 data class GimbalResponsePoint(
     val intensityPercent: Int,
@@ -41,7 +53,15 @@ data class GimbalResponsePoint(
     val tiltImagePixelsPerSecond: Float,
     val validPanSamples: Int,
     val validTiltSamples: Int,
-)
+    /** Gradi al secondo misurati col cronometro sul fine corsa. Zero = non misurato. */
+    val panDegreesPerSecond: Float = 0f,
+    val tiltDegreesPerSecond: Float = 0f,
+) {
+    fun degreesPerSecond(panAxis: Boolean): Float =
+        if (panAxis) panDegreesPerSecond else tiltDegreesPerSecond
+
+    val measuredInDegrees: Boolean get() = panDegreesPerSecond > 0f && tiltDegreesPerSecond > 0f
+}
 
 /**
  * Estremi realmente raggiungibili di un asse e tempo misurato per attraversarli al 20%.
@@ -106,12 +126,7 @@ data class GimbalCalibrationProfile(
             responsePoints.any { it.intensityPercent <= 10 } &&
             responsePoints.any { it.intensityPercent == 100 } &&
             panLimits.isValid && tiltLimits.isValid &&
-            responsePoints.all {
-                abs(it.panImagePixelsPerSecond) >= MIN_RATE &&
-                    abs(it.tiltImagePixelsPerSecond) >= MIN_RATE &&
-                    it.validPanSamples >= MIN_SAMPLES_PER_AXIS &&
-                    it.validTiltSamples >= MIN_SAMPLES_PER_AXIS
-            }
+            responsePoints.all { it.measuredInDegrees || legacyPixelPoint(it) }
 
     /**
      * Perché il profilo non è valido, in una frase leggibile. Nullo quando è valido.
@@ -134,6 +149,7 @@ data class GimbalCalibrationProfile(
             }
             if (responsePoints.none { it.intensityPercent == 100 }) return "il 100% non è stato misurato"
             responsePoints.forEach { point ->
+                if (point.measuredInDegrees) return@forEach
                 if (point.validPanSamples < MIN_SAMPLES_PER_AXIS) {
                     return "al ${point.intensityPercent}% l'orizzontale ha ${point.validPanSamples} misure buone su $MIN_SAMPLES_PER_AXIS"
                 }
@@ -149,6 +165,13 @@ data class GimbalCalibrationProfile(
             }
             return null
         }
+
+    /** Un punto della vecchia curva a pixel, valido secondo le regole di allora. */
+    private fun legacyPixelPoint(point: GimbalResponsePoint): Boolean =
+        abs(point.panImagePixelsPerSecond) >= MIN_RATE &&
+            abs(point.tiltImagePixelsPerSecond) >= MIN_RATE &&
+            point.validPanSamples >= MIN_SAMPLES_PER_AXIS &&
+            point.validTiltSamples >= MIN_SAMPLES_PER_AXIS
 
     val qualityPercent: Int
         get() = if (totalSamples <= 0) 0 else (validSamples * 100 / totalSamples).coerceIn(0, 100)
@@ -182,11 +205,37 @@ data class GimbalCalibrationProfile(
     fun angularRateAt(intensityPercent: Float, panAxis: Boolean): Float {
         if (!isValid || intensityPercent <= 0f) return 0f
         val limits = if (panAxis) panLimits else tiltLimits
+        // Se la curva è stata misurata in gradi, si usa quella: è un cronometro contro un
+        // fine corsa, cioè due fatti. La strada dei pixel resta per i profili vecchi.
+        val measured = degreesRateAt(intensityPercent, panAxis)
+        if (measured > 0f) return measured
+
         val scale = if (panAxis) panAngularScale else tiltAngularScale
         val sweepRate = limits.spanDeg / limits.travelSecondsAtSweepIntensity * scale
         val referenceImageRate = abs(imageRateAt(limits.sweepIntensityPercent.toFloat(), panAxis))
         if (referenceImageRate < MIN_RATE) return 0f
         return sweepRate * abs(imageRateAt(intensityPercent, panAxis)) / referenceImageRate
+    }
+
+    /** Gradi al secondo interpolati fra i punti misurati col cronometro; 0 se non ce ne sono. */
+    fun degreesRateAt(intensityPercent: Float, panAxis: Boolean): Float {
+        val points = responsePoints
+            .filter { it.degreesPerSecond(panAxis) > 0f }
+            .sortedBy(GimbalResponsePoint::intensityPercent)
+        if (points.isEmpty()) return 0f
+        val requested = intensityPercent.coerceIn(0f, 100f)
+        val upper = points.firstOrNull { it.intensityPercent >= requested }
+        val lower = points.lastOrNull { it.intensityPercent <= requested }
+        if (lower == null) {
+            val first = points.first()
+            return first.degreesPerSecond(panAxis) * requested / first.intensityPercent.coerceAtLeast(1)
+        }
+        if (upper == null || upper.intensityPercent == lower.intensityPercent) {
+            return lower.degreesPerSecond(panAxis)
+        }
+        val t = (requested - lower.intensityPercent) / (upper.intensityPercent - lower.intensityPercent)
+        return lower.degreesPerSecond(panAxis) +
+            (upper.degreesPerSecond(panAxis) - lower.degreesPerSecond(panAxis)) * t
     }
 
     fun maxAngularRate(panAxis: Boolean): Float = angularRateAt(100f, panAxis)
@@ -218,9 +267,10 @@ data class GimbalCalibrationProfile(
         if (panAxis) point.panImagePixelsPerSecond else point.tiltImagePixelsPerSecond
 
     companion object {
-        // 4: la scala angolare non viene più dal solo cronometro della corsa, ma è corretta
-        // contro i fine corsa. I profili 3 sono sistematicamente troppo veloci e vanno rifatti.
-        const val CURRENT_SCHEMA = 4
+        // 5: la curva è in gradi al secondo, misurata col cronometro contro i fine corsa
+        // invece che dedotta dallo spostamento delle immagini. I profili precedenti nascevano
+        // da una misura che dipendeva da cosa c'era davanti all'obiettivo.
+        const val CURRENT_SCHEMA = 5
 
         /** Oltre questi limiti la correzione non è una taratura, è un sintomo. */
         const val MIN_ANGULAR_SCALE = 0.4f
@@ -233,6 +283,68 @@ data class GimbalCalibrationProfile(
 }
 
 object GimbalCalibrationBuilder {
+
+    /**
+     * Costruisce il profilo dalle misure a cronometro: intensità → gradi al secondo.
+     *
+     * Non c'è niente da mediare né da filtrare: ogni punto è un cronometro contro un fine
+     * corsa, e un cronometro o c'è o non c'è. I pixel al secondo restano a zero — servono solo
+     * alla correzione visiva dei waypoint, che li ricava per conto suo quando le miniature ci
+     * sono; qui non si finge di averli misurati.
+     */
+    fun buildFromDegrees(
+        panCurve: List<Pair<Int, Float>>,
+        tiltCurve: List<Pair<Int, Float>>,
+        cameraModel: String,
+        firmware: String,
+        calibratedAtMs: Long = System.currentTimeMillis(),
+        panLimits: GimbalAxisLimits = GimbalAxisLimits(),
+        tiltLimits: GimbalAxisLimits = GimbalAxisLimits(),
+    ): GimbalCalibrationProfile {
+        val pan = panCurve.toMap()
+        val tilt = tiltCurve.toMap()
+        val points = (pan.keys + tilt.keys).distinct().sorted().mapNotNull { intensity ->
+            val panRate = pan[intensity] ?: return@mapNotNull null
+            val tiltRate = tilt[intensity] ?: return@mapNotNull null
+            GimbalResponsePoint(
+                intensityPercent = intensity,
+                panImagePixelsPerSecond = 0f,
+                tiltImagePixelsPerSecond = 0f,
+                validPanSamples = 1,
+                validTiltSamples = 1,
+                panDegreesPerSecond = panRate,
+                tiltDegreesPerSecond = tiltRate,
+            )
+        }
+        return GimbalCalibrationProfile(
+            calibratedAtMs = calibratedAtMs,
+            cameraModel = cameraModel,
+            firmware = firmware,
+            validSamples = points.size * 2,
+            totalSamples = (panCurve.size + tiltCurve.size),
+            responsePoints = monotonicDegrees(points),
+            panLimits = panLimits,
+            tiltLimits = tiltLimits,
+        )
+    }
+
+    /**
+     * Una curva non può rallentare quando il comando cresce.
+     *
+     * Se succede è rumore del cronometro — un impulso in più o in meno sull'ultimo tratto — e
+     * lasciarlo passare significherebbe che chiedere il 70% muove meno del 60%. Si tiene il
+     * valore più alto già visto salendo di intensità.
+     */
+    private fun monotonicDegrees(points: List<GimbalResponsePoint>): List<GimbalResponsePoint> {
+        var pan = 0f
+        var tilt = 0f
+        return points.sortedBy(GimbalResponsePoint::intensityPercent).map { point ->
+            pan = max(pan, point.panDegreesPerSecond)
+            tilt = max(tilt, point.tiltDegreesPerSecond)
+            point.copy(panDegreesPerSecond = pan, tiltDegreesPerSecond = tilt)
+        }
+    }
+
     fun build(
         samples: List<GimbalCalibrationSample>,
         cameraModel: String,

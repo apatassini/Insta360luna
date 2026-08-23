@@ -3,12 +3,22 @@ package it.persoft.lunaultra
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
 import it.persoft.lunaultra.data.GimbalCalibrationSample
 import it.persoft.lunaultra.data.GimbalAxisLimits
+import it.persoft.lunaultra.gimbal.formatAxisLimitSummary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GimbalCalibrationTest {
+    @Test
+    fun `end stop summary accepts a literal intensity percent`() {
+        val text = formatAxisLimitSummary(limits(-57f, 235f, 23.4f))
+
+        assertTrue(text.contains("Limiti: -57.0°…+235.0°"))
+        assertTrue(text.contains("Tempo al 20%: 23.4 s"))
+        assertTrue(text.contains("Affidabilità fine corsa: 90%"))
+    }
+
     @Test
     fun `builds and interpolates the 1 to 100 percent response curve`() {
         val intensities = listOf(1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)

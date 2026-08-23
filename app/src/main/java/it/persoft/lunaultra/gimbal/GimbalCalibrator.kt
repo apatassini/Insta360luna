@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.hypot
 
@@ -56,6 +57,27 @@ data class GimbalCalibrationState(
     companion object {
         const val TOTAL_STEPS = 12 * 2 * 2 * 2
     }
+}
+
+/**
+ * Riepilogo dei fine corsa isolato dalla procedura hardware, così anche i caratteri `%`
+ * possono essere verificati dai test senza dover muovere davvero la camera.
+ */
+internal fun formatAxisLimitSummary(limits: GimbalAxisLimits): String = buildString {
+    appendLine(
+        String.format(
+            Locale.US,
+            "Limiti: %.1f°…%+.1f° · ampiezza %.1f°",
+            limits.minimumDeg,
+            limits.maximumDeg,
+            limits.spanDeg,
+        ),
+    )
+    val seconds = String.format(Locale.US, "%.1f", limits.travelSecondsAtSweepIntensity)
+    appendLine(
+        "Tempo al ${limits.sweepIntensityPercent}%: $seconds s · ${limits.movingPulses} impulsi utili",
+    )
+    append("Affidabilità fine corsa: ${limits.endpointConfidencePercent}%")
 }
 
 /**
@@ -382,15 +404,7 @@ class GimbalCalibrator(
         }
         log.info(
             "CALIBRAZIONE · CORSA ${axisLabel(axis).uppercase()} COMPLETA",
-            buildString {
-                appendLine("Limiti: %.1f°…%+.1f° · ampiezza %.1f°".format(minimumDeg, maximumDeg, limits.spanDeg))
-                appendLine(
-                    "Tempo al ${ENDSTOP_INTENSITY_PERCENT}%: %.1f s · ${positive.movingPulses} impulsi utili".format(
-                        limits.travelSecondsAtSweepIntensity,
-                    ),
-                )
-                append("Affidabilità fine corsa: ${positive.confidencePercent}%")
-            },
+            formatAxisLimitSummary(limits),
             imageJpeg = positive.annotatedJpeg,
         )
         return limits

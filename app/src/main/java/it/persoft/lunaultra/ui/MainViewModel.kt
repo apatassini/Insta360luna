@@ -390,6 +390,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 when (state) {
                     ConnectionState.CONNECTED -> {
                         reconnectAttempts = 0
+                        // La connessione resta manuale, ma una volta riuscita il mirino deve
+                        // mostrare subito l'immagine senza richiedere un secondo pulsante.
+                        container.preview.start()
+                        container.log.info("Anteprima avviata automaticamente dopo la connessione")
                         pollJob = viewModelScope.launch {
                             while (isActive) {
                                 delay(STATUS_POLL_MS)
@@ -402,7 +406,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    ConnectionState.DISCONNECTED, ConnectionState.ERROR -> scheduleReconnect()
+                    ConnectionState.DISCONNECTED, ConnectionState.ERROR -> {
+                        container.preview.stop()
+                        scheduleReconnect()
+                    }
                     else -> Unit
                 }
             }

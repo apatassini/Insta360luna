@@ -36,9 +36,17 @@ data class PreviewState(
     val framesDecoded: Long = 0,
     val bytesReceived: Long = 0,
     val message: String? = null,
+    /** Rapporto reale dell'immagine, ricavato dal JPEG o dal formato di uscita del decoder. */
+    val displayAspectRatio: Float = DEFAULT_PREVIEW_ASPECT_RATIO,
+    val frameWidth: Int = 0,
+    val frameHeight: Int = 0,
 ) {
     /** Il flusso video disegna su una Surface, il MJPEG su una Image: la UI deve saperlo. */
     val usesSurface: Boolean get() = source == PreviewSource.VIDEO
+
+    companion object {
+        const val DEFAULT_PREVIEW_ASPECT_RATIO = 16f / 9f
+    }
 }
 
 /**
@@ -102,6 +110,9 @@ class PreviewController(
                 _state.value = _state.value.copy(
                     frame = bitmap,
                     framesDecoded = count,
+                    displayAspectRatio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1),
+                    frameWidth = bitmap.width,
+                    frameHeight = bitmap.height,
                     message = null,
                 )
             }
@@ -135,6 +146,9 @@ class PreviewController(
             _state.value = _state.value.copy(
                 framesDecoded = decoder.framesDecoded,
                 bytesReceived = decoder.bytesReceived,
+                displayAspectRatio = decoder.displayAspectRatio,
+                frameWidth = decoder.displayWidth,
+                frameHeight = decoder.displayHeight,
                 message = if (decoder.framesDecoded > 0) null else "In attesa del primo keyframe…",
             )
         }
@@ -144,7 +158,7 @@ class PreviewController(
         job?.cancel()
         job = null
         decoder.release()
-        if (_state.value.source == PreviewSource.VIDEO) {
+        if (_state.value.source == PreviewSource.VIDEO && session.state.value == it.persoft.lunaultra.camera.ConnectionState.CONNECTED) {
             scope.launch { commands.stopLiveStream() }
         }
         _state.value = PreviewState()
@@ -193,10 +207,13 @@ class PreviewController(
 
     private suspend fun copySurfaceFrame(): Bitmap? {
         val target = surface?.takeIf(Surface::isValid) ?: return null
-        // La preview Luna è 16:9. Si copia già ridotta: il log non deve trattenere frame HD.
+        // Copia con lo stesso rapporto della Surface: forzare 16:9 deformava anche le immagini
+        // diagnostiche quando lo stream della modalità corrente aveva un altro formato.
+        val aspect = _state.value.displayAspectRatio.takeIf { it.isFinite() && it > 0f }
+            ?: PreviewState.DEFAULT_PREVIEW_ASPECT_RATIO
         val bitmap = Bitmap.createBitmap(
             DIAGNOSTIC_THUMB_SIZE,
-            (DIAGNOSTIC_THUMB_SIZE * 9f / 16f).roundToInt(),
+            (DIAGNOSTIC_THUMB_SIZE / aspect).roundToInt().coerceAtLeast(1),
             Bitmap.Config.ARGB_8888,
         )
         val success = suspendCancellableCoroutine { continuation ->

@@ -26,6 +26,7 @@ import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class GimbalCalibrationState(
     val running: Boolean = false,
@@ -84,6 +85,25 @@ internal fun formatAxisLimitSummary(limits: GimbalAxisLimits): String = buildStr
 }
 
 /**
+ * Posizione della casa lungo la corsa, dai soli tempi comandati.
+ *
+ * [toMinimumMs] è il tempo di comando speso per andare da casa al primo fine corsa, [spanMs]
+ * quello speso per percorrere la corsa intera fra i due: alla stessa intensità il loro rapporto
+ * è la frazione di corsa a cui sta la casa, e la velocità — ignota proprio mentre la si sta
+ * misurando — si semplifica. Zero significa "non misurabile", e allora non si inventa nulla.
+ */
+internal fun homeDegreesFromTravel(
+    minimumDeg: Float,
+    maximumDeg: Float,
+    toMinimumMs: Long,
+    spanMs: Long,
+): Float {
+    if (spanMs <= 0L) return 0f
+    val fraction = (toMinimumMs.toFloat() / spanMs.toFloat()).coerceIn(0f, 1f)
+    return minimumDeg + (maximumDeg - minimumDeg) * fraction
+}
+
+/**
  * Trova prima i quattro fine corsa con avvicinamento rapido e rifinitura lenta, quindi misura la risposta
  * reale del comando dall'1% al 100%. Il riferimento zero è l'inquadratura frontale di avvio:
  * non viene confuso con il centro aritmetico della corsa asimmetrica.
@@ -113,6 +133,21 @@ class GimbalCalibrator(
     private var homePan = 0f
     private var homeTilt = 0f
     private var homeFrame: ByteArray? = null
+
+    /**
+     * Comandi inviati da casa in poi, raggruppati per intensità: intensità → millisecondi
+     * con segno. È questo che riporta la camera a casa, non le coordinate.
+     *
+     * Per disfare un movimento non serve sapere quanti gradi al secondo fa il gimbal: basta
+     * rimandare lo stesso comando, per lo stesso tempo, nel verso opposto. Il tempo è
+     * simmetrico anche quando la velocità è ignota — e durante la ricerca dei fine corsa la
+     * velocità *è* ignota, perché è esattamente quello che si sta per misurare. Tornare a casa
+     * con le coordinate significava fidarsi di un modello non ancora esistente: il ripiego era
+     * 30°/s per il pan e 20°/s per il tilt, valori di prima approssimazione, e con quelli la
+     * casa finiva calcolata a 75° di tilt quando era a un grado dall'orizzonte.
+     */
+    private val travelPan = LinkedHashMap<Int, Long>()
+    private val travelTilt = LinkedHashMap<Int, Long>()
 
     fun start(cameraModel: String, firmware: String) {
         if (job?.isActive == true) return
@@ -295,7 +330,7 @@ class GimbalCalibrator(
             // La validazione lavora sullo zero hardware, che è dove guarda il corpo camera:
             // finirla lì significherebbe lasciare la camera puntata dove non serve. Il profilo
             // ora è salvato, quindi il ritorno usa la curva appena misurata.
-            returnHome("Ritorno all'inquadratura di partenza", 99, 100)
+            returnHome("Ritorno all'inquadratura di partenza", 99, 100, byReplay = false)
             log.info(
                 "CALIBRAZIONE GIMBAL · COMPLETATA",
                 buildString {
@@ -403,7 +438,7 @@ class GimbalCalibrator(
                 verificationLabel = "MOVIMENTO MULTI-STEP IN CORSO",
             )
             val started = System.nanoTime()
-            gimbal.calibrationPulse(
+            calPulse(
                 panPercent = if (axis == GimbalCalibrationSample.AXIS_PAN) command else 0f,
                 tiltPercent = if (axis == GimbalCalibrationSample.AXIS_TILT) command else 0f,
                 durationMs = stepMs,
@@ -813,10 +848,11 @@ class GimbalCalibrator(
             val stepMs = min(remainingMs, if (stopAtLimit) VALIDATION_FINE_STEP_MS else VALIDATION_FAST_STEP_MS)
                 .toLong().coerceAtLeast(60L)
             val mark = limitMonitor.mark()
-            gimbal.calibrationPulse(
+            calPulse(
                 panPercent = if (panAxis) direction * intensityPercent / 100f else 0f,
                 tiltPercent = if (!panAxis) direction * intensityPercent / 100f else 0f,
                 durationMs = stepMs,
+                record = false,
             ).getOrElse { throw IllegalStateException("Movimento di validazione non riuscito: ${it.message}", it) }
             val stepDegrees = rate * stepMs / 1000f * direction
             predicted += stepDegrees
@@ -878,6 +914,7 @@ class GimbalCalibrator(
             movingPulses = positive.movingPulses,
             endpointConfidencePercent = positive.confidencePercent,
         )
+        locateHome(axis, limits, negative.movingDurationMs, positive.movingDurationMs)
         if (!limits.isValid) {
             throw IllegalStateException("Fine corsa ${axisLabel(axis)} non affidabili: libera il movimento della camera")
         }
@@ -919,7 +956,7 @@ class GimbalCalibrator(
             message = "Mi allontano dal limite prima della verifica lenta",
             verificationLabel = "FINE CORSA AGGANCIATO · PREPARO LA RIFINITURA",
         )
-        gimbal.calibrationPulse(
+        calPulse(
             panPercent = if (axis == GimbalCalibrationSample.AXIS_PAN) -direction * ENDSTOP_BACKOFF_INTENSITY else 0f,
             tiltPercent = if (axis == GimbalCalibrationSample.AXIS_TILT) -direction * ENDSTOP_BACKOFF_INTENSITY else 0f,
             durationMs = ENDSTOP_BACKOFF_MS,
@@ -992,11 +1029,10 @@ class GimbalCalibrator(
                 verificationLabel = "ATTENDO IL SEGNALE HARDWARE DI FINE CORSA",
             )
             val signalMark = limitMonitor.mark()
-            gimbal.calibrationPulse(
-                panPercent = if (axis == GimbalCalibrationSample.AXIS_PAN) direction * intensityPercent / 100f else 0f,
-                tiltPercent = if (axis == GimbalCalibrationSample.AXIS_TILT) direction * intensityPercent / 100f else 0f,
-                durationMs = pulseMs,
-            ).getOrElse { throw IllegalStateException("Ricerca fine corsa non riuscita: ${it.message}", it) }
+            val panCommand = if (axis == GimbalCalibrationSample.AXIS_PAN) direction * intensityPercent / 100f else 0f
+            val tiltCommand = if (axis == GimbalCalibrationSample.AXIS_TILT) direction * intensityPercent / 100f else 0f
+            calPulse(panCommand, tiltCommand, pulseMs, record = false)
+                .getOrElse { throw IllegalStateException("Ricerca fine corsa non riuscita: ${it.message}", it) }
             delay(ENDSTOP_SETTLE_MS)
             val hardwareLimit = limitMonitor.reached(axis, signalMark)
             val after = preview.captureThumbnailJpeg()
@@ -1016,6 +1052,10 @@ class GimbalCalibrator(
                 // Durante quest'ultimo impulso il gimbal ha percorso un tratto e poi si è
                 // fermato contro il limite: metà è la stima meno arbitraria che ci sia.
                 travelDurationMs = commandedDurationMs + pulseMs / 2
+                // Metà impulso ha mosso, metà è finita contro il limite: solo la prima va
+                // rigiocata all'indietro, o il ritorno supererebbe la casa.
+                recordTravel(travelPan, panCommand, pulseMs / 2)
+                recordTravel(travelTilt, tiltCommand, pulseMs / 2)
             } else if (acceptedVisualStill) {
                 consecutiveStill++
                 endpointConfidenceSum += verification.confidence
@@ -1025,6 +1065,8 @@ class GimbalCalibrator(
                 endpointConfidenceSum = 0f
                 movingPulses++
                 commandedDurationMs += pulseMs
+                recordTravel(travelPan, panCommand, pulseMs)
+                recordTravel(travelTilt, tiltCommand, pulseMs)
             }
             lastAnnotated = WaypointImageVerifier.annotatedCurrentJpeg(after, verification)
             val afterPosition = gimbal.position.value
@@ -1087,20 +1129,97 @@ class GimbalCalibrator(
     }
 
     /**
-     * Un fine corsa raggiunto ridefinisce le coordinate: quel punto *è* il limite dichiarato.
+     * Impulso di calibrazione che tiene il conto di quanto si è usciti di casa.
      *
-     * La casa non si muove nello spazio, ma cambia numero — e va traslata dello stesso scarto,
-     * altrimenti il ritorno a casa punterebbe a un angolo che non esiste più. È l'unico posto
-     * in cui il sistema di riferimento del modello viene riscritto.
+     * Tutti i movimenti della calibrazione passano da qui: è l'unico modo perché il ritorno
+     * possa essere esatto senza conoscere la velocità. [record] è falso per gli impulsi che
+     * non hanno prodotto movimento — quelli spesi contro un fine corsa — perché rigiocarli
+     * all'indietro farebbe superare la casa.
      */
+    private suspend fun calPulse(
+        panPercent: Float,
+        tiltPercent: Float,
+        durationMs: Long,
+        record: Boolean = true,
+    ): Result<Unit> {
+        if (record) {
+            recordTravel(travelPan, panPercent, durationMs)
+            recordTravel(travelTilt, tiltPercent, durationMs)
+        }
+        return gimbal.calibrationPulse(panPercent, tiltPercent, durationMs)
+    }
+
+    private fun recordTravel(into: MutableMap<Int, Long>, command: Float, durationMs: Long) {
+        if (command == 0f || durationMs <= 0L) return
+        val bucket = (abs(command) * 100f).roundToInt().coerceIn(1, 100)
+        val signed = if (command > 0f) durationMs else -durationMs
+        into[bucket] = (into[bucket] ?: 0L) + signed
+    }
+
+    /**
+     * Rigioca all'indietro i comandi accumulati, dai più forti ai più deboli.
+     *
+     * Stessa intensità, stesso tempo, verso opposto: la velocità si cancella da sola qualunque
+     * sia, e non serve nessun profilo. È l'unico ritorno affidabile prima che la curva esista.
+     */
+    private suspend fun replayHome() {
+        listOf(travelPan to true, travelTilt to false).forEach { (travel, panAxis) ->
+            travel.entries.sortedByDescending { it.key }.forEach { (intensity, netMs) ->
+                var remaining = abs(netMs)
+                val command = (if (netMs > 0L) -1f else 1f) * intensity / 100f
+                while (remaining > 0L) {
+                    val step = min(remaining, MAX_REPLAY_STEP_MS)
+                    calPulse(
+                        panPercent = if (panAxis) command else 0f,
+                        tiltPercent = if (panAxis) 0f else command,
+                        durationMs = step,
+                        record = false,
+                    ).getOrElse { throw IllegalStateException("Ritorno a casa non riuscito: ${it.message}", it) }
+                    remaining -= step
+                }
+            }
+            travel.clear()
+        }
+    }
+
+    /** Un fine corsa raggiunto ridefinisce le coordinate: quel punto *è* il limite dichiarato. */
     private fun anchorFrame(axis: String, anchorDeg: Float) {
         val panAxis = axis == GimbalCalibrationSample.AXIS_PAN
         val current = gimbal.position.value
-        val shift = anchorDeg - (if (panAxis) current.pan else current.tilt)
-        if (panAxis) homePan += shift else homeTilt += shift
         gimbal.setEstimated(
             pan = if (panAxis) anchorDeg else current.pan,
             tilt = if (panAxis) current.tilt else anchorDeg,
+        )
+    }
+
+    /**
+     * Dove sta la casa lungo la corsa, misurato invece che dedotto.
+     *
+     * Due tempi comandati alla stessa intensità: casa → primo fine corsa, e primo fine corsa →
+     * secondo. Il loro rapporto è la posizione della casa come frazione della corsa, e la
+     * velocità si semplifica — non serve saperla, il che è provvidenziale visto che è proprio
+     * quello che la calibrazione deve ancora misurare.
+     *
+     * È la correzione del difetto che portava la camera a fare la curva puntata al soffitto:
+     * la casa veniva integrata con le velocità di ripiego (30°/s e 20°/s) lungo tutta la
+     * ricerca dei fine corsa, e usciva a 75° di tilt quando era a un grado dall'orizzonte.
+     */
+    private fun locateHome(axis: String, limits: GimbalAxisLimits, toMinimumMs: Long, spanMs: Long) {
+        if (spanMs <= 0L) return
+        val fraction = (toMinimumMs.toFloat() / spanMs.toFloat()).coerceIn(0f, 1f)
+        val deg = homeDegreesFromTravel(limits.minimumDeg, limits.maximumDeg, toMinimumMs, spanMs)
+        val panAxis = axis == GimbalCalibrationSample.AXIS_PAN
+        if (panAxis) homePan = deg else homeTilt = deg
+        log.info(
+            "CALIBRAZIONE · CASA SULL'ASSE ${axisLabel(axis).uppercase()}",
+            buildString {
+                appendLine("Da casa al primo fine corsa: %.1f s di comando".format(toMinimumMs / 1000f))
+                appendLine("Corsa intera fra i due fine corsa: %.1f s".format(spanMs / 1000f))
+                append(
+                    "Casa al %.0f%% della corsa, cioè %.1f°. Misura di tempi alla stessa intensità: la velocità si semplifica."
+                        .format(fraction * 100f, deg),
+                )
+            },
         )
     }
 
@@ -1121,8 +1240,17 @@ class GimbalCalibrator(
         val safe = current.coerceIn(low, high)
         if (abs(safe - current) < 0.5f) return
         if (panAxis) homePan = safe else homeTilt = safe
+        // Il ritorno rigioca i comandi, quindi anche lo spostamento della casa va espresso in
+        // comandi: senza, si tornerebbe alla vecchia casa e questo spostamento non esisterebbe.
+        val rate = limits.spanDeg / limits.travelSecondsAtSweepIntensity
+        if (rate > 0f) {
+            val shiftMs = ((safe - current) / rate * 1000f).toLong()
+            val travel = if (panAxis) travelPan else travelTilt
+            val bucket = limits.sweepIntensityPercent.coerceIn(1, 100)
+            travel[bucket] = (travel[bucket] ?: 0L) - shiftMs
+        }
         // La miniatura di casa non vale più: guarda dove la casa non è più. Azzerandola, il
-        // ritorno si affida alle coordinate e poi riprende l'immagine da capo.
+        // ritorno riprende l'immagine da capo all'arrivo.
         homeFrame = null
         log.warn(
             "CALIBRAZIONE · CASA SPOSTATA SULL'ASSE ${axisLabel(axis).uppercase()}",
@@ -1141,7 +1269,12 @@ class GimbalCalibrator(
      * confronto non è affidabile — scena cambiata, poca luce — ci si ferma alle coordinate e
      * lo si scrive, invece di inseguire una correzione basata su punti che non corrispondono.
      */
-    private suspend fun returnHome(label: String, phaseStartPercent: Int, phaseEndPercent: Int) {
+    private suspend fun returnHome(
+        label: String,
+        phaseStartPercent: Int,
+        phaseEndPercent: Int,
+        byReplay: Boolean = true,
+    ) {
         _state.value = _state.value.copy(
             phaseLabel = label,
             overallPercent = phaseStartPercent,
@@ -1150,8 +1283,12 @@ class GimbalCalibrator(
             message = "Torno a pan %.0f° · tilt %.0f°".format(homePan, homeTilt),
             verificationLabel = "RITORNO ALL'INQUADRATURA DI PARTENZA",
         )
-        gimbal.moveToPosition(homePan, homeTilt, minimumSeconds = 0f)
-            .getOrElse { throw IllegalStateException("Ritorno all'inquadratura di partenza non riuscito: ${it.message}", it) }
+        if (byReplay) {
+            replayHome()
+        } else {
+            gimbal.moveToPosition(homePan, homeTilt, minimumSeconds = 0f)
+                .getOrElse { throw IllegalStateException("Ritorno all'inquadratura di partenza non riuscito: ${it.message}", it) }
+        }
         delay(HOME_SETTLE_MS)
 
         val arrived = awaitFrame("Verifico il ritorno all'inquadratura di partenza")
@@ -1429,5 +1566,8 @@ class GimbalCalibrator(
 
         /** Margine oltre l'arco di misura, perché la casa non finisca appiccicata al limite. */
         const val HOME_LIMIT_MARGIN_DEG = 10f
+
+        /** Il ritorno a casa viene spezzato in impulsi, come ogni altro movimento. */
+        const val MAX_REPLAY_STEP_MS = 700L
     }
 }

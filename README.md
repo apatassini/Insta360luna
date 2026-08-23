@@ -602,11 +602,24 @@ confronto fra fotogrammi è lo strumento con cui la calibrazione misura, e su un
 muove quello strumento non funziona.
 
 Adesso la casa è il riferimento: dopo i fine corsa del pan, dopo quelli del tilt, fra
-un'intensità e l'altra e alla fine, la camera ci torna. Il ritorno usa prima le coordinate e poi
-l'immagine — il modello porta vicino, il confronto con la miniatura di casa chiude gli ultimi
-pixel; se il confronto non è affidabile ci si ferma alle coordinate e il log lo dice. Se la casa
-è troppo vicina a un fine corsa per contenere gli archi di misura da 45°, viene spostata del
-minimo indispensabile e il log lo segnala.
+un'intensità e l'altra e alla fine, la camera ci torna.
+
+**Il ritorno non usa le coordinate: rigioca i comandi.** Per disfare un movimento non serve
+sapere quanti gradi al secondo fa il gimbal — basta rimandare lo stesso comando, per lo stesso
+tempo, nel verso opposto: il tempo è simmetrico anche quando la velocità è ignota. E durante la
+ricerca dei fine corsa la velocità *è* ignota, perché è esattamente ciò che si sta per misurare.
+Tornare a casa con le coordinate significava fidarsi di un modello non ancora esistente, il cui
+ripiego è 30°/s per il pan e 20°/s per il tilt: con quelli la casa usciva calcolata a 75° di tilt
+quando era a un grado dall'orizzonte, e la curva veniva misurata puntando il soffitto.
+
+Per lo stesso motivo **la posizione della casa in gradi è misurata, non integrata**: due tempi
+comandati alla stessa intensità — da casa al primo fine corsa, e da un fine corsa all'altro — e
+il loro rapporto dà la posizione della casa come frazione della corsa. La velocità si semplifica.
+
+Sull'arrivo c'è la rifinitura visiva: il confronto con la miniatura di casa chiude gli ultimi
+pixel, e se non è affidabile ci si ferma e il log lo dice. Se la casa è troppo vicina a un fine
+corsa per contenere gli archi di misura da 45°, viene spostata del minimo indispensabile e il log
+lo segnala.
 
 Restano un paio di minuti sullo zero hardware: sono i quattro collaudi finali, che verificano le
 coordinate contro i fine corsa e per definizione partono da lì. Finiti quelli, la camera torna a

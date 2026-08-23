@@ -216,6 +216,7 @@ fun ViewfinderScreen(
                     onZero = viewModel::zeroPosition,
                     onSelfie = viewModel::selfieTurn,
                     selfieEngaged = selfieEngaged,
+                    onBootZero = viewModel::returnToBootZero,
                     onCaptureWaypoint = viewModel::captureWaypoint,
                     compact = landscape,
                     modifier = Modifier

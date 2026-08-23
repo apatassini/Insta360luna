@@ -703,6 +703,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Zero di accensione: prima il lato fronte, poi il ricentraggio. */
+    fun returnToBootZero() {
+        viewModelScope.launch {
+            container.gimbal.returnToBootZero()
+                .onSuccess { showMessage("Gimbal sullo zero di accensione") }
+                .onFailure { showMessage("Zero di accensione non raggiunto: ${it.message}") }
+        }
+    }
+
     /** Cambia il ramo di cui cercare gli aggiornamenti; vuoto = quello che ha prodotto l'APK. */
     fun setUpdateBranch(branch: String) {
         container.settingsStore.update { it.copy(updateBranch = branch.trim()) }

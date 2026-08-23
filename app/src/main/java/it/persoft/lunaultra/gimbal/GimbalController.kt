@@ -66,6 +66,18 @@ class GimbalController(
     private val _selfieEngaged = MutableStateFlow(false)
     val selfieEngaged: StateFlow<Boolean> = _selfieEngaged
 
+    /**
+     * Profilo temporaneo che scavalca quello salvato.
+     *
+     * Durante la calibrazione il profilo definitivo non è ancora sul disco, ma quello parziale
+     * è già molto meglio del ripiego a 30°/s: passarglielo evita che il ritorno a casa usi
+     * numeri di prima approssimazione mentre in memoria ce ne sono di misurati.
+     */
+    @Volatile
+    private var overrideProfile: GimbalCalibrationProfile? = null
+
+    private fun activeProfile(): GimbalCalibrationProfile = overrideProfile ?: calibration.value
+
     /** Ultimo vettore realmente consegnato alla camera, per integrare il tempo reale. */
     private var appliedPanPercent = 0f
     private var appliedTiltPercent = 0f
@@ -227,6 +239,40 @@ class GimbalController(
         return moved
     }
 
+    /**
+     * Riporta la camera allo zero di accensione: quello vero, non quello del lato corrente.
+     *
+     * Misurato sulla camera: il ricentraggio (azione 2) agisce **sul lato in cui ci si trova**,
+     * e il lato dipende da dove è arrivato il pan — girando oltre il mezzo giro dalla partenza
+     * si passa nel lato selfie, e da lì "centro" vuol dire 180°, non 0°. È per questo che dopo
+     * una corsa completa del pan il ricentraggio inquadrava tutt'altro: non era il comando
+     * sbagliato, era l'altro lato.
+     *
+     * L'azione 3 commuta il lato. Quindi: se siamo nel lato selfie la si manda una volta per
+     * tornare sul fronte, poi si ricentra. Lo stato del lato è quello che l'app crede — la
+     * camera non lo pubblica — quindi resta una convinzione, e il log dice cosa è stato fatto.
+     */
+    suspend fun returnToBootZero(): Result<Unit> {
+        val cfg = settings.value.gimbal
+        if (cfg.selfieActionCode > 0 && _selfieEngaged.value) {
+            stop()
+            commands.gimbalAction(cfg.selfieActionCode).getOrElse { return Result.failure(it) }
+            _selfieEngaged.value = false
+            delay(RECENTER_SETTLE_MS)
+        }
+        val result = recenter()
+        if (result.isSuccess) {
+            delay(RECENTER_SETTLE_MS)
+            setEstimated(0f, 0f)
+            log.info(
+                "Gimbal riportato allo zero di accensione",
+                "Lato fronte, poi ricentraggio. Se la camera è stata girata dal suo schermo " +
+                    "questo può non bastare: il lato che l'app conosce è una convinzione.",
+            )
+        }
+        return result
+    }
+
     /** Fine corsa del pan: quelli misurati se la calibrazione è valida, altrimenti gli ufficiali. */
     private fun panTravelLimits(): Pair<Float, Float> {
         val measured = calibration.value.panLimits
@@ -284,8 +330,25 @@ class GimbalController(
         targetTilt: Float,
         minimumSeconds: Float = 0f,
         tickHz: Int = POSITION_TICK_HZ,
+        /** Profilo da usare al posto di quello salvato: serve alla calibrazione in corso. */
+        profileOverride: GimbalCalibrationProfile? = null,
     ): Result<Unit> {
         stop()
+        val previous = overrideProfile
+        overrideProfile = profileOverride
+        try {
+            return moveToPositionInternal(targetPan, targetTilt, minimumSeconds, tickHz)
+        } finally {
+            overrideProfile = previous
+        }
+    }
+
+    private suspend fun moveToPositionInternal(
+        targetPan: Float,
+        targetTilt: Float,
+        minimumSeconds: Float,
+        tickHz: Int,
+    ): Result<Unit> {
         val travel = max(minimumSeconds, estimatedTravelSeconds(targetPan, targetTilt))
         val duration = travel * POSITION_TIME_MARGIN + POSITION_SETTLE_MARGIN_SECONDS
         val rate = tickHz.coerceIn(1, 50)
@@ -405,7 +468,7 @@ class GimbalController(
 
     /** Preferisce la velocità in gradi/s misurata sulla corsa completa; usa la stima solo prima della calibrazione. */
     private fun maximumAngularSpeed(panAxis: Boolean): Float {
-        val profile = calibration.value
+        val profile = activeProfile()
         val measured = profile.maxAngularRate(panAxis)
         if (profile.isValid && measured > 0f) return measured
         val fallback = settings.value.gimbal
@@ -421,7 +484,7 @@ class GimbalController(
             if (panAxis) panDutyAccumulator = 0f else tiltDutyAccumulator = 0f
             return 0f
         }
-        val profile = calibration.value
+        val profile = activeProfile()
         if (!profile.isValid) return desiredFraction.coerceIn(-1f, 1f)
         val minimumMotion = abs(profile.motionFraction(MIN_PROTOCOL_COMMAND, panAxis))
         if (minimumMotion <= 0f || abs(desiredFraction) >= minimumMotion) {
@@ -440,7 +503,7 @@ class GimbalController(
 
     /** Dead reckoning: integra la velocità comandata nella posizione stimata. */
     private fun integrate(panPercent: Float, tiltPercent: Float, dtSeconds: Float) {
-        val profile = calibration.value
+        val profile = activeProfile()
         val cfg = settings.value.gimbal
         val current = _position.value
         val panMotion = profile.motionFraction(panPercent, panAxis = true)

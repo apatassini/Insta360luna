@@ -534,9 +534,21 @@ tre numeri vengono quindi dalla camera vera, provati uno a uno:
 
 Le due trappole, misurate:
 
-**La 2 non è uno zero assoluto.** Dal fronte ricentra sul fronte, dal selfie ricentra sul selfie.
-Raddrizza l'inquadratura, non stabilisce da che parte si guarda. Un comando di ritorno assoluto
-al fronte, se esiste, ha un altro numero e non è ancora stato trovato.
+**La 2 non è uno zero assoluto, e il lato dipende da dove sei arrivato.** La camera si accende
+sul fronte, a 0°. Girando il pan oltre il mezzo giro dalla partenza si passa nel lato selfie, e
+da lì «centro» vuol dire 180°: il ricentraggio riporta a *quel* centro, non a zero. È l'intera
+spiegazione di un comportamento che sembrava un baco del comando — dopo una corsa completa del
+pan, ricentrare inquadrava tutt'altro. Non era il comando sbagliato: era l'altro lato.
+
+Ne segue il modo di tornare allo zero vero, quello dell'accensione: **prima si commuta il lato
+con la 3, poi si ricentra con la 2**. Il mirino ha il pulsante apposta, nel pannello del gimbal.
+Il lato che l'app conosce resta però una convinzione — la camera non lo pubblica — quindi se il
+gimbal viene girato dal suo schermo l'app non se ne accorge.
+
+E ne segue anche una conseguenza sulla calibrazione: **la validazione non usa più il ricentraggio
+come riferimento assoluto**. I quattro collaudi partono da casa, la cui posizione è misurata come
+frazione della corsa e non cambia significato a seconda di dove si è passati. La camera non visita
+più lo zero hardware durante la calibrazione.
 
 **La 3 è un interruttore, non una rotazione.** Premuta una volta gira, premuta di nuovo torna. E
 la camera **non dice da che lato si trova**: nessuna notifica decodificata finora lo riporta, per

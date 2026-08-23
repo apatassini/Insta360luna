@@ -58,6 +58,7 @@ fun GimbalDock(
     onZero: () -> Unit,
     onSelfie: () -> Unit,
     selfieEngaged: Boolean,
+    onBootZero: () -> Unit,
     onCaptureWaypoint: () -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
@@ -87,6 +88,7 @@ fun GimbalDock(
                 onSpeedChange = onSpeedChange,
                 onHardwareSpeedChange = onHardwareSpeedChange,
                 onStop = onStop,
+                onBootZero = onBootZero,
                 onCaptureWaypoint = onCaptureWaypoint,
                 modifier = Modifier.align(Alignment.TopEnd).width(optionsWidth),
             )
@@ -145,6 +147,7 @@ private fun GimbalOptions(
     onSpeedChange: (Int) -> Unit,
     onHardwareSpeedChange: (Int) -> Unit,
     onStop: () -> Unit,
+    onBootZero: () -> Unit,
     onCaptureWaypoint: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -203,6 +206,13 @@ private fun GimbalOptions(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
+            HudIconButton(
+                icon = LunaIcons.Level,
+                contentDescription = "Torna allo zero di accensione (lato fronte)",
+                onClick = onBootZero,
+                enabled = enabled,
+                size = 38.dp,
+            )
             HudIconButton(
                 icon = LunaIcons.Waypoint,
                 contentDescription = "Memorizza punto e inquadratura",

@@ -550,38 +550,53 @@ class GimbalCalibrator(
 
         log.info(
             "CALIBRAZIONE · VALIDAZIONE",
-            "Questa fase lavora sullo zero hardware, non sulla casa: le coordinate del modello " +
-                "sono ancorate ai fine corsa e i quattro collaudi partono da lì. Sono un paio di " +
-                "minuti, poi la camera torna all'inquadratura di partenza.",
+            "I quattro collaudi partono da casa, non dallo zero hardware. Quello zero non è un " +
+                "punto fisso: il ricentraggio agisce sul lato in cui la camera si trova, e il " +
+                "lato dipende da quanto si è girato. Casa invece è misurata come frazione della " +
+                "corsa, e non cambia significato a seconda di dove si è passati.",
         )
-        recenterHardware("Zero di riferimento della validazione", 90, 90)
-        val zeroReference = awaitFrame("Attendo l'immagine dello zero di riferimento")
-        describeValidationZero(startReference, zeroReference)
 
         val zeroChecks = mutableListOf<ZeroCheck>()
         val measured = mutableListOf<AxisScale>()
+        // Il profilo si corregge strada facendo: il secondo collaudo parte già più preciso del
+        // primo, perché usa la scala misurata dal primo.
+        var working = profile
         targets.forEachIndexed { index, target ->
-            recenterHardware("Zero prima della verifica ${directionLabel(target.axis, target.endpoint)}", 90 + index * 2, 91 + index * 2)
-            zeroChecks += verifyRepeatedZero(zeroReference, index + 1, targets.size + 1)
-            val checkpoint = target.checkpoint.coerceIn(
-                min(0f, target.endpoint),
-                max(0f, target.endpoint),
+            returnHome(
+                "Ritorno a casa prima della verifica ${directionLabel(target.axis, target.endpoint)}",
+                90 + index * 2,
+                91 + index * 2,
+                byReplay = false,
+                profileOverride = working,
             )
+            gimbal.setEstimated(homePan, homeTilt)
+            zeroChecks += verifyRepeatedZero(homeFrame, index + 1, targets.size)
+            val homeDeg = if (target.axis == GimbalCalibrationSample.AXIS_PAN) homePan else homeTilt
+            // Da casa al fine corsa: questa è la distanza vera, e il fine corsa la certifica.
+            val trueDistance = target.endpoint - homeDeg
+            if (abs(trueDistance) < MIN_VALIDATION_DISTANCE_DEG) {
+                log.info(
+                    "CALIBRAZIONE · VALIDAZIONE ${directionLabel(target.axis, target.endpoint).uppercase()} SALTATA",
+                    "Casa è a %.1f° dal fine corsa: troppo vicina perché la misura significhi qualcosa."
+                        .format(abs(trueDistance)),
+                )
+                return@forEachIndexed
+            }
+            val checkpoint = trueDistance * VALIDATION_CHECKPOINT_FRACTION
             // Il modello viene spinto verso il fine corsa e si contano i gradi che *crede* di
             // aver percorso. Il fine corsa è verità: la camera lo annuncia. Il rapporto fra i
             // gradi veri e quelli creduti è la correzione di scala — l'informazione che questa
             // fase produce, e che prima veniva buttata via insieme a tutta la calibrazione.
             var commandedDeg = 0f
-            val first = movePredictedDegrees(profile, target.axis, checkpoint, VALIDATION_FAST_INTENSITY_PERCENT, true)
+            val first = movePredictedDegrees(working, target.axis, checkpoint, VALIDATION_FAST_INTENSITY_PERCENT, true)
             commandedDeg += first.predictedDegrees
             var reached = first.limitReached
 
             if (!reached) {
-                val remainder = target.endpoint - checkpoint
                 val approach = movePredictedDegrees(
-                    profile,
+                    working,
                     target.axis,
-                    remainder,
+                    trueDistance - checkpoint,
                     VALIDATION_FINE_INTENSITY_PERCENT,
                     true,
                 )
@@ -591,11 +606,11 @@ class GimbalCalibrator(
 
             // La finestra di ricerca è una frazione della corsa, non un numero fisso: su 235°
             // un margine di 16° è lo 0,7%, che qualunque errore di taratura consuma subito.
-            val searchLimitDeg = abs(target.endpoint) * VALIDATION_SEARCH_FRACTION + VALIDATION_EXTRA_SEARCH_DEG
-            val direction = kotlin.math.sign(target.endpoint)
-            while (!reached && abs(commandedDeg) < abs(target.endpoint) + searchLimitDeg) {
+            val searchLimitDeg = abs(trueDistance) * VALIDATION_SEARCH_FRACTION + VALIDATION_EXTRA_SEARCH_DEG
+            val direction = kotlin.math.sign(trueDistance)
+            while (!reached && abs(commandedDeg) < abs(trueDistance) + searchLimitDeg) {
                 val extra = movePredictedDegrees(
-                    profile,
+                    working,
                     target.axis,
                     VALIDATION_EXTRA_STEP_DEG * direction,
                     VALIDATION_FINE_INTENSITY_PERCENT,
@@ -606,15 +621,19 @@ class GimbalCalibrator(
             }
             if (!reached) {
                 throw IllegalStateException(
-                    "Il fine corsa ${directionLabel(target.axis, target.endpoint)} non arriva neanche dopo %.0f° comandati contro i %.0f° previsti: il gimbal è ostacolato oppure il segnale 8302 non arriva"
-                        .format(abs(commandedDeg), abs(target.endpoint)),
+                    "Il fine corsa ${directionLabel(target.axis, target.endpoint)} non arriva neanche dopo %.0f° comandati contro i %.0f° che lo separano da casa: il gimbal è ostacolato oppure il segnale 8302 non arriva"
+                        .format(abs(commandedDeg), abs(trueDistance)),
                 )
             }
 
+            // Il fine corsa è raggiunto: quel punto *è* il limite, e le coordinate lo dicono.
+            anchorFrame(target.axis, target.endpoint)
+
             // Reali / creduti. Sotto 1 il modello si credeva più veloce di quanto sia.
-            val scale = abs(target.endpoint) / abs(commandedDeg).coerceAtLeast(1f)
+            val scale = abs(trueDistance) / abs(commandedDeg).coerceAtLeast(1f)
             measured += AxisScale(target.axis, scale)
-            val errorDeg = abs(commandedDeg) - abs(target.endpoint)
+            working = applyRunningScale(working, target.axis, measured)
+            val errorDeg = abs(commandedDeg) - abs(trueDistance)
             _state.value = _state.value.copy(
                 overallPercent = 92 + index * 2,
                 axisLabel = axisLabel(target.axis),
@@ -629,8 +648,9 @@ class GimbalCalibrator(
             log.info(
                 "CALIBRAZIONE · VALIDAZIONE ${directionLabel(target.axis, target.endpoint).uppercase()}",
                 buildString {
-                    appendLine("Gradi comandati per arrivare al fine corsa: %.1f°".format(abs(commandedDeg)))
-                    appendLine("Gradi reali di quella corsa: %.1f°".format(abs(target.endpoint)))
+                    appendLine("Da casa (%.1f°) al fine corsa (%.1f°)".format(homeDeg, target.endpoint))
+                    appendLine("Gradi comandati per arrivarci: %.1f°".format(abs(commandedDeg)))
+                    appendLine("Gradi reali di quella corsa: %.1f°".format(abs(trueDistance)))
                     appendLine("Scarto del modello: %+.1f°".format(errorDeg))
                     append("Correzione di scala su questo asse e verso: ×%.3f".format(scale))
                 },
@@ -638,8 +658,9 @@ class GimbalCalibrator(
             )
         }
 
-        recenterHardware("Verifica finale dello zero", 98, 99)
-        zeroChecks += verifyRepeatedZero(zeroReference, targets.size + 1, targets.size + 1)
+        returnHome("Verifica finale di casa", 98, 99, byReplay = false, profileOverride = working)
+        gimbal.setEstimated(homePan, homeTilt)
+        zeroChecks += verifyRepeatedZero(homeFrame, targets.size, targets.size)
 
         val judged = zeroChecks.filter(ZeroCheck::comparable)
         val mismatches = judged.count(ZeroCheck::mismatch)
@@ -687,6 +708,23 @@ class GimbalCalibrator(
      * ragionevole non è una taratura ma un sintomo — gimbal ostacolato, segnale di limite
      * sbagliato, corsa diversa da quella dichiarata — e allora è giusto fermarsi.
      */
+    /** Scala parziale ricavata dai collaudi già fatti su quell'asse, per i successivi. */
+    private fun applyRunningScale(
+        profile: GimbalCalibrationProfile,
+        axis: String,
+        measured: List<AxisScale>,
+    ): GimbalCalibrationProfile {
+        val values = measured.filter { it.axis == axis }.map(AxisScale::scale)
+        if (values.isEmpty()) return profile
+        val scale = values.average().toFloat()
+            .coerceIn(GimbalCalibrationProfile.MIN_ANGULAR_SCALE, GimbalCalibrationProfile.MAX_ANGULAR_SCALE)
+        return if (axis == GimbalCalibrationSample.AXIS_PAN) {
+            profile.copy(panAngularScale = profile.panAngularScale * scale)
+        } else {
+            profile.copy(tiltAngularScale = profile.tiltAngularScale * scale)
+        }
+    }
+
     private fun applyMeasuredScale(
         profile: GimbalCalibrationProfile,
         measured: List<AxisScale>,
@@ -729,27 +767,27 @@ class GimbalCalibrator(
      * In nessun caso la ripetibilità dello zero butta via la curva già misurata: dice dove
      * guarda lo zero, non quanto è veloce il gimbal — sono due misure diverse.
      */
-    private suspend fun verifyRepeatedZero(zeroReference: ByteArray, attempt: Int, attempts: Int): ZeroCheck {
-        val current = awaitFrame("Verifico che il centro hardware sia sempre lo stesso")
-        val verification = WaypointImageVerifier.verify(zeroReference, current)
+    private suspend fun verifyRepeatedZero(reference: ByteArray?, attempt: Int, attempts: Int): ZeroCheck {
+        val current = awaitFrame("Verifico che l'inquadratura di casa sia sempre la stessa")
+        val verification = if (reference != null) WaypointImageVerifier.verify(reference, current) else null
         val check = classifyZero(verification)
         val annotated = WaypointImageVerifier.annotatedCurrentJpeg(current, verification)
         val detail = buildString {
-            appendLine(verification?.describe() ?: "Comando BACK_CENTER eseguito; scena non confrontabile.")
+            appendLine(verification?.describe() ?: "Nessun riferimento di casa confrontabile.")
             append(check.explanation)
         }
         if (check.mismatch) {
-            log.warn("CALIBRAZIONE · ZERO PRIMA DELLA PROVA $attempt", detail, imageJpeg = annotated)
+            log.warn("CALIBRAZIONE · CASA PRIMA DELLA PROVA $attempt", detail, imageJpeg = annotated)
         } else {
-            log.info("CALIBRAZIONE · ZERO PRIMA DELLA PROVA $attempt", detail, imageJpeg = annotated)
+            log.info("CALIBRAZIONE · CASA PRIMA DELLA PROVA $attempt", detail, imageJpeg = annotated)
         }
         _state.value = _state.value.copy(
             shiftX = verification?.shiftX ?: 0f,
             shiftY = verification?.shiftY ?: 0f,
             positioningPercent = verification?.let(::returnPositionPercent) ?: 0,
             verificationLabel = when {
-                check.mismatch -> "ZERO SPOSTATO · PROVA $attempt/$attempts"
-                check.comparable -> "ZERO RIPETIBILE · PROVA $attempt/$attempts"
+                check.mismatch -> "CASA SPOSTATA · PROVA $attempt/$attempts"
+                check.comparable -> "CASA RITROVATA · PROVA $attempt/$attempts"
                 else -> "SCENA CAMBIATA · PROVA $attempt/$attempts"
             },
             annotatedJpeg = annotated,
@@ -805,29 +843,6 @@ class GimbalCalibrator(
         )
     }
 
-    /**
-     * Registra dove guarda lo zero hardware rispetto alla casa.
-     *
-     * Non è un controllo: le due inquadrature *devono* essere diverse, perché sono due posti
-     * diversi. Serve a rendere leggibile il log — quando fra sei mesi si riguarderà questa
-     * calibrazione, la domanda sarà "ma cosa stava inquadrando?", e la risposta è qui.
-     */
-    private fun describeValidationZero(homeReference: ByteArray?, validationReference: ByteArray) {
-        val verification = homeReference?.let { WaypointImageVerifier.verify(it, validationReference) }
-        val sameScene = verification != null && controlPointPercent(verification) >= ZERO_MIN_INLIER_PERCENT
-        val detail = buildString {
-            appendLine("Questa è l'inquadratura dello zero hardware, il riferimento dei quattro collaudi.")
-            append(
-                if (sameScene) {
-                    "Coincide con la casa: la camera era già puntata sullo zero del suo corpo."
-                } else {
-                    "È un'altra scena rispetto alla casa, come previsto: lo zero hardware guarda " +
-                        "dove guarda il corpo camera, non dove è stata puntata."
-                },
-            )
-        }
-        log.info("CALIBRAZIONE · ZERO DI RIFERIMENTO DELLA VALIDAZIONE", detail, imageJpeg = validationReference)
-    }
 
     private suspend fun movePredictedDegrees(
         profile: GimbalCalibrationProfile,
@@ -1274,6 +1289,7 @@ class GimbalCalibrator(
         phaseStartPercent: Int,
         phaseEndPercent: Int,
         byReplay: Boolean = true,
+        profileOverride: GimbalCalibrationProfile? = null,
     ) {
         _state.value = _state.value.copy(
             phaseLabel = label,
@@ -1286,7 +1302,7 @@ class GimbalCalibrator(
         if (byReplay) {
             replayHome()
         } else {
-            gimbal.moveToPosition(homePan, homeTilt, minimumSeconds = 0f)
+            gimbal.moveToPosition(homePan, homeTilt, minimumSeconds = 0f, profileOverride = profileOverride)
                 .getOrElse { throw IllegalStateException("Ritorno all'inquadratura di partenza non riuscito: ${it.message}", it) }
         }
         delay(HOME_SETTLE_MS)
@@ -1362,49 +1378,7 @@ class GimbalCalibrator(
         return -kotlin.math.sign(errorPixels) * kotlin.math.sign(rate)
     }
 
-    /** Richiama `GIMBAL_ACTION_BACK_CENTER`: lo zero e deciso dal firmware, non dal cronometro. */
-    private suspend fun recenterHardware(
-        label: String,
-        phaseStartPercent: Int,
-        phaseEndPercent: Int,
-    ) {
-        _state.value = _state.value.copy(
-            phaseLabel = label,
-            overallPercent = phaseStartPercent,
-            axisLabel = "entrambi",
-            directionLabel = "centro",
-            intensityPercent = 0,
-            pulseMs = 0,
-            message = "Comando hardware di ritorno a 0°/0°",
-            verificationLabel = "RICENTRAGGIO HARDWARE IN CORSO",
-        )
-        gimbal.recenter().getOrElse { throw IllegalStateException("Ricentraggio hardware non riuscito: ${it.message}", it) }
-        waitForHardwareCenter()
-        gimbal.setEstimated(0f, 0f)
-        _state.value = _state.value.copy(
-            theoreticalPan = 0f,
-            theoreticalTilt = 0f,
-            overallPercent = phaseEndPercent,
-            verificationLabel = "ZERO HARDWARE 0°/0° RIPRISTINATO",
-        )
-        log.info("CALIBRAZIONE · $label", "Eseguito GIMBAL_ACTION_BACK_CENTER (payload 08 02). Coordinate teoriche azzerate.")
-    }
 
-    private suspend fun waitForHardwareCenter() {
-        delay(HARDWARE_CENTER_MIN_WAIT_MS)
-        var previous = preview.captureThumbnailJpeg()
-        var stableChecks = 0
-        repeat(HARDWARE_CENTER_MAX_CHECKS) {
-            delay(HARDWARE_CENTER_CHECK_MS)
-            val current = preview.captureThumbnailJpeg()
-            val verification = WaypointImageVerifier.verify(previous, current)
-            val stable = verification != null && verification.confidence >= 0.25f &&
-                verification.displacementPixels <= STABLE_RADIUS_PX
-            stableChecks = if (stable) stableChecks + 1 else 0
-            previous = current ?: previous
-            if (stableChecks >= HARDWARE_CENTER_STABLE_CHECKS) return
-        }
-    }
 
     private data class EndStopSearch(
         val totalPulses: Int,
@@ -1533,10 +1507,6 @@ class GimbalCalibrator(
         const val LOG_EVERY_STEPS = 12
         const val RETRY_PREVIEW_MS = 800L
         const val RETURN_ZERO_SCORE_RADIUS_PX = 28f
-        const val HARDWARE_CENTER_MIN_WAIT_MS = 3_000L
-        const val HARDWARE_CENTER_CHECK_MS = 300L
-        const val HARDWARE_CENTER_MAX_CHECKS = 30
-        const val HARDWARE_CENTER_STABLE_CHECKS = 3
         const val VALIDATION_FAST_INTENSITY_PERCENT = 100
         const val VALIDATION_FINE_INTENSITY_PERCENT = 20
         const val VALIDATION_FAST_STEP_MS = 800f
@@ -1546,6 +1516,12 @@ class GimbalCalibrator(
 
         /** Quanto oltre la corsa prevista si continua a cercare il fine corsa, in frazione. */
         const val VALIDATION_SEARCH_FRACTION = 0.35f
+
+        /** Il primo tratto verso il fine corsa, veloce; il resto si fa piano. */
+        const val VALIDATION_CHECKPOINT_FRACTION = 0.8f
+
+        /** Sotto questa distanza fra casa e fine corsa la misura di scala non dice nulla. */
+        const val MIN_VALIDATION_DISTANCE_DEG = 25f
 
         /** Scarto di scala oltre il quale il posizionamento mostrato scende a zero. */
         const val MAX_ACCEPTABLE_SCALE_ERROR = 0.25f

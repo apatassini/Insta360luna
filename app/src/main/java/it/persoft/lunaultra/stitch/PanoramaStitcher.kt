@@ -978,6 +978,84 @@ class PanoramaStitcher(
         }
     }
 
+    /**
+     * Ritaglia il nero ai bordi tenendo la parte visibile più grande possibile.
+     *
+     * La copertura vera di una panoramica non è mai rettangolare: fotogrammi corretti in
+     * altezza lasciano cunei neri in alto e in basso, e i bordi proiettati sono stirati. Si
+     * misurano le corse di nero da sinistra e da destra su ogni riga — il nero sta sempre al
+     * bordo, per costruzione — e poi si rosicchia dal lato che ne ha di più, un filo alla
+     * volta, finché ogni lato del rettangolo è quasi pulito. Non è il rettangolo massimo
+     * teorico, ma gli somiglia, e non taglia mai il centro.
+     *
+     * Sulle tele che chiudono il giro le colonne non si toccano: destra e sinistra sono lo
+     * stesso meridiano, e ritagliarle romperebbe la continuità.
+     */
+    private fun cropBlackEdges(bitmap: Bitmap, allowColumns: Boolean): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        val row = IntArray(width)
+        val leftRun = IntArray(height)
+        val rightRun = IntArray(height)
+        for (y in 0 until height) {
+            bitmap.getPixels(row, 0, width, 0, y, width, 1)
+            var left = 0
+            while (left < width && row[left] == EMPTY_PIXEL) left++
+            var right = 0
+            while (right < width - left && row[width - 1 - right] == EMPTY_PIXEL) right++
+            leftRun[y] = left
+            rightRun[y] = right
+        }
+
+        var top = 0
+        var bottom = height - 1
+        var left = 0
+        var right = width - 1
+        val minWidth = (width * MIN_CROP_KEEP).toInt().coerceAtLeast(16)
+        val minHeight = (height * MIN_CROP_KEEP).toInt().coerceAtLeast(16)
+
+        fun rowEmptiness(y: Int): Float {
+            val span = right - left + 1
+            val fromLeft = (leftRun[y] - left).coerceIn(0, span)
+            val fromRight = (rightRun[y] - (width - 1 - right)).coerceIn(0, span)
+            return (fromLeft + fromRight).coerceAtMost(span).toFloat() / span
+        }
+
+        fun columnEmptiness(atLeft: Boolean): Float {
+            var count = 0
+            for (y in top..bottom) {
+                val empty = if (atLeft) leftRun[y] > left else rightRun[y] > width - 1 - right
+                if (empty) count++
+            }
+            return count.toFloat() / (bottom - top + 1)
+        }
+
+        while (true) {
+            var worst = EDGE_EMPTY_TOLERANCE
+            var side = -1
+            if (bottom - top + 1 > minHeight) {
+                rowEmptiness(top).let { if (it > worst) { worst = it; side = 0 } }
+                rowEmptiness(bottom).let { if (it > worst) { worst = it; side = 1 } }
+            }
+            if (allowColumns && right - left + 1 > minWidth) {
+                columnEmptiness(atLeft = true).let { if (it > worst) { worst = it; side = 2 } }
+                columnEmptiness(atLeft = false).let { if (it > worst) { worst = it; side = 3 } }
+            }
+            when (side) {
+                0 -> top++
+                1 -> bottom--
+                2 -> left++
+                3 -> right--
+                else -> break
+            }
+        }
+
+        if (top == 0 && bottom == height - 1 && left == 0 && right == width - 1) return bitmap
+        val cropped = Bitmap.createBitmap(bitmap, left, top, right - left + 1, bottom - top + 1)
+        bitmap.recycle()
+        return cropped
+    }
+
     /** Legge un ritaglio che può avvolgersi oltre il bordo destro della tela. */
     private fun readRegion(bitmap: Bitmap, columns: IntArray, row0: Int, bw: Int, bh: Int, out: IntArray) {
         val rowPixels = IntArray(bitmap.width)

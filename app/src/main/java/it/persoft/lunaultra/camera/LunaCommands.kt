@@ -373,6 +373,40 @@ class LunaCommands(
     // ---- Media sulla camera ----
 
     /**
+     * Elimina file dalla scheda della camera. Ritorna i percorsi che la camera ha rifiutato.
+     *
+     * `DeleteFilesResp { repeated string fail_uri = 1 }`: la risposta nomina solo i falliti,
+     * quindi lista vuota = tutto eliminato. Il tempo cresce con i file — la camera cancella
+     * anche i compagni (LRV, DNG) — e il timeout ne tiene conto.
+     */
+    suspend fun deleteFiles(paths: List<String>): Result<List<String>> =
+        session.request(
+            LunaProtocolCodes.DELETE_FILES,
+            LunaMessages.deleteFiles(paths),
+            timeoutMs = DELETE_BASE_TIMEOUT_MS + paths.size * DELETE_PER_FILE_MS,
+        ).map { frame ->
+            ProtoReader(frame.payload).fields()
+                .filterIsInstance<ProtoField.LengthDelimited>()
+                .filter { it.number == 1 }
+                .map { String(it.value, Charsets.UTF_8) }
+        }
+
+    /** Scrive un «extra» su un file della scheda: il canale dei metadati post-scatto. */
+    suspend fun setFileExtra(uri: String, extraType: Int, data: ByteArray): Result<Unit> =
+        session.request(
+            LunaProtocolCodes.SET_FILE_EXTRA,
+            LunaMessages.setFileExtra(uri, extraType, data),
+        ).map { }
+
+    /** Rilegge un «extra» da un file della scheda, grezzo: chi chiama sa cosa aspettarsi. */
+    suspend fun getFileExtra(uri: String, extraType: Int): Result<ByteArray> =
+        session.request(
+            LunaProtocolCodes.GET_FILE_EXTRA,
+            LunaMessages.getFileExtra(uri, extraType),
+        ).map { it.payload }
+
+
+    /**
      * Una pagina dell'elenco dei file: i percorsi e il totale dichiarato dalla camera.
      *
      * Dal firmware 1.0.238 la camera non espone più l'indice HTTP delle cartelle, che è come si
@@ -589,6 +623,9 @@ class LunaCommands(
 
         /** Quanto si aspetta che la camera finisca di salvare prima di muovere il gimbal. */
         private const val CAPTURE_IDLE_TIMEOUT_MS = 8_000L
+
+        private const val DELETE_BASE_TIMEOUT_MS = 10_000L
+        private const val DELETE_PER_FILE_MS = 700L
 
         /** Ogni quanto si richiede lo stato mentre si aspetta: fitto ma non un martellamento. */
         /**

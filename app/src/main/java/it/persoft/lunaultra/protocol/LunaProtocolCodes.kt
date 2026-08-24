@@ -18,6 +18,16 @@ object LunaProtocolCodes {
     const val START_CAPTURE = 4
     const val STOP_CAPTURE = 5
     const val DELETE_FILES = 12
+
+    /**
+     * Lettura e scrittura degli «extra» di un file già sulla scheda.
+     *
+     * `SetFileExtra { string uri = 1; uint32 extra_type = 2; bytes data = 3 }`: è il canale con
+     * cui l'app ufficiale aggiunge GPS e metadati ai file dopo lo scatto. Se il firmware accetta
+     * un tipo nostro, il passaporto delle panoramiche può vivere direttamente sulla camera.
+     */
+    const val GET_FILE_EXTRA = 11
+    const val SET_FILE_EXTRA = 16
     const val GET_FILE_LIST = 13
     const val GET_MINI_THUMBNAIL = 30
     const val SET_OPTIONS = 7

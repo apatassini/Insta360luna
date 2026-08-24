@@ -163,6 +163,20 @@ fun DiagnosticsScreen(viewModel: MainViewModel) {
                     "riconoscibile: cancellalo dalla galleria quando hai finito.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            Text(
+                text = "La seconda prova usa il canale del protocollo (SET_FILE_EXTRA), quello " +
+                    "con cui l'app ufficiale aggiunge metadati ai file dopo lo scatto: scrive " +
+                    "un dato di prova accanto all'ultima foto e lo rilegge. Se torna identico, " +
+                    "il passaporto delle panoramiche può vivere sulla scheda.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(
+                onClick = viewModel::probeFileExtra,
+                enabled = connected,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                ButtonLabel(LunaIcons.Tune, "Prova il canale dei metadati")
+            }
         }
 
         SectionCard(title = "Invio manuale", icon = LunaIcons.Share, accent = Luna.Amber) {

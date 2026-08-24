@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -40,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -88,6 +90,7 @@ fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
     val viewer by viewModel.viewer.collectAsState()
     val favorites by viewModel.favorites.collectAsState()
     var filterIndex by rememberSaveable { mutableIntStateOf(0) }
+    var confirmDelete by remember { mutableStateOf(false) }
     val filter = GalleryFilter.entries[filterIndex]
 
     LaunchedEffect(Unit) { viewModel.refreshGallery() }
@@ -310,6 +313,14 @@ fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
                         activeColor = Luna.Pano,
                         selected = gallery.selected.size >= 2,
                     )
+                    HudIconButton(
+                        icon = LunaIcons.Delete,
+                        contentDescription = "Elimina dalla camera",
+                        onClick = { confirmDelete = true },
+                        enabled = gallery.selected.isNotEmpty(),
+                        size = 42.dp,
+                        activeColor = Luna.Rec,
+                    )
                     Spacer(modifier = Modifier.weight(1f))
                     Text(
                         text = "${gallery.selected.size}",
@@ -349,6 +360,31 @@ fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
                     }
                 }
             }
+        }
+
+        // Cancellare dalla scheda è irreversibile: il dialogo è il prezzo giusto.
+        if (confirmDelete) {
+            AlertDialog(
+                onDismissRequest = { confirmDelete = false },
+                title = { Text("Eliminare dalla camera?") },
+                text = {
+                    Text(
+                        "${gallery.selected.size} file verranno cancellati dalla scheda della " +
+                            "camera, insieme ai loro compagni (LRV, DNG). Non si torna indietro.",
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            confirmDelete = false
+                            viewModel.deleteSelectedFromCamera()
+                        },
+                    ) { Text("Elimina") }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { confirmDelete = false }) { Text("Annulla") }
+                },
+            )
         }
 
         viewer.item?.let { open ->

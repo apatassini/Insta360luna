@@ -2362,6 +2362,85 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---------------------------------------------------------------- preferiti
 
+    /**
+     * Elimina dalla scheda della camera i file selezionati. Irreversibile, e infatti chi
+     * chiama è il dialogo di conferma, mai un pulsante diretto.
+     *
+     * I preferiti dei file eliminati si dimenticano: una stella su un file che non esiste
+     * più è un conteggio che non torna.
+     */
+    fun deleteSelectedFromCamera() {
+        val paths = _gallery.value.selected.toList()
+        if (paths.isEmpty()) return
+        viewModelScope.launch {
+            showMessage("Elimino ${paths.size} file…")
+            container.commands.deleteFiles(paths)
+                .onSuccess { failed ->
+                    val removed = paths.size - failed.size
+                    container.log.info(
+                        "Eliminati $removed file dalla camera",
+                        if (failed.isEmpty()) null
+                        else "Rifiutati: ${failed.joinToString()}",
+                    )
+                    container.favoritesStore.update { favorites ->
+                        favorites.copy(paths = favorites.paths - paths.toSet())
+                    }
+                    _gallery.value = _gallery.value.copy(selected = emptySet())
+                    lastKnownNewestPhotoPath = null
+                    refreshGallery(force = true)
+                    showMessage(
+                        if (failed.isEmpty()) "$removed file eliminati"
+                        else "$removed eliminati · ${failed.size} rifiutati dalla camera",
+                    )
+                }
+                .onFailure { showMessage("Eliminazione non riuscita: ${it.message}") }
+        }
+    }
+
+    /**
+     * La prova del canale «extra»: si può scrivere qualcosa dentro un file della scheda?
+     *
+     * `SET_FILE_EXTRA` è il comando con cui l'app ufficiale aggiunge metadati ai file dopo lo
+     * scatto. Se il firmware accetta anche un tipo nostro e lo rilegge uguale, il passaporto
+     * delle panoramiche può vivere sulla camera invece che solo sulle copie. Non tocca i pixel:
+     * scrive un blocco dati accanto, e la prova lo rilegge subito per dire com'è andata.
+     */
+    fun probeFileExtra() {
+        viewModelScope.launch {
+            val target = _gallery.value.items.firstOrNull { !it.isVideo }
+                ?: container.media.list().getOrNull()?.firstOrNull { !it.isVideo }
+            if (target == null) {
+                showMessage("Serve almeno una foto sulla camera per la prova")
+                return@launch
+            }
+            val payload = "LUNAPANO-PROVA-${System.currentTimeMillis()}"
+            container.log.info(
+                "PROVA SET_FILE_EXTRA",
+                "File: ${target.path}\nTipo: $PROBE_EXTRA_TYPE · ${payload.length} byte",
+            )
+            container.commands.setFileExtra(target.path, PROBE_EXTRA_TYPE, payload.toByteArray())
+                .onSuccess { container.log.info("SET_FILE_EXTRA accettato dalla camera") }
+                .onFailure { container.log.warn("SET_FILE_EXTRA rifiutato: ${it.message}") }
+            container.commands.getFileExtra(target.path, PROBE_EXTRA_TYPE)
+                .onSuccess { bytes ->
+                    val text = String(bytes, Charsets.UTF_8)
+                    if (text.contains(payload)) {
+                        container.log.info(
+                            "GET_FILE_EXTRA riletto: il dato è tornato identico",
+                            "Il passaporto delle panoramiche può vivere sulla scheda.",
+                        )
+                    } else {
+                        container.log.warn(
+                            "GET_FILE_EXTRA risponde ma il dato non è il nostro",
+                            "${bytes.size} byte: ${Hex.encode(bytes, limit = 48)}",
+                        )
+                    }
+                }
+                .onFailure { container.log.warn("GET_FILE_EXTRA rifiutato: ${it.message}") }
+            showMessage("Prova finita: l'esito è nel log")
+        }
+    }
+
     fun toggleFavorite(item: MediaItem) {
         container.favoritesStore.update { it.toggled(item.path) }
     }
@@ -2568,6 +2647,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          * appesa. Largo apposta: con il buffer pieno la coda vera può essere di più scatti.
          */
         const val SINGLE_SHOT_SAVE_TIMEOUT_MS = 20_000L
+
+        /** Un tipo alto e improbabile: se il firmware lo accetta, è spazio libero per noi. */
+        const val PROBE_EXTRA_TYPE = 200
 
         /** Attesa fra l'azione di prova e la miniatura di confronto: il gimbal deve arrivare. */
         const val GIMBAL_ACTION_PROBE_WAIT_MS = 4_000L

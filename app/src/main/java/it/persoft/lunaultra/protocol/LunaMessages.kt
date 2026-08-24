@@ -350,6 +350,28 @@ object LunaMessages {
      * La risposta è `GetFileListResp { repeated string uri = 1; uint32 total_count = 2 }`.
      * L'elenco arriva a pagine: il totale dichiarato serve a sapere quando fermarsi.
      */
+    /** `DeleteFiles { repeated string uri = 1 }`: i percorsi come li dà l'elenco. */
+    fun deleteFiles(paths: List<String>): ByteArray {
+        val writer = ProtoWriter()
+        paths.forEach { writer.string(1, it) }
+        return writer.toByteArray()
+    }
+
+    /** `SetFileExtra { string uri = 1; uint32 extra_type = 2; bytes data = 3 }`. */
+    fun setFileExtra(uri: String, extraType: Int, data: ByteArray): ByteArray =
+        ProtoWriter()
+            .string(1, uri)
+            .int32(2, extraType)
+            .bytes(3, data)
+            .toByteArray()
+
+    /** `GetFileExtra { string uri = 1; uint32 extra_type = 2 }`. */
+    fun getFileExtra(uri: String, extraType: Int): ByteArray =
+        ProtoWriter()
+            .string(1, uri)
+            .int32(2, extraType)
+            .toByteArray()
+
     fun getFileList(mediaType: Int, start: Int, limit: Int): ByteArray =
         ProtoWriter()
             .int32(1, mediaType)

@@ -316,6 +316,35 @@ class LunaCommands(
             )
         }
 
+    // ---- Risoluzione foto ----
+
+    /** L'enum `PhotoSize` corrente (opzione 2): l'Ultra/Standard dell'app ufficiale. */
+    suspend fun fetchPhotoSize(): Int? =
+        session.request(
+            LunaProtocolCodes.GET_OPTIONS,
+            LunaMessages.getOptions(OptionType.PHOTO_SIZE),
+        ).map { frame ->
+            optionsReader(frame).intOrNull(OPTIONS, OptionsField.PHOTO_SIZE)
+        }.getOrNull()
+
+    /**
+     * Imposta la risoluzione foto e **rilegge**: questo firmware non dice mai di no, quindi
+     * la verità è il valore che torna indietro. Restituisce quello.
+     */
+    suspend fun setPhotoSize(value: Int): Result<Int?> =
+        session.request(
+            LunaProtocolCodes.SET_OPTIONS,
+            LunaMessages.setOption(OptionType.PHOTO_SIZE, OptionsField.PHOTO_SIZE, value),
+        ).map {
+            val actual = fetchPhotoSize()
+            log.info(
+                "Risoluzione foto: chiesta ${LunaProtocolCodes.PhotoSize.label(value)}",
+                "La camera ora dichiara: " +
+                    (actual?.let { v -> LunaProtocolCodes.PhotoSize.label(v) } ?: "nessun valore"),
+            )
+            actual
+        }
+
     // ---- Registrazione ----
 
     /** `StartCapture { CaptureMode mode = 1 }` */

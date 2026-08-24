@@ -30,6 +30,28 @@ object LunaProtocolCodes {
     const val SET_FILE_EXTRA = 16
 
     /** Valori di `ExtraMetadata.ExtraType`: gli unici che il firmware registra. */
+    /**
+     * L'enum `PhotoSize` dell'estrazione: la risoluzione con cui la camera scatta.
+     *
+     * I due valori 4:3 pieni sono i candidati per l'Ultra/Standard dell'app ufficiale:
+     * 8000×6000 (48 MP) e 4000×3000 (12 MP). L'app scrive e **rilegge**: questo firmware
+     * accetta tutto in silenzio, quindi la verità è il valore che torna indietro — se la
+     * camera dichiara un numero diverso da questi, il log lo dice e si aggiusta la mappa.
+     */
+    object PhotoSize {
+        const val ULTRA_48MP = 7
+        const val STANDARD_12MP = 3
+
+        private val names = mapOf(
+            0 to "6912×3456", 1 to "6272×3136", 2 to "6080×3040", 3 to "Standard · 12 MP (4000×3000)",
+            4 to "4000×2250", 5 to "5212×3542", 6 to "5312×2988", 7 to "Ultra · 48 MP (8000×6000)",
+            8 to "8000×4500", 9 to "2976×2976", 10 to "5984×5984", 11 to "11968×5984",
+            12 to "5952×2976",
+        )
+
+        fun label(value: Int): String = names[value] ?: "sconosciuta (#$value)"
+    }
+
     object ExtraType {
         const val METADATA = 1
         const val THUMBNAIL = 2
@@ -156,6 +178,8 @@ object LunaProtocolCodes {
 
     /** Valori di `insta360.messages.OptionType` usati dall'app. */
     object OptionType {
+        /** `PHOTO_SIZE`: la risoluzione delle foto, l'Ultra/Standard dell'app ufficiale. */
+        const val PHOTO_SIZE = 2
         const val CAPTURE_TIME_LIMIT = 7
         const val BATTERY_STATUS = 11
         const val LOCAL_TIME = 12
@@ -178,6 +202,7 @@ object LunaProtocolCodes {
 
     /** Numeri di campo di `insta360.messages.Options`. */
     object OptionsField {
+        const val PHOTO_SIZE = 2
         const val BATTERY_STATUS = 11
         const val SERIAL_NUMBER = 15
         const val STORAGE_STATE = 20

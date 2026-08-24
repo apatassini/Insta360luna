@@ -303,6 +303,7 @@ fun ViewfinderScreen(
                     settings = settings.photo,
                     onProMode = viewModel::setPhotoProMode,
                     onTimer = viewModel::setPhotoTimer,
+                    onResolution = viewModel::setPhotoResolution,
                     onRawCapture = viewModel::setPhotoRawCapture,
                     onZoom = viewModel::setPhotoZoom,
                     onBrightness = viewModel::setPhotoBrightness,

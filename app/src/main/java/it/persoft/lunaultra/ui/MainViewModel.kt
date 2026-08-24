@@ -614,6 +614,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     }
                             }
                         }
+                        // La risoluzione foto si legge dalla camera, che può essere stata
+                        // cambiata dal suo schermo: l'interruttore mostra la verità.
+                        refreshPhotoSize()
                         // Finché si è connessi si sta fotografando: il diario annota dove,
                         // così le copie scaricate ricevono le coordinate negli EXIF.
                         locationJob = viewModelScope.launch {
@@ -1978,6 +1981,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setPhotoRawCapture(type: Int) = updatePhotoSettings {
         it.copy(rawCaptureType = type.coerceIn(LunaProtocolCodes.RawCaptureType.OFF, LunaProtocolCodes.RawCaptureType.DNG))
+    }
+
+    /**
+     * Ultra o Standard: la risoluzione delle foto, come nell'app ufficiale.
+     *
+     * Si scrive sulla camera e si crede solo alla rilettura: questo firmware accetta tutto in
+     * silenzio, quindi ciò che l'interruttore mostra è ciò che la camera ha dichiarato, non
+     * ciò che le è stato chiesto. Se i due non coincidono, i numeri della mappa sono da
+     * correggere e il log dice quali sono quelli veri.
+     */
+    fun setPhotoResolution(sizeCode: Int) {
+        viewModelScope.launch {
+            container.commands.setPhotoSize(sizeCode)
+                .onSuccess { actual ->
+                    updatePhotoSettings { it.copy(photoSizeCode = actual ?: -1) }
+                    if (actual == sizeCode) {
+                        showMessage("Risoluzione foto: ${LunaProtocolCodes.PhotoSize.label(sizeCode)}")
+                    } else {
+                        showMessage(
+                            "La camera dichiara " +
+                                (actual?.let { LunaProtocolCodes.PhotoSize.label(it) } ?: "nessuna risoluzione") +
+                                ": mandami il log",
+                        )
+                    }
+                }
+                .onFailure { showMessage("Risoluzione non impostata: ${it.message}") }
+        }
+    }
+
+    /** Legge dalla camera la risoluzione foto attuale, per mostrare la verità e non un ricordo. */
+    private fun refreshPhotoSize() {
+        viewModelScope.launch {
+            val code = container.commands.fetchPhotoSize() ?: return@launch
+            if (code != settings.value.photo.photoSizeCode) {
+                updatePhotoSettings { it.copy(photoSizeCode = code) }
+            }
+            container.log.info("Risoluzione foto attuale: ${LunaProtocolCodes.PhotoSize.label(code)}")
+        }
     }
 
     fun setPhotoBrightness(value: Int) = updatePhotoSettings { it.copy(brightness = value.coerceIn(-2, 2)) }

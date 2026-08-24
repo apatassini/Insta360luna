@@ -77,6 +77,12 @@ data class PhotoSettings(
     val whiteBalanceKelvin: Int = 0,
     /** Arresti verificati dalla Luna: 1×, 2×, 3×, 6× e 12×. */
     val zoomScale: Int = 1,
+    /**
+     * L'enum `PhotoSize` dichiarato dalla camera (-1 = non ancora letto). Non è un desiderio:
+     * è ciò che la camera ha risposto all'ultima lettura, e l'interruttore Ultra/Standard
+     * mostra questo.
+     */
+    val photoSizeCode: Int = -1,
 )
 
 /** Impostazioni video verificate sulla Luna Ultra e applicate alla modalità attiva. */

@@ -35,7 +35,7 @@ import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
 import kotlin.math.roundToInt
 
-private enum class PhotoControl { TIMER, FORMAT, ZOOM, BRIGHTNESS, EV, WHITE_BALANCE }
+private enum class PhotoControl { TIMER, RESOLUTION, FORMAT, ZOOM, BRIGHTNESS, EV, WHITE_BALANCE }
 
 /**
  * Regolazioni fotografiche compatte: una riga rimane discreta, il dettaglio della sola voce
@@ -47,6 +47,7 @@ fun PhotoControlsSheet(
     settings: PhotoSettings,
     onProMode: (Boolean) -> Unit,
     onTimer: (Int) -> Unit,
+    onResolution: (Int) -> Unit,
     onRawCapture: (Int) -> Unit,
     onZoom: (Int) -> Unit,
     onBrightness: (Int) -> Unit,
@@ -109,6 +110,19 @@ fun PhotoControlsSheet(
             }
             item {
                 SettingChip(
+                    label = "RISOLUZIONE",
+                    value = when (settings.photoSizeCode) {
+                        LunaProtocolCodes.PhotoSize.ULTRA_48MP -> "Ultra"
+                        LunaProtocolCodes.PhotoSize.STANDARD_12MP -> "Standard"
+                        -1 -> "—"
+                        else -> "#${settings.photoSizeCode}"
+                    },
+                    selected = open == PhotoControl.RESOLUTION,
+                    onClick = { open = open.toggle(PhotoControl.RESOLUTION) },
+                )
+            }
+            item {
+                SettingChip(
                     label = "FORMATO",
                     value = if (settings.rawCaptureType == LunaProtocolCodes.RawCaptureType.DNG) "JPG+DNG" else "JPG",
                     selected = open == PhotoControl.FORMAT,
@@ -149,6 +163,16 @@ fun PhotoControlsSheet(
                 selected = settings.timerSeconds,
                 label = { if (it == 0) "Off" else "${it}s" },
                 onSelect = onTimer,
+            )
+
+            PhotoControl.RESOLUTION -> ChoiceRow(
+                values = listOf(
+                    LunaProtocolCodes.PhotoSize.ULTRA_48MP,
+                    LunaProtocolCodes.PhotoSize.STANDARD_12MP,
+                ),
+                selected = settings.photoSizeCode,
+                label = { LunaProtocolCodes.PhotoSize.label(it) },
+                onSelect = onResolution,
             )
 
             PhotoControl.FORMAT -> ChoiceRow(

@@ -328,13 +328,23 @@ class PanoramaStitcher(
     }
 
     /**
-     * Dipinge la tela, un nastro di righe per volta.
+     * Dipinge la tela: ogni pixel viene da *un* fotogramma, e la fusione vive solo sulla cucitura.
      *
-     * A nastri e non tutta insieme per una ragione di memoria: sommare i contributi pesati
-     * richiede tre accumulatori a virgola mobile più i pesi per ogni pixel, cioè quattro volte
-     * quello che occupa il risultato. Su una tela grande sarebbero centinaia di megabyte e il
-     * telefono chiuderebbe l'app. Un nastro per volta costa quanto il nastro, e il risultato è
-     * identico perché ogni pixel dipende solo da sé.
+     * La prima versione mediava tutti i fotogrammi che coprivano il punto, pesati con la
+     * sfumatura: su una sovrapposizione del trenta per cento significava una doppia esposizione
+     * larga venti gradi, e ogni errore residuo di allineamento diventava un fantasma — tronchi
+     * semitrasparenti, sdraio sdoppiate. È il difetto visto sulla prima panoramica riuscita.
+     *
+     * Adesso si fa come i programmi seri di stitching: si sceglie, punto per punto, il
+     * fotogramma che lì è più «a casa sua» (il peso della sfumatura misura proprio questo:
+     * pieno al centro, povero sul bordo), e si fonde con il secondo migliore solo dove i due
+     * pesi quasi si equivalgono — cioè in una striscia stretta a cavallo della cucitura. Fuori
+     * dalla striscia ogni pixel è puro: un oggetto che si muove fra due scatti viene tagliato
+     * da una parte o dall'altra, non stampato due volte. Il salto di esposizione lo pareggia
+     * il guadagno calcolato prima, che resta.
+     *
+     * A nastri di righe per una ragione di memoria: servono due candidati per pixel, e su una
+     * tela intera sarebbero centinaia di megabyte.
      */
     private suspend fun compose(
         frames: List<Frame>,
@@ -345,16 +355,18 @@ class PanoramaStitcher(
         val output = Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
         val gains = exposureGains(frames, placements, lens, canvas)
         val bandRows = min(BAND_ROWS, canvas.height)
-        val accumulator = FloatArray(canvas.width * bandRows * 3)
-        val weights = FloatArray(canvas.width * bandRows)
+        val bestWeight = FloatArray(canvas.width * bandRows)
+        val bestColor = IntArray(canvas.width * bandRows)
+        val secondWeight = FloatArray(canvas.width * bandRows)
+        val secondColor = IntArray(canvas.width * bandRows)
         val row = IntArray(canvas.width * bandRows)
 
         var top = 0
         while (top < canvas.height) {
             currentCoroutineContext().ensureActive()
             val rows = min(bandRows, canvas.height - top)
-            java.util.Arrays.fill(accumulator, 0f)
-            java.util.Arrays.fill(weights, 0f)
+            java.util.Arrays.fill(bestWeight, 0f)
+            java.util.Arrays.fill(secondWeight, 0f)
 
             frames.forEachIndexed { index, frame ->
                 val placement = placements[index]
@@ -367,33 +379,46 @@ class PanoramaStitcher(
                         val weight = featherWeight(point.x, point.y, frame.width, frame.height)
                         if (weight <= 0f) continue
                         val color = sample(frame, point.x, point.y)
-                        val base = (y * canvas.width + x) * 3
-                        accumulator[base] += weight * gain * ((color shr 16) and 0xFF)
-                        accumulator[base + 1] += weight * gain * ((color shr 8) and 0xFF)
-                        accumulator[base + 2] += weight * gain * (color and 0xFF)
-                        weights[y * canvas.width + x] += weight
+                        val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val gained = (r shl 16) or (g shl 8) or b
+                        val i = y * canvas.width + x
+                        if (weight > bestWeight[i]) {
+                            secondWeight[i] = bestWeight[i]
+                            secondColor[i] = bestColor[i]
+                            bestWeight[i] = weight
+                            bestColor[i] = gained
+                        } else if (weight > secondWeight[i]) {
+                            secondWeight[i] = weight
+                            secondColor[i] = gained
+                        }
                     }
                 }
             }
 
             for (i in 0 until canvas.width * rows) {
-                val weight = weights[i]
-                row[i] = if (weight <= 0f) {
+                val first = bestWeight[i]
+                row[i] = when {
                     // Nessun fotogramma copre questo punto: la tela è rettangolare ma la
                     // panoramica non lo è, e gli angoli restano vuoti. Nero, non trasparente:
                     // un JPEG non ha trasparenza e la trasparenza diventerebbe bianco.
-                    0xFF000000.toInt()
-                } else {
-                    val base = i * 3
-                    val r = (accumulator[base] / weight).roundToInt().coerceIn(0, 255)
-                    val g = (accumulator[base + 1] / weight).roundToInt().coerceIn(0, 255)
-                    val b = (accumulator[base + 2] / weight).roundToInt().coerceIn(0, 255)
-                    (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    first <= 0f -> 0xFF000000.toInt()
+                    secondWeight[i] <= 0f -> 0xFF000000.toInt() or bestColor[i]
+                    else -> {
+                        val alpha = seamAlpha(first, secondWeight[i])
+                        val c1 = bestColor[i]
+                        val c2 = secondColor[i]
+                        val r = (alpha * ((c1 shr 16) and 0xFF) + (1f - alpha) * ((c2 shr 16) and 0xFF)).roundToInt()
+                        val g = (alpha * ((c1 shr 8) and 0xFF) + (1f - alpha) * ((c2 shr 8) and 0xFF)).roundToInt()
+                        val b = (alpha * (c1 and 0xFF) + (1f - alpha) * (c2 and 0xFF)).roundToInt()
+                        (0xFF shl 24) or (r.coerceIn(0, 255) shl 16) or (g.coerceIn(0, 255) shl 8) or b.coerceIn(0, 255)
+                    }
                 }
             }
             output.setPixels(row, 0, canvas.width, 0, top, canvas.width, rows)
             top += rows
-            onProgress(0.35f + 0.6f * top / canvas.height, "Unisco e sfumo le giunzioni")
+            onProgress(0.35f + 0.6f * top / canvas.height, "Unisco lungo le cuciture")
         }
         return output
     }
@@ -562,7 +587,12 @@ class PanoramaStitcher(
         const val BAND_ROWS = 192
 
         /** Quanto lontano si cerca l'allineamento: due gradi è il peggio che la calibrazione dà. */
-        const val MAX_SEARCH_DEGREES = 2.5f
+        /**
+         * Metà dell'errore massimo recuperabile: la ricerca può arrivare al doppio di questo.
+         * Sulla prima panoramica riuscita le correzioni vere sono state fino a 3,7°: il gimbal
+         * naviga a stima, e qualche grado di deriva è la norma, non l'eccezione.
+         */
+        const val MAX_SEARCH_DEGREES = 4f
 
         /** Sotto questo passo la correzione è più fine di un pixel: cercare oltre è rumore. */
         const val MIN_SEARCH_DEGREES = 0.02f
@@ -588,3 +618,24 @@ fun sampleSizeFor(sourceWidth: Int, targetLongSide: Int): Int {
     while (sourceWidth / (size * 2) >= targetLongSide) size *= 2
     return size
 }
+
+/**
+ * Quanta parte del pixel spetta al fotogramma migliore, sulla cucitura e attorno.
+ *
+ * Vicino alla cucitura i pesi dei due candidati si equivalgono e si fonde a metà; appena il
+ * migliore prende un vantaggio netto — la dominanza supera [SEAM_SOFTNESS] — il pixel è tutto
+ * suo. È questo che confina la fusione in una striscia stretta: fuori dalla striscia ogni punto
+ * viene da un solo scatto, e un oggetto mosso viene tagliato, non stampato due volte.
+ */
+internal fun seamAlpha(bestWeight: Float, secondWeight: Float): Float {
+    if (secondWeight <= 0f) return 1f
+    val dominance = (bestWeight - secondWeight) / (bestWeight + secondWeight)
+    return (0.5f + 0.5f * (dominance / SEAM_SOFTNESS)).coerceIn(0.5f, 1f)
+}
+
+/**
+ * Quanto stretta è la striscia di fusione, in frazione di dominanza dei pesi. Più piccolo =
+ * cucitura più netta: 0,15 tiene la fusione dentro qualche grado, abbastanza da nascondere la
+ * linea e troppo poco per creare fantasmi.
+ */
+internal const val SEAM_SOFTNESS = 0.15f

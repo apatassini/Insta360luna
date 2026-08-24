@@ -103,6 +103,10 @@ class MediaRepository(
     @Volatile
     private var cameraThumbnailFailures = 0
 
+    /** Stessa regola per l'anteprima grezza del canale extra: pochi rifiuti e si lascia stare. */
+    @Volatile
+    private var extraThumbnailFailures = 0
+
     /** Le miniature fatte scaricando il file intero vanno una alla volta: pesano quanto il file. */
     private val heavyThumbnails = kotlinx.coroutines.sync.Semaphore(1)
 
@@ -198,6 +202,7 @@ class MediaRepository(
 
         var needsRotation = true
         var bytes = exifThumbnail(item, headerExif) ?: fromCameraThumbnail(item)
+            ?: fromExtraThumbnail(item)
         if (bytes == null) {
             needsRotation = false
             bytes = fromVideoProxy(item) ?: fromFullFile(item)
@@ -282,6 +287,68 @@ class MediaRepository(
         }
         return result.getOrNull()
     }
+
+    /**
+     * L'anteprima grezza che il firmware tiene nel canale «extra» della scheda (tipo 2).
+     *
+     * L'ha trovata la sonda dei metadati: per ogni foto la camera conserva un'immagine YUV
+     * 1024×768 con un'intestazione di 40 byte — larghezza e altezza agli offset 16 e 20.
+     * Pesa poco più di un megabyte e arriva dalla sessione di controllo in una frazione di
+     * secondo: contro le decine di megabyte del JPEG intero non c'è gara.
+     */
+    private suspend fun fromExtraThumbnail(item: MediaItem): ByteArray? {
+        if (item.isVideo) return null
+        if (extraThumbnailFailures >= CAMERA_THUMBNAIL_GIVE_UP) return null
+        val blob = commands.getFileExtra(
+            item.path,
+            it.persoft.lunaultra.protocol.LunaProtocolCodes.ExtraType.THUMBNAIL,
+        ).getOrNull()
+        val jpeg = blob?.let { decodeExtraPreview(it) }
+        if (jpeg == null) {
+            extraThumbnailFailures++
+            if (extraThumbnailFailures == CAMERA_THUMBNAIL_GIVE_UP) {
+                log.warn("Il canale extra non dà anteprime leggibili: miniature dalle foto intere")
+            }
+        } else {
+            extraThumbnailFailures = 0
+        }
+        return jpeg
+    }
+
+    /**
+     * Dal blob YUV con intestazione a un JPEG che il resto della catena sa maneggiare.
+     *
+     * Il formato dei pixel non è dichiarato da nessuna parte: si assume 4:2:0 con i piani
+     * croma intrecciati (NV12) e si scambiano U e V per darlo a [android.graphics.YuvImage],
+     * che vuole NV21. Se i colori uscissero invertiti, è qui che si gira l'interruttore.
+     */
+    private fun decodeExtraPreview(blob: ByteArray): ByteArray? = runCatching {
+        if (blob.size < EXTRA_PREVIEW_HEADER) return@runCatching null
+        fun u32(off: Int): Int =
+            (blob[off].toInt() and 0xFF) or
+                ((blob[off + 1].toInt() and 0xFF) shl 8) or
+                ((blob[off + 2].toInt() and 0xFF) shl 16) or
+                ((blob[off + 3].toInt() and 0xFF) shl 24)
+        val width = u32(16)
+        val height = u32(20)
+        if (width !in 16..8192 || height !in 16..8192) return@runCatching null
+        val pixelBytes = width * height * 3 / 2
+        if (blob.size < EXTRA_PREVIEW_HEADER + pixelBytes) return@runCatching null
+        val nv = ByteArray(pixelBytes)
+        System.arraycopy(blob, EXTRA_PREVIEW_HEADER, nv, 0, pixelBytes)
+        var i = width * height
+        while (i + 1 < nv.size) {
+            val u = nv[i]
+            nv[i] = nv[i + 1]
+            nv[i + 1] = u
+            i += 2
+        }
+        val out = java.io.ByteArrayOutputStream()
+        val ok = android.graphics.YuvImage(nv, android.graphics.ImageFormat.NV21, width, height, null)
+            .compressToJpeg(android.graphics.Rect(0, 0, width, height), 85, out)
+        if (!ok) return@runCatching null
+        out.toByteArray()
+    }.getOrNull()
 
     /**
      * L'anteprima incorporata nei metadati EXIF, scaricando solo l'inizio del file.
@@ -693,6 +760,9 @@ class MediaRepository(
 
         /** Dopo tanti rifiuti di fila, il comando della miniatura si considera non supportato. */
         const val CAMERA_THUMBNAIL_GIVE_UP = 3
+
+        /** L'intestazione del blob anteprima nel canale extra: 40 byte, poi i pixel. */
+        const val EXTRA_PREVIEW_HEADER = 40
 
         /** Quanti file scaricati tenere in cache locale. */
         const val CACHE_KEEP_FILES = 10

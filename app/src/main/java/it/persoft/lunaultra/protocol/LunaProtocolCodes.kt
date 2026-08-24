@@ -32,6 +32,7 @@ object LunaProtocolCodes {
     /** Valori di `ExtraMetadata.ExtraType`: gli unici che il firmware registra. */
     object ExtraType {
         const val METADATA = 1
+        const val THUMBNAIL = 2
         const val GPS = 7
 
         private val names = mapOf(

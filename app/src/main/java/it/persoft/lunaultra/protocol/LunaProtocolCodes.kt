@@ -371,6 +371,17 @@ object LunaProtocolCodes {
 
         /** Qualsiasi stato diverso da [NOT_CAPTURE] significa che la camera sta registrando. */
         fun isRecording(value: Int): Boolean = value != NOT_CAPTURE
+
+        /**
+         * Vero finché la camera è occupata a catturare o a salvare.
+         *
+         * È lo stesso di [isRecording] nei fatti, ma serve a chiedere una cosa diversa: non
+         * «sta girando un video» ma «posso muovere il gimbal adesso». Il comando di scatto
+         * risponde appena la camera lo accetta, non quando il file è sulla scheda, e chi va
+         * avanti sulla risposta chiede lo scatto successivo mentre il precedente si sta ancora
+         * scrivendo — la camera lo lascia cadere senza dirlo.
+         */
+        fun isBusy(value: Int): Boolean = value != NOT_CAPTURE
     }
 
     /**

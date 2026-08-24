@@ -16,6 +16,7 @@ import it.persoft.lunaultra.media.Jpeg
 import it.persoft.lunaultra.protocol.ProtoField
 import it.persoft.lunaultra.protocol.ProtoReader
 import it.persoft.lunaultra.protocol.Ucd2Frame
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
 
@@ -130,6 +131,30 @@ class LunaCommands(
         if (level == null) return null
         val fullScale = scale?.takeIf { it > 0 } ?: 100
         return ((level.toFloat() / fullScale) * 100f).roundToInt().coerceIn(0, 100)
+    }
+
+    /**
+     * Aspetta che la camera abbia finito di salvare, prima di muovere il gimbal.
+     *
+     * Il comando di scatto risponde appena la camera lo accetta, non quando il file è sulla
+     * scheda: fra le due cose passa più di un secondo su una foto da otto megapixel. Chi scatta
+     * una sequenza e va avanti sulla risposta chiede lo scatto successivo mentre il precedente
+     * si sta ancora scrivendo, e la camera lo lascia cadere senza dirlo — su una panoramica da
+     * ventiquattro scatti ne sono arrivati tredici, e la seconda metà del piano si è ritrovata
+     * senza foto.
+     *
+     * Quindi si aspetta lo stato: la camera dichiara di stare catturando finché non ha finito.
+     * Se non risponde o resta occupata oltre il tempo massimo si va avanti lo stesso — meglio
+     * uno scatto perso che una sequenza che si pianta — e chi legge il log lo vede.
+     */
+    suspend fun awaitCaptureIdle(timeoutMs: Long = CAPTURE_IDLE_TIMEOUT_MS): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val snapshot = fetchCaptureState()
+            if (snapshot != null && !LunaProtocolCodes.CaptureState.isBusy(snapshot.state)) return true
+            delay(CAPTURE_IDLE_POLL_MS)
+        }
+        return false
     }
 
     private suspend fun fetchCaptureState(): CaptureSnapshot? =
@@ -508,6 +533,12 @@ class LunaCommands(
 
         /** Uno scatto può richiedere più tempo di un comando qualsiasi: HDR, posa lunga, salvataggio. */
         private const val PHOTO_TIMEOUT_MS = 15_000L
+
+        /** Quanto si aspetta che la camera finisca di salvare prima di muovere il gimbal. */
+        private const val CAPTURE_IDLE_TIMEOUT_MS = 8_000L
+
+        /** Ogni quanto si richiede lo stato mentre si aspetta: fitto ma non un martellamento. */
+        private const val CAPTURE_IDLE_POLL_MS = 200L
 
         /** L'elenco dei file su una scheda piena richiede più tempo di un comando qualsiasi. */
         private const val FILE_LIST_TIMEOUT_MS = 12_000L

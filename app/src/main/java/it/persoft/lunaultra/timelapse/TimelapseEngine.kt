@@ -348,6 +348,17 @@ class TimelapseEngine(
                     }
                     .onFailure { log.warn("Scatto ${taken + 1} non riuscito: ${it.message}") }
 
+                // Il comando risponde appena la camera lo accetta, non quando il file è sulla
+                // scheda: fra le due cose passa più di un secondo su una foto da otto megapixel.
+                // Andare avanti sulla risposta significa chiedere lo scatto successivo mentre il
+                // precedente si sta ancora scrivendo, e la camera lo lascia cadere senza dirlo.
+                if (stored && !commands.awaitCaptureIdle()) {
+                    log.warn(
+                        "Scatto ${taken + 1}: la camera è rimasta occupata",
+                        "Vado avanti lo stesso, ma questo scatto potrebbe non essere stato salvato.",
+                    )
+                }
+
                 taken++
                 _state.value = _state.value.copy(
                     shotsTaken = taken,

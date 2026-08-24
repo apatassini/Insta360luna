@@ -30,11 +30,115 @@ import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.timelapse.RunState
 import it.persoft.lunaultra.ui.UpdateUiState
+import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.ui.components.GlassPanel
+import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.italianLabel
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
 import kotlin.math.roundToInt
+
+/**
+ * L'esito dell'unione delle foto, sul mirino e non solo nel log.
+ *
+ * L'unione è la cosa che può andare storta *dopo* che gli scatti sono riusciti, e quando va
+ * storta il motivo è sempre concreto — la camera ha salvato meno foto di quante ne sono state
+ * chieste, un file non si è scaricato. Finché quel motivo stava solo nel log, chi scattava
+ * vedeva la sequenza finire bene e non sapeva che la panoramica non c'era.
+ *
+ * Mentre lavora mostra a che punto è, perché scaricare ventiquattro foto dal Wi-Fi della camera
+ * e rimetterle sulla sfera sono minuti, non secondi. Quando ha finito si può chiudere; quando
+ * fallisce resta, perché un errore che sparisce da solo è un errore che non è stato letto.
+ */
+@Composable
+fun StitchCard(
+    state: StitchUiState,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (state is StitchUiState.Idle) return
+    val accent = when (state) {
+        is StitchUiState.Failed -> Luna.Rec
+        is StitchUiState.Done -> Luna.Ok
+        else -> Luna.Multi
+    }
+    GlassPanel(
+        modifier = modifier.width(300.dp),
+        background = Luna.Surface,
+        contentPadding = 12.dp,
+        verticalSpacing = 6.dp,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                imageVector = when (state) {
+                    is StitchUiState.Failed -> LunaIcons.Warning
+                    is StitchUiState.Done -> LunaIcons.Check
+                    else -> LunaIcons.Panorama
+                },
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = when (state) {
+                    is StitchUiState.Failed -> "PANORAMICA NON UNITA"
+                    is StitchUiState.Done -> "PANORAMICA UNITA"
+                    else -> "UNISCO LE FOTO"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = accent,
+                modifier = Modifier.weight(1f),
+            )
+            if (state !is StitchUiState.Working) {
+                Icon(
+                    imageVector = LunaIcons.Close,
+                    contentDescription = "Chiudi",
+                    tint = Luna.OnSurfaceDim,
+                    modifier = Modifier.size(18.dp).clickable(onClick = onDismiss),
+                )
+            }
+        }
+        when (state) {
+            is StitchUiState.Working -> {
+                Text(
+                    text = state.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+                LinearProgressIndicator(
+                    progress = { state.fraction },
+                    modifier = Modifier.fillMaxWidth().height(6.dp),
+                )
+            }
+
+            is StitchUiState.Done -> Text(
+                text = "${state.fileName} · ${state.report.canvasWidth}×${state.report.canvasHeight} px " +
+                    "· in Immagini › Luna Ultra",
+                style = MaterialTheme.typography.bodySmall,
+                color = Luna.OnSurfaceDim,
+            )
+
+            is StitchUiState.Failed -> {
+                Text(
+                    text = state.reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+                Text(
+                    text = "Gli scatti sono comunque sulla camera.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Luna.OnSurfaceDim,
+                )
+            }
+
+            is StitchUiState.Idle -> Unit
+        }
+    }
+}
 
 /**
  * Avanzamento della sequenza in corso, sopra l'anteprima.
@@ -292,7 +396,16 @@ fun ModeSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    GlassPanel(modifier = modifier.width(330.dp), contentPadding = 12.dp, verticalSpacing = 6.dp) {
+    // Pieno, non traslucido: qui si legge, e leggere una descrizione di tre righe sopra
+    // un'anteprima che si muove è faticoso quanto basta a non farla leggere a nessuno. Il vetro
+    // va bene per i comandi che stanno *sopra* l'inquadratura mentre la si guarda; un elenco da
+    // scorrere la copre comunque, tanto vale che la copra bene.
+    GlassPanel(
+        modifier = modifier.width(330.dp),
+        background = Luna.Surface,
+        contentPadding = 12.dp,
+        verticalSpacing = 6.dp,
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -313,27 +426,35 @@ fun ModeSheet(
         // La panoramica a più scatti sta qui, con le modalità foto, e non sepolta fra le
         // automazioni del gimbal: chi la cerca la cerca fra i modi di scattare, non fra i
         // percorsi. È l'unica voce che apre un pannello invece di cambiare modalità, perché
-        // prima di scattare bisogna dirle quanti gradi coprire.
+        // prima di scattare bisogna dirle quanti gradi coprire. Ma il via si dà dal mirino come
+        // per ogni altra modalità: qui si sceglie, e l'ingranaggio apre le opzioni.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Luna.Pano.copy(alpha = 0.10f), RoundedCornerShape(14.dp))
+                .background(
+                    color = if (selected == CaptureMode.PANORAMICA_APP) {
+                        CaptureMode.PANORAMICA_APP.color.copy(alpha = 0.18f)
+                    } else {
+                        Luna.Multi.copy(alpha = 0.08f)
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                )
                 .clickable {
-                    onOpenPanorama()
+                    onSelect(CaptureMode.PANORAMICA_APP)
                     onDismiss()
                 }
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                .padding(start = 8.dp, top = 8.dp, bottom = 8.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Box(
-                modifier = Modifier.size(34.dp).background(Luna.Pano.copy(alpha = 0.18f), CircleShape),
+                modifier = Modifier.size(34.dp).background(Luna.Multi.copy(alpha = 0.18f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     imageVector = LunaIcons.Panorama,
                     contentDescription = null,
-                    tint = Luna.Pano,
+                    tint = Luna.Multi,
                     modifier = Modifier.size(18.dp),
                 )
             }
@@ -341,18 +462,36 @@ fun ModeSheet(
                 Text(
                     text = "Panoramica a più scatti",
                     style = MaterialTheme.typography.bodyLarge,
-                    color = Color.White,
+                    color = if (selected == CaptureMode.PANORAMICA_APP) Luna.Multi else Color.White,
                 )
                 Text(
-                    text = "Gradi in orizzontale e in verticale, sovrapposizione e obiettivo: " +
-                        "l'app calcola la griglia degli scatti e la percorre.",
+                    text = "Scegli qui le opzioni, poi premi scatto sul mirino: percorre la " +
+                        "griglia e unisce le foto da sé.",
                     style = MaterialTheme.typography.labelSmall,
                     color = Luna.OnSurfaceDim,
                 )
             }
+            if (selected == CaptureMode.PANORAMICA_APP) {
+                Icon(
+                    imageVector = LunaIcons.Check,
+                    contentDescription = null,
+                    tint = Luna.Multi,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            HudIconButton(
+                icon = LunaIcons.Tune,
+                contentDescription = "Opzioni della panoramica",
+                onClick = {
+                    onSelect(CaptureMode.PANORAMICA_APP)
+                    onOpenPanorama()
+                    onDismiss()
+                },
+                size = 36.dp,
+            )
         }
 
-        CaptureMode.entries.forEach { mode ->
+        CaptureMode.entries.filterNot { it.plansPanorama }.forEach { mode ->
             val usable = !mode.usesSequence || sequenceReady
             Row(
                 modifier = Modifier

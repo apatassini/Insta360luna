@@ -51,6 +51,7 @@ fun ShutterButton(
     val description = when {
         active -> "Ferma"
         mode == CaptureMode.FOTO -> "Scatta"
+        mode.plansPanorama -> "Scatta la panoramica"
         mode.usesSequence -> "Avvia la sequenza"
         else -> "Avvia la registrazione"
     }

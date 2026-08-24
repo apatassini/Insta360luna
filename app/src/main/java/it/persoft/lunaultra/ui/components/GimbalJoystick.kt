@@ -14,7 +14,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -77,38 +76,11 @@ fun GimbalJoystick(
         ) {
             val radius = min(size.width, size.height) / 2f
             val center = Offset(size.width / 2f, size.height / 2f)
-            val dim = if (enabled) 1f else 0.35f
-
-            drawCircle(color = Luna.Glass.copy(alpha = 0.85f * dim), radius = radius, center = center)
-            drawCircle(
-                color = Luna.GlassBorder.copy(alpha = 0.9f * dim),
-                radius = radius,
-                center = center,
-                style = Stroke(width = 1.5.dp.toPx()),
-            )
-            drawCircle(
-                color = Luna.OnSurfaceDim.copy(alpha = 0.20f * dim),
-                radius = radius * 0.58f,
-                center = center,
-                style = Stroke(width = 1.dp.toPx()),
-            )
-
-            // Croce di riferimento: dice a colpo d'occhio dove sono gli assi puri.
-            val tick = radius * 0.16f
-            listOf(
-                Offset(center.x, center.y - radius) to Offset(center.x, center.y - radius + tick),
-                Offset(center.x, center.y + radius) to Offset(center.x, center.y + radius - tick),
-                Offset(center.x - radius, center.y) to Offset(center.x - radius + tick, center.y),
-                Offset(center.x + radius, center.y) to Offset(center.x + radius - tick, center.y),
-            ).forEach { (from, to) ->
-                drawLine(
-                    color = Luna.OnSurfaceDim.copy(alpha = 0.5f * dim),
-                    start = from,
-                    end = to,
-                    strokeWidth = 2.dp.toPx(),
-                )
-            }
-
+            // Solo la levetta, senza la ghiera attorno. Il cerchio esterno, il suo bordo, il
+            // cerchio interno e la croce disegnavano un contorno grande quanto mezza
+            // inquadratura per dire una cosa che si capisce dal pollice: che si trascina. Su un
+            // mirino lo spazio è l'immagine, e un comando che si usa con il dito appoggiato non
+            // ha bisogno di una cornice per farsi trovare.
             val knobCenter = center + knob
             if (knob != Offset.Zero) {
                 drawLine(

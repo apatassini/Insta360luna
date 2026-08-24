@@ -3,6 +3,7 @@ package it.persoft.lunaultra.ui.viewfinder
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -77,6 +78,8 @@ fun ViewfinderScreen(
     val recordingSince by viewModel.recordingSinceMs.collectAsState()
     val wifiConnecting by viewModel.wifiConnecting.collectAsState()
     val photoCountdown by viewModel.photoCountdownSeconds.collectAsState()
+    val calibration by viewModel.gimbalCalibration.collectAsState()
+    val stitch by viewModel.stitchState.collectAsState()
 
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var gridVisible by rememberSaveable { mutableStateOf(false) }
@@ -111,9 +114,11 @@ fun ViewfinderScreen(
     // Questa modalità, adesso, percorrerà i punti: o perché è una voce «Sequenza…», o perché i
     // punti ci sono e la modalità sa cosa farne. Da qui dipende cosa mostra il pulsante di
     // scatto — l'avanzamento del percorso invece del pallino di registrazione.
-    val followsPath = captureMode.pathBehaviour != null &&
-        (captureMode.usesSequence || sequenceReady)
-    val shutterReady = connected && (!captureMode.usesSequence || sequenceReady || run.running)
+    val followsPath = captureMode.plansPanorama ||
+        (captureMode.pathBehaviour != null && (captureMode.usesSequence || sequenceReady))
+    val shutterReady = connected &&
+        (!captureMode.usesSequence || sequenceReady || run.running) &&
+        (!captureMode.plansPanorama || calibration.isValid || run.running)
     val shutterActive = if (followsPath) run.running else recording || photoCountdown > 0
     val shutterProgress = if (run.running) run.overallProgress else 0f
 
@@ -417,16 +422,23 @@ fun ViewfinderScreen(
                     captureBar()
                 }
             }
-        } else if (run.running) {
-            // A comandi nascosti resta l'unica cosa che non si può dover cercare: lo STOP.
-            RunCard(
-                run = run,
-                mode = captureMode,
-                onStop = viewModel::emergencyStop,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = topInset + 12.dp),
-            )
+        }
+
+        // L'avanzamento sta in cima e si vede sempre, non solo a comandi nascosti: una
+        // panoramica da ventiquattro scatti dura due minuti, e per due minuti chi guarda deve
+        // sapere a che punto è e poter fermare. Sotto, l'esito dell'unione — che è la cosa che
+        // può andare storta *dopo* che gli scatti sono riusciti, e che finiva solo nel log.
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = topInset + if (chromeVisible) TopBandHeight + 8.dp else 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (run.running) {
+                RunCard(run = run, mode = captureMode, onStop = viewModel::emergencyStop)
+            }
+            StitchCard(state = stitch, onDismiss = viewModel::clearStitchState)
         }
     }
 }

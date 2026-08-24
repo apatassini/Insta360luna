@@ -39,7 +39,26 @@ enum class CaptureMode(
     val pathMode: ShootingMode? = null,
     /** Usa il timelapse interno della camera invece della registrazione normale. */
     val cameraTimelapse: Boolean = false,
+    /**
+     * Lo scatto pianifica e avvia la panoramica dell'app, con le opzioni scelte nel pannello.
+     *
+     * Le opzioni si scelgono lì — quanti gradi, che obiettivo, sferica o no — ma il via si dà
+     * dal mirino come per qualunque altra modalità. Un pulsante «scatta» dentro un pannello di
+     * impostazioni è un pulsante che si preme guardando le impostazioni invece dell'inquadratura.
+     */
+    val plansPanorama: Boolean = false,
 ) {
+    PANORAMICA_APP(
+        label = "Panoramica a più scatti",
+        shortLabel = "PANO+",
+        icon = LunaIcons.Panorama,
+        color = Luna.Multi,
+        hint = "La panoramica dell'app: sceglie i gradi e l'obiettivo nel pannello, e lo scatto " +
+            "percorre la griglia. Con lo scatto sferico prende tutta la corsa del gimbal.",
+        cameraMode = CameraMode.FOTO,
+        sequenceMode = null,
+        plansPanorama = true,
+    ),
     PANORAMA(
         label = "Panorama",
         shortLabel = "PANO",
@@ -146,6 +165,9 @@ enum class CaptureMode(
 
     /** La panoramica della camera è l'unica con la scelta fra sferica e 2:1. */
     val hasPanoAspect: Boolean get() = cameraMode.hasPanoAspect && !usesSequence
+
+    /** Le modalità che percorrono qualcosa: percorso memorizzato o griglia pianificata. */
+    val movesTheGimbal: Boolean get() = usesSequence || plansPanorama
 
     companion object {
         /** La voce della ghiera che corrisponde a una scelta fatta nel pannello della sequenza. */

@@ -1119,6 +1119,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val SPHERICAL_OVERLAP_PERCENT = 20
 
+    /** Quante volte richiedere l'elenco aspettando che la camera abbia finito di scrivere. */
+    private val FILE_SETTLE_ATTEMPTS = 8
+
+    /** Pausa fra una lettura e l'altra: la camera salva una foto in poco più di un secondo. */
+    private val FILE_SETTLE_DELAY_MS = 1_500L
+
     /** Stato dell'unione automatica, per il pannello della panoramica. */
     private val _stitchState = MutableStateFlow<StitchUiState>(StitchUiState.Idle)
     val stitchState: StateFlow<StitchUiState> = _stitchState
@@ -1126,6 +1132,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** L'elenco dei file com'era prima di scattare: serve a riconoscere quelli nuovi. */
     private var filesBeforePanorama: List<MediaItem> = emptyList()
     private var stitchJob: Job? = null
+
+    /** Chiude la carta dell'unione: l'errore resta finché non lo si è letto. */
+    fun clearStitchState() {
+        _stitchState.value = StitchUiState.Idle
+    }
 
     fun setAutoStitchPanorama(enabled: Boolean) =
         container.sequenceStore.update { it.copy(autoStitchPanorama = enabled) }
@@ -1156,6 +1167,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * L'elenco dei file quando la camera ha smesso di aggiungerne.
+     *
+     * Il salvataggio è asincrono e continua dopo l'ultimo scatto. Chiedere l'elenco subito dà un
+     * conto parziale, e con un conto parziale l'unione non parte — è successo davvero: ventitré
+     * scatti comandati, tredici file trovati. Si richiede finché due letture di fila danno lo
+     * stesso numero, oppure finché scade il tempo: a quel punto quello che c'è è quello che c'è,
+     * e chi legge il messaggio lo sa.
+     */
+    private suspend fun awaitSettledFileList(baseline: Int): Result<List<MediaItem>> {
+        var previous = -1
+        var latest: List<MediaItem> = emptyList()
+        repeat(FILE_SETTLE_ATTEMPTS) { attempt ->
+            delay(FILE_SETTLE_DELAY_MS)
+            val listed = container.media.list().getOrElse { return Result.failure(it) }
+            latest = listed
+            val fresh = listed.size - baseline
+            _stitchState.value = StitchUiState.Working(
+                0f,
+                "Aspetto che la camera finisca di salvare · $fresh file nuovi",
+            )
+            if (listed.size == previous && attempt > 0) return Result.success(listed)
+            previous = listed.size
+        }
+        return Result.success(latest)
+    }
+
+    /**
      * Unisce gli scatti appena finiti, se erano di una panoramica e l'unione è accesa.
      *
      * Viene chiamata quando la corsa passa a completata. Il campo visivo è quello dell'obiettivo
@@ -1170,8 +1208,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, seq.panoramaAspect)
         val before = filesBeforePanorama
         stitchJob = viewModelScope.launch {
-            _stitchState.value = StitchUiState.Working(0f, "Cerco gli scatti sulla camera")
-            val after = container.media.list().getOrElse {
+            _stitchState.value = StitchUiState.Working(0f, "Aspetto che la camera finisca di salvare")
+            // La camera scrive i file dopo aver risposto allo scatto: chiedere l'elenco appena
+            // finita la sequenza vuol dire contarne meno di quanti ce ne sono, e l'unione si
+            // rifiuta di partire perché angoli e file non tornano. Si aspetta che il conto
+            // smetta di crescere, che è il solo modo di sapere che ha finito davvero.
+            val after = awaitSettledFileList(before.size).getOrElse {
                 _stitchState.value = StitchUiState.Failed("Elenco dei file non disponibile: ${it.message}")
                 return@launch
             }
@@ -1331,6 +1373,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val mode = _captureMode.value
+        // La panoramica dell'app si avvia da qui come tutto il resto: le opzioni stanno nel suo
+        // pannello, il via si dà dal mirino. Un pulsante «scatta» dentro un pannello di
+        // impostazioni si preme guardando le impostazioni invece dell'inquadratura.
+        if (mode.plansPanorama) {
+            if (runState.value.running) emergencyStop() else shootPanorama()
+            return
+        }
         // Un percorso memorizzato vale per qualunque cosa si stia riprendendo: se ci sono due
         // punti e si preme registra, il gimbal li percorre. Prima lo faceva solo se la voce
         // scelta si chiamava «Sequenza…», e memorizzare dei punti in modalità Video non

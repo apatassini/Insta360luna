@@ -385,135 +385,158 @@ class TimelapseEngine(
         val planned = sequence.totalShots()
         var taken = 0
         var missed = 0
+        var stuck = 0
         val startedAtMs = System.currentTimeMillis()
 
-        // L'anteprima e le foto si contendono la stessa camera. Mentre la sequenza scatta,
-        // l'anteprima non la guarda nessuno — il telefono sta su un treppiede o in tasca — e
-        // intanto la camera comprime un flusso HEVC che le toglie tempo e banda proprio mentre
-        // deve scrivere file da decine di megabyte. Si spegne per la durata della sequenza e si
-        // riaccende alla fine, se era accesa.
-        val previewWasActive = preview.state.value.active
-        if (previewWasActive) {
-            preview.stop()
+        // L'anteprima resta accesa, e non è una svista.
+        //
+        // Spegnerla sembrava gratis: nessuno la guarda mentre il gimbal gira, e la camera
+        // risparmierebbe un flusso HEVC da comprimere. Misurato sulla camera fa l'opposto: con
+        // il flusso fermo la camera entra in SINGLE_SHOOTING al primo scatto e non ne esce più.
+        // Sedici scatti, tre minuti e mezzo, zero file salvati; poi l'anteprima è ripartita e
+        // un secondo dopo lo stato è tornato a riposo. La cattura di una foto passa dalla stessa
+        // catena che tiene vivo il flusso: senza flusso, non si chiude.
+        log.info(
+            "Modalità foto: $planned scatti, $shotsPerLeg per tratto",
+            "Stima iniziale %s, alla cadenza di %.1f s per scatto.".format(
+                formatSeconds(planned * NOMINAL_SHOT_SECONDS),
+                NOMINAL_SHOT_SECONDS,
+            ),
+        )
+
+        // Quanto dura la posa lo dice la camera: è l'unico momento in cui il gimbal deve
+        // stare fermo davvero. Si chiede una volta, prima di cominciare, e vale per tutta la
+        // sequenza — la scena non cambia da uno scatto all'altro di una panoramica.
+        val exposure = commands.fetchStillExposure(CameraMode.FOTO)
+        log.info(
+            "Esposizione dichiarata: ${describeExposure(exposure)}",
+            "È il dato di pre-scatto: dice quanto dura la posa prima che la posa cominci.",
+        )
+
+        val targets = photoTargets(sequence)
+        val guardMs = exposureGuardMillis(exposure)
+        var overlapMoves = sequence.moveWhileSaving
+        if (overlapMoves) {
             log.info(
-                "Anteprima sospesa per la sequenza fotografica",
-                "Torna da sola alla fine: mentre scatta, la camera lavora per una cosa sola.",
+                "Sposto il gimbal mentre la camera salva",
+                "Attesa della posa: ${guardMs} ms. Dopo la posa il gimbal può muoversi, e " +
+                    "il tempo di scrittura si spende andando verso lo scatto successivo.",
             )
         }
-        try {
-            log.info(
-                "Modalità foto: $planned scatti, $shotsPerLeg per tratto",
-                "Stima iniziale %s, alla cadenza di %.1f s per scatto.".format(
-                    formatSeconds(planned * NOMINAL_SHOT_SECONDS),
-                    NOMINAL_SHOT_SECONDS,
-                ),
+
+        for ((index, target) in targets.withIndex()) {
+            if (!currentCoroutineContext().isActive) return
+
+            val done = taken + missed
+            _state.value = _state.value.copy(
+                phase = RunPhase.RUNNING,
+                legIndex = target.legIndex,
+                legProgress = target.legProgress,
+                targetPan = target.pan,
+                targetTilt = target.tilt,
+                shotsTaken = taken,
+                shotsPlanned = planned,
+                elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                secondsRemaining = estimateRemaining(startedAtMs, done, planned),
+                shotsMissed = missed,
+                message = "In posizione per lo scatto ${done + 1}/$planned",
             )
 
-            // Quanto dura la posa lo dice la camera: è l'unico momento in cui il gimbal deve
-            // stare fermo davvero. Si chiede una volta, prima di cominciare, e vale per tutta la
-            // sequenza — la scena non cambia da uno scatto all'altro di una panoramica.
-            val exposure = commands.fetchStillExposure(CameraMode.FOTO)
-            log.info(
-                "Esposizione dichiarata: ${describeExposure(exposure)}",
-                "È il dato di pre-scatto: dice quanto dura la posa prima che la posa cominci.",
-            )
+            // Dal secondo scatto in poi il gimbal è già arrivato: si è mosso mentre la
+            // camera salvava il precedente. Il richiamo resta perché è a vuoto se la
+            // posizione è già quella, e non lo è se lo spostamento non era finito.
+            approachShot(target, sequence)
 
-            val targets = photoTargets(sequence)
-            val guardMs = exposureGuardMillis(exposure)
-            if (sequence.moveWhileSaving) {
-                log.info(
-                    "Sposto il gimbal mentre la camera salva",
-                    "Attesa della posa: ${guardMs} ms. Dopo la posa il gimbal può muoversi, e " +
-                        "il tempo di scrittura si spende andando verso lo scatto successivo.",
-                )
-            }
-
-            for ((index, target) in targets.withIndex()) {
-                if (!currentCoroutineContext().isActive) return
-
-                val done = taken + missed
+            _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
+            val fired = fireShot(done + 1, planned, target)
+            if (fired == null) {
+                missed++
                 _state.value = _state.value.copy(
-                    phase = RunPhase.RUNNING,
-                    legIndex = target.legIndex,
-                    legProgress = target.legProgress,
-                    targetPan = target.pan,
-                    targetTilt = target.tilt,
-                    shotsTaken = taken,
-                    shotsPlanned = planned,
-                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
-                    secondsRemaining = estimateRemaining(startedAtMs, done, planned),
                     shotsMissed = missed,
-                    message = "In posizione per lo scatto ${done + 1}/$planned",
-                )
-
-                // Dal secondo scatto in poi il gimbal è già arrivato: si è mosso mentre la
-                // camera salvava il precedente. Il richiamo resta perché è a vuoto se la
-                // posizione è già quella, e non lo è se lo spostamento non era finito.
-                approachShot(target, sequence)
-
-                _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
-                val fired = fireShot(done + 1, planned, target)
-                if (fired == null) {
-                    missed++
-                    _state.value = _state.value.copy(
-                        shotsMissed = missed,
-                        secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
-                    )
-                    continue
-                }
-
-                // La posa è finita: da qui in avanti il gimbal può muoversi senza mosso, e la
-                // camera continua a comprimere e scrivere per conto suo. È il pezzo di tempo
-                // che prima si stava a guardare.
-                val next = targets.getOrNull(index + 1)
-                if (sequence.moveWhileSaving && next != null) {
-                    delay(guardMs)
-                    _state.value = _state.value.copy(
-                        message = "Verso lo scatto ${done + 2}/$planned mentre la camera salva",
-                    )
-                    approachShot(next, sequence)
-                }
-
-                val written = commands.awaitCaptureIdle()
-                if (!written) {
-                    log.warn(
-                        "Scatto ${done + 1}: la camera è rimasta occupata",
-                        "Il file potrebbe non essere stato salvato.",
-                    )
-                }
-
-                taken++
-                _state.value = _state.value.copy(
-                    shotsTaken = taken,
-                    shotsMissed = missed,
-                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
                     secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
-                    // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
-                    // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
-                    // fotogramma nel posto del successivo.
-                    shotAngles = _state.value.shotAngles +
-                        ShotAngle(target.pan, target.tilt, fired.uri),
                 )
+                continue
             }
 
-            val elapsed = (System.currentTimeMillis() - startedAtMs) / 1000f
-            _state.value = _state.value.copy(elapsedSeconds = elapsed, secondsRemaining = 0f)
-            if (missed > 0) {
-                log.warn(
-                    "$taken scatti su $planned in ${formatSeconds(elapsed)}",
-                    "$missed non sono riusciti nemmeno riprovando: l'unione avrà dei buchi.",
+            // La posa è finita: da qui in avanti il gimbal può muoversi senza mosso, e la
+            // camera continua a comprimere e scrivere per conto suo. È il pezzo di tempo
+            // che prima si stava a guardare.
+            val next = targets.getOrNull(index + 1)
+            if (overlapMoves && next != null) {
+                delay(guardMs)
+                _state.value = _state.value.copy(
+                    message = "Verso lo scatto ${done + 2}/$planned mentre la camera salva",
                 )
-            } else {
-                log.info(
-                    "$taken scatti su $planned in ${formatSeconds(elapsed)}",
-                    "%.1f s per scatto.".format(if (taken > 0) elapsed / taken else 0f),
-                )
+                approachShot(next, sequence)
             }
-        } finally {
-            // Anche se la sequenza è stata interrotta: l'anteprima era accesa quando è
-            // cominciata e deve tornare accesa, altrimenti si resta davanti a uno schermo nero
-            // senza sapere perché.
-            if (previewWasActive) preview.start()
+
+            val written = commands.awaitCaptureIdle()
+            if (written) {
+                stuck = 0
+            } else {
+                stuck++
+                log.warn(
+                    "Scatto ${done + 1}: la camera è rimasta occupata",
+                    "Il file quasi certamente non è stato salvato.",
+                )
+                // Il flusso dell'anteprima è la leva che rimette in moto la camera: quando
+                // resta appesa in cattura, riavviarlo la sblocca — misurato, un secondo dopo lo
+                // stato torna a riposo. Prima di rinunciare allo scatto successivo vale la pena
+                // provarlo, perché costa un secondo e l'alternativa è una sequenza vuota.
+                preview.restart()
+                log.warn(
+                    "Riavvio l'anteprima per sbloccare la camera",
+                    "La cattura passa dalla stessa catena del flusso: riavviarlo la chiude.",
+                )
+
+                // Il sospetto numero due è lo spostamento durante il salvataggio: si spegne per
+                // il resto della sequenza, così il tentativo successivo è nelle condizioni che
+                // si sa funzionare.
+                if (overlapMoves) {
+                    overlapMoves = false
+                    log.warn(
+                        "Smetto di muovere il gimbal mentre la camera salva",
+                        "Torno al ritmo lento: prima gli scatti, poi la velocità.",
+                    )
+                }
+                // Una sequenza che scatta a vuoto non va portata a termine. Se la camera non
+                // torna a riposo due volte di fila non ci torna nemmeno alla terza: sono tre
+                // minuti e mezzo di gimbal per zero file, ed è successo davvero.
+                if (stuck >= MAX_STUCK_SHOTS) {
+                    throw IllegalStateException(
+                        "La camera non chiude più le catture: occupata su $stuck scatti di fila " +
+                            "e nessun file salvato. Sequenza interrotta invece di continuare a " +
+                            "vuoto. Spegni e riaccendi la camera.",
+                    )
+                }
+            }
+
+            taken++
+            _state.value = _state.value.copy(
+                shotsTaken = taken,
+                shotsMissed = missed,
+                elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
+                // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
+                // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
+                // fotogramma nel posto del successivo.
+                shotAngles = _state.value.shotAngles +
+                    ShotAngle(target.pan, target.tilt, fired.uri),
+            )
+        }
+
+        val elapsed = (System.currentTimeMillis() - startedAtMs) / 1000f
+        _state.value = _state.value.copy(elapsedSeconds = elapsed, secondsRemaining = 0f)
+        if (missed > 0) {
+            log.warn(
+                "$taken scatti su $planned in ${formatSeconds(elapsed)}",
+                "$missed non sono riusciti nemmeno riprovando: l'unione avrà dei buchi.",
+            )
+        } else {
+            log.info(
+                "$taken scatti su $planned in ${formatSeconds(elapsed)}",
+                "%.1f s per scatto.".format(if (taken > 0) elapsed / taken else 0f),
+            )
         }
     }
 
@@ -868,6 +891,15 @@ class TimelapseEngine(
 
         /** Uno scatto perso lascia un buco nell'unione: vale un secondo tentativo, non di più. */
         const val SHOT_ATTEMPTS = 2
+
+        /**
+         * Quante volte di fila la camera può restare occupata prima di fermare tutto.
+         *
+         * Non è prudenza eccessiva: quando questa camera smette di chiudere le catture non
+         * ricomincia da sola, e la sequenza continua a scattare nel vuoto. Sedici scatti, tre
+         * minuti e mezzo, zero file — e non se ne accorge nessuno finché non è finita.
+         */
+        const val MAX_STUCK_SHOTS = 2
         const val SHOT_RETRY_DELAY_MS = 700L
 
         const val MOVE_TICK_HZ = 10

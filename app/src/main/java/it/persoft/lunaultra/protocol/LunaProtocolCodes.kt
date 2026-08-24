@@ -400,6 +400,14 @@ object LunaProtocolCodes {
     object CaptureState {
         const val NOT_CAPTURE = 0
         const val NORMAL_CAPTURE = 1
+
+        /**
+         * Lo stato in cui la camera sta scattando una foto e scrivendola sulla scheda.
+         *
+         * Cinque secondi in condizioni normali, e per sempre quando qualcosa la blocca: è lo
+         * stato su cui si è piantata con il flusso dell'anteprima fermo.
+         */
+        const val SINGLE_SHOOTING = 4
         const val TIMELAPSE_CAPTURE = 2
         const val STATIC_TIMELAPSE_SHOOTING = 11
         const val INTERVAL_VIDEO_CAPTURE = 12

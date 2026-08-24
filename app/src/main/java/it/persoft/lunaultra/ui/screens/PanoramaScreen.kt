@@ -321,7 +321,9 @@ fun PanoramaScreen(viewModel: MainViewModel) {
             )
             Hint(
                 "L'attesa della posa la detta la camera, che dichiara il tempo prima di scattare. " +
-                    "Se gli scatti venissero mossi, questa è la cosa da spegnere.",
+                    "Parte spento: non è ancora stato provato con una panoramica riuscita. " +
+                    "Se lo accendi e gli scatti vengono mossi, o la camera smette di salvare, " +
+                    "è la prima cosa da rispegnere.",
             )
         }
 

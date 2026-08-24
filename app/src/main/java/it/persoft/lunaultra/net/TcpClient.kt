@@ -38,6 +38,19 @@ class TcpClient(
     @Volatile
     var quiet: Boolean = false
 
+    /**
+     * Dice se qualcuno sta aspettando la risposta con questo `requestId`.
+     *
+     * Serve a togliere dal log le conferme che non raccontano niente. I comandi del gimbal
+     * partono a venticinque al secondo e non aspettano risposta; la camera risponde comunque
+     * `200` con corpo vuoto, e quelle righe da sole riempivano il log: in una panoramica erano
+     * novemila su quindicimila, e il resto — quello per cui il log esiste — usciva dalla
+     * finestra. Una conferma vuota che nessuno aspettava non aggiunge nulla al comando che si
+     * vede già partire; una attesa invece resta, perché lì la risposta è il risultato.
+     */
+    @Volatile
+    var awaitsResponse: (Int) -> Boolean = { true }
+
     @Volatile
     private var socket: Socket? = null
 
@@ -99,8 +112,12 @@ class TcpClient(
                 assembler.append(copy, read)
                 val frames = assembler.drain { reason -> log.warn("Frame scartato: $reason") }
                 for (frame in frames) {
-                    // I frame media arrivano a 30 al secondo: annegherebbero il log.
-                    if (frame.isCommandFrame && !quiet) {
+                    // I frame media arrivano a 30 al secondo: annegherebbero il log. E con
+                    // loro le conferme vuote dei comandi sparati senza attesa.
+                    val emptyEcho = frame.code == LunaProtocolCodes.RESPONSE_OK &&
+                        frame.payload.isEmpty() &&
+                        !awaitsResponse(frame.requestId)
+                    if (frame.isCommandFrame && !quiet && !emptyEcho) {
                         log.rx(
                             "%s (%d) req=%d len=%dB".format(
                                 LunaProtocolCodes.describe(frame.code),

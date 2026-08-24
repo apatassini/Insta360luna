@@ -43,6 +43,13 @@ class CameraSession(
 
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<Ucd2Frame>>()
 
+    init {
+        // Il log tiene le risposte che qualcuno stava aspettando e butta gli echi vuoti dei
+        // comandi sparati senza attesa: sa il trasporto quali frame arrivano, sa la sessione
+        // quali erano attesi, e questa riga mette insieme le due cose.
+        client.awaitsResponse = { id -> pending.containsKey(id) }
+    }
+
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     val state: StateFlow<ConnectionState> = _state
 

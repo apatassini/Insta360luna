@@ -154,6 +154,19 @@ class PreviewController(
         }
     }
 
+    /**
+     * Ferma e riavvia il flusso.
+     *
+     * Serve a sbloccare la camera, non a rinfrescare l'immagine: quando smette di chiudere le
+     * catture — resta in `SINGLE_SHOOTING` e non salva più niente — è il riavvio del flusso che
+     * la rimette in moto. Misurato: flusso riavviato, un secondo dopo lo stato torna a riposo.
+     * [start] da sola non basta, perché se l'anteprima risulta già accesa non fa niente.
+     */
+    fun restart() {
+        stop()
+        start()
+    }
+
     fun stop() {
         job?.cancel()
         job = null

@@ -59,7 +59,7 @@ data class LogEntry(
  * calibrazione arrivato pieno di `RISPOSTA_OK` vuoti perdeva l'avvio della calibrazione pur
  * avendo spazio da vendere: quello spazio era occupato da conferme senza payload.
  */
-class EventLog(private val capacity: Int = 5_000) {
+class EventLog(private val capacity: Int = 12_000) {
 
     private val _entries = MutableStateFlow<List<LogEntry>>(emptyList())
     val entries: StateFlow<List<LogEntry>> = _entries

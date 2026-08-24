@@ -1489,11 +1489,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Uno scatto singolo, e la verità su com'è finito.
+     *
+     * «Scatto eseguito» appena la camera accetta il comando è una mezza informazione: fra
+     * l'accettazione e il file sulla scheda passano cinque secondi, e se la camera resta appesa
+     * in cattura il file non arriva mai. Dirlo subito significa dire di sì a una foto che non
+     * esiste — e chi scatta se ne accorge solo aprendo la galleria.
+     *
+     * Quando resta appesa, il riavvio del flusso dell'anteprima la sblocca: la cattura passa
+     * dalla stessa catena. Si prova quello prima di dare la cosa per persa.
+     */
     private suspend fun shoot(mode: CaptureMode) {
         val pano = mode.cameraMode == CameraMode.PANORAMA
         container.commands.takePicture(instaPano = pano)
-            .onSuccess { showMessage(if (pano) "Panoramica in corso" else "Scatto eseguito") }
             .onFailure { showMessage("Scatto non riuscito: ${it.message}") }
+            .onSuccess {
+                if (pano) {
+                    showMessage("Panoramica in corso")
+                    return@onSuccess
+                }
+                showMessage("Scatto in corso…")
+                if (container.commands.awaitCaptureIdle()) {
+                    showMessage("Scatto salvato")
+                    return@onSuccess
+                }
+                container.log.warn(
+                    "La camera è rimasta appesa in cattura",
+                    "Riavvio il flusso dell'anteprima: è quello che la sblocca.",
+                )
+                container.preview.restart()
+                if (container.commands.awaitCaptureIdle()) {
+                    showMessage("Scatto salvato, ma la camera si era bloccata")
+                } else {
+                    showMessage("La camera non sta salvando: spegnila e riaccendila")
+                }
+            }
     }
 
     // ---------------------------------------------------------------- modalità della camera

@@ -126,10 +126,12 @@ data class TimelapseSequence(
      * sensore è già stato letto. Spendere quei secondi andando verso lo scatto successivo taglia
      * un terzo abbondante della durata di una panoramica.
      *
-     * Si può spegnere: è l'unica cosa da provare se gli scatti venissero mossi, cioè se questa
-     * camera continuasse a esporre dopo aver dichiarato la posa che dichiara.
+     * Spento finché non è provato. La prima prova sulla camera è finita con sedici scatti e
+     * zero file salvati: la causa era un'altra — l'anteprima spenta durante la sequenza — ma
+     * finché non c'è una panoramica riuscita con questo acceso, il valore di partenza è quello
+     * che si sa funzionare. Si accende dal pannello Panorama.
      */
-    val moveWhileSaving: Boolean = true,
+    val moveWhileSaving: Boolean = false,
     val panoramaAspect: PhotoFrameAspect = PhotoFrameAspect.FOUR_THREE,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)

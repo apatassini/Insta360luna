@@ -2434,44 +2434,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 map.toString().ifBlank { "Nessun tipo risponde con dati." },
             )
 
-            // L'andata e ritorno sul GPS: coordinate riconoscibili, non plausibili.
-            val existing = container.commands
-                .getFileExtra(target.path, LunaProtocolCodes.ExtraType.GPS)
-                .getOrNull()
-            if (existing != null && existing.isNotEmpty()) {
-                container.log.info(
-                    "GPS già presente su ${target.name}: non lo tocco",
-                    "${existing.size} byte · ${Hex.encode(existing, limit = 24)}",
-                )
-                showMessage("Prova finita: l'esito è nel log")
-                return@launch
-            }
-            val payload = it.persoft.lunaultra.protocol.ProtoWriter()
-                .double(1, PROBE_GPS_LON)
-                .double(2, PROBE_GPS_LAT)
-                .double(3, PROBE_GPS_ALT)
-                .toByteArray()
-            container.commands.setFileExtra(target.path, LunaProtocolCodes.ExtraType.GPS, payload)
-                .onFailure { container.log.warn("SET del GPS rifiutato: ${it.message}") }
-            container.commands.getFileExtra(target.path, LunaProtocolCodes.ExtraType.GPS)
-                .onSuccess { bytes ->
-                    val reader = it.persoft.lunaultra.protocol.ProtoReader(bytes)
-                    val lon = reader.doubleOrNull(1) ?: reader.doubleOrNull(3, 1)
-                    if (lon != null && kotlin.math.abs(lon - PROBE_GPS_LON) < 1e-6) {
-                        container.log.info(
-                            "GPS SCRITTO E RILETTO IDENTICO",
-                            "Il canale scrive davvero sulla scheda. Longitudine e latitudine " +
-                                "possono trasportare pan e tilt: il passaporto delle panoramiche " +
-                                "può vivere sulla camera.",
-                        )
-                    } else {
-                        container.log.warn(
-                            "GPS riletto ma non combacia",
-                            "${bytes.size} byte · ${Hex.encode(bytes, limit = 32)}",
-                        )
-                    }
+            // L'andata e ritorno, sui campi che non bruciano niente. Il GPS non si tocca:
+            // quello serve al GPS — magari un giorno a quello vero del telefono. Si provano
+            // le telemetrie che su una foto sono quasi certamente vuote, in ordine di
+            // eleganza: EULER sono letteralmente angoli di orientamento, il resto è spazio.
+            // Regola ferrea: un tipo che contiene già dati non si scrive.
+            val payload = "LUNAPANO-PROVA-${System.currentTimeMillis()}".toByteArray()
+            var slot: Int? = null
+            for (type in PROBE_EXTRA_CANDIDATES) {
+                val existing = container.commands.getFileExtra(target.path, type).getOrNull()
+                if (existing != null && existing.isNotEmpty()) {
+                    container.log.info(
+                        "Tipo $type (${LunaProtocolCodes.ExtraType.name(type)}) già occupato: non lo tocco",
+                    )
+                    continue
                 }
-                .onFailure { container.log.warn("GET del GPS rifiutato: ${it.message}") }
+                container.commands.setFileExtra(target.path, type, payload)
+                val back = container.commands.getFileExtra(target.path, type).getOrNull()
+                if (back != null && String(back, Charsets.UTF_8).contains(String(payload, Charsets.UTF_8))) {
+                    slot = type
+                    break
+                }
+                container.log.info(
+                    "Tipo $type (${LunaProtocolCodes.ExtraType.name(type)}): scrittura senza effetto" +
+                        (back?.let { " · riletti ${it.size} byte" } ?: ""),
+                )
+            }
+            if (slot != null) {
+                container.log.info(
+                    "TROVATO LO SCOMPARTO: tipo $slot (${LunaProtocolCodes.ExtraType.name(slot)})",
+                    "Scritto e riletto identico. Il passaporto delle panoramiche può vivere " +
+                        "sulla scheda, senza toccare il GPS.",
+                )
+            } else {
+                container.log.warn(
+                    "Nessuno scomparto scrivibile fra i candidati",
+                    "Il firmware conserva solo i tipi che riempie lui. Il passaporto resta " +
+                        "sulle copie del telefono — che comunque funziona.",
+                )
+            }
             showMessage("Prova finita: l'esito è nel log")
         }
     }
@@ -2683,10 +2684,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          */
         const val SINGLE_SHOT_SAVE_TIMEOUT_MS = 20_000L
 
-        /** Coordinate di prova riconoscibili: nessun posto vero è a 11.111111, 22.222222. */
-        const val PROBE_GPS_LON = 11.111111
-        const val PROBE_GPS_LAT = 22.222222
-        const val PROBE_GPS_ALT = 333.25
+        /**
+         * Gli scomparti da provare per il passaporto, in ordine di eleganza. Il GPS non c'è
+         * apposta: quello resta al suo mestiere. EULER (14) sono angoli di orientamento —
+         * il significato giusto — e gli altri sono telemetrie vuote sulle foto.
+         */
+        val PROBE_EXTRA_CANDIDATES = intArrayOf(14, 17, 16, 13, 8, 10)
 
         /** Attesa fra l'azione di prova e la miniatura di confronto: il gimbal deve arrivare. */
         const val GIMBAL_ACTION_PROBE_WAIT_MS = 4_000L

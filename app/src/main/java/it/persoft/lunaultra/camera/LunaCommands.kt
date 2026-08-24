@@ -344,6 +344,32 @@ class LunaCommands(
             timeoutMs = PHOTO_TIMEOUT_MS,
         ).map { frame -> photoUriFromResponse(frame.payload) }
 
+    /**
+     * L'esposizione con cui la camera scatterà: il dato di pre-scatto.
+     *
+     * `ExposureOptions { Program program = 1; uint32 iso = 2; double shutter_speed = 3 }`, dentro
+     * `PhotographyOptions.still_exposure_options` (20). In automatico è quella misurata adesso
+     * sulla scena, in manuale è quella imposta: in entrambi i casi dice quanto dura la posa, che
+     * è l'unico momento dello scatto in cui il gimbal deve stare fermo.
+     */
+    suspend fun fetchStillExposure(mode: CameraMode): ExposureReading? =
+        session.request(
+            LunaProtocolCodes.GET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.getPhotographyOptions(
+                listOf(
+                    LunaProtocolCodes.PhotographyOptionType.EXPOSURE_MODE,
+                    LunaProtocolCodes.PhotographyOptionType.STILL_EXPOSURE_OPTIONS,
+                ),
+                mode.functionMode,
+            ),
+        ).map { frame ->
+            exposureAt(
+                frame.payload,
+                PHOTOGRAPHY_OPTIONS_FIELD,
+                LunaProtocolCodes.PhotographyOptionsField.STILL_EXPOSURE_OPTIONS,
+            )
+        }.getOrNull()
+
     // ---- Media sulla camera ----
 
     /**
@@ -612,3 +638,54 @@ fun takePictureStateFrom(frame: Ucd2Frame): Int? =
     } else {
         null
     }
+
+/**
+ * Come sarà esposto il prossimo scatto: programma, ISO e durata della posa.
+ *
+ * [shutterSeconds] è zero quando la camera non lo dichiara — succede in automatico su alcuni
+ * firmware. Zero significa «non lo so», non «istantaneo»: chi lo usa deve prevedere il caso.
+ */
+data class ExposureReading(
+    val program: Int,
+    val iso: Int,
+    val shutterSeconds: Double,
+) {
+    val isManual: Boolean get() = program == LunaProtocolCodes.ExposureProgram.MANUAL ||
+        program == LunaProtocolCodes.ExposureProgram.SHUTTER_PRIORITY
+
+    val knowsShutter: Boolean get() = shutterSeconds > 0.0
+}
+
+/** L'esposizione dentro un `PhotographyOptions`, al percorso indicato. */
+internal fun exposureAt(payload: ByteArray, vararg path: Int): ExposureReading? {
+    val reader = ProtoReader(payload)
+    val shutter = reader.doubleOrNull(*(path + LunaProtocolCodes.ExposureOptionsField.SHUTTER_SPEED))
+    val program = reader.intOrNull(*(path + LunaProtocolCodes.ExposureOptionsField.PROGRAM))
+    val iso = reader.intOrNull(*(path + LunaProtocolCodes.ExposureOptionsField.ISO))
+    if (shutter == null && program == null && iso == null) return null
+    return ExposureReading(
+        program = program ?: LunaProtocolCodes.ExposureProgram.AUTO,
+        iso = iso ?: 0,
+        shutterSeconds = shutter ?: 0.0,
+    )
+}
+
+/**
+ * L'esposizione fotografica annunciata dalla camera (notifica 8220).
+ *
+ * `NotificationExposureUpdate { FunctionMode function_mode = 1; ExposureOptions still_exposure = 2;
+ * ExposureOptions video_exposure = 3 }`. Arriva quando la misurazione cambia, cioè quando cambia
+ * la scena: è il modo di sapere quanto durerà la posa senza chiederlo prima di ogni scatto.
+ */
+fun stillExposureFrom(frame: Ucd2Frame): ExposureReading? =
+    if (frame.code == LunaProtocolCodes.NOTIFICATION_EXPOSURE_UPDATE) {
+        exposureAt(frame.payload, EXPOSURE_UPDATE_STILL_FIELD)
+    } else {
+        null
+    }
+
+/** `PhotographyOptions` sta nel campo 2 sia della richiesta sia della risposta. */
+private const val PHOTOGRAPHY_OPTIONS_FIELD = 2
+
+/** `NotificationExposureUpdate.still_exposure`. */
+private const val EXPOSURE_UPDATE_STILL_FIELD = 2

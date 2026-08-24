@@ -162,6 +162,17 @@ class ProtoReader(private val buffer: ByteArray) {
         else -> null
     }
 
+    /**
+     * Come [floatOrNull] ma senza perdere precisione: la durata della posa viaggia in `double`,
+     * e un ottomillesimo di secondo in un `float` diventa un numero un po' diverso.
+     */
+    fun doubleOrNull(vararg path: Int): Double? = when (val f = find(*path)) {
+        is ProtoField.Fixed64 -> f.asDouble
+        is ProtoField.Fixed32 -> f.asFloat.toDouble()
+        is ProtoField.VarInt -> f.asSInt.toDouble()
+        else -> null
+    }
+
     fun stringOrNull(vararg path: Int): String? =
         (find(*path) as? ProtoField.LengthDelimited)?.asString
 

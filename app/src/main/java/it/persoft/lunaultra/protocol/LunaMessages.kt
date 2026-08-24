@@ -325,6 +325,19 @@ object LunaMessages {
     }
 
     /** Aggiornamento del contesto foto usato dalla camera dopo la velocità del gimbal. */
+    /**
+     * `GetPhotographyOptions { repeated PhotographyOptionType option_types = 1; FunctionMode
+     * function_mode = 2 }`.
+     *
+     * Le opzioni sono memorizzate per modalità: chiedere l'esposizione fotografica stando nel
+     * `function_mode` del video restituisce quella del video, che è un'altra cosa.
+     */
+    fun getPhotographyOptions(optionTypes: List<Int>, functionMode: Int): ByteArray {
+        val writer = ProtoWriter()
+        optionTypes.forEach { writer.int32(1, it) }
+        return writer.int32(2, functionMode).toByteArray()
+    }
+
     fun refreshGimbalSpeed(): ByteArray =
         ProtoWriter()
             .int32(1, 0x63)

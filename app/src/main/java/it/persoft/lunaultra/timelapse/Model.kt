@@ -118,6 +118,18 @@ data class TimelapseSequence(
      * scatti affiancati si sovrappongono molto meno di quanto dicano i gradi.
      */
     val panoramaSpherical: Boolean = false,
+    /**
+     * Muovere il gimbal mentre la camera salva lo scatto precedente.
+     *
+     * L'unico momento in cui il gimbal deve stare fermo è la posa; la compressione e la scrittura
+     * che seguono — cinque secondi su questa camera — non riguardano l'inquadratura, perché il
+     * sensore è già stato letto. Spendere quei secondi andando verso lo scatto successivo taglia
+     * un terzo abbondante della durata di una panoramica.
+     *
+     * Si può spegnere: è l'unica cosa da provare se gli scatti venissero mossi, cioè se questa
+     * camera continuasse a esporre dopo aver dichiarato la posa che dichiara.
+     */
+    val moveWhileSaving: Boolean = true,
     val panoramaAspect: PhotoFrameAspect = PhotoFrameAspect.FOUR_THREE,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)

@@ -59,6 +59,15 @@ object LunaProtocolCodes {
      */
     const val NOTIFICATION_TAKE_PICTURE_STATE = 8202
     const val NOTIFICATION_CURRENT_CAPTURE_STATUS = 8208
+
+    /**
+     * `CAMERA_NOTIFICATION_EXPOSURE_UPDATE`: come sarà esposto il prossimo scatto.
+     *
+     * `NotificationExposureUpdate { FunctionMode function_mode = 1; ExposureOptions
+     * still_exposure = 2; ExposureOptions video_exposure = 3 }`. Il dato di pre-scatto: dice
+     * quanto durerà la posa prima che la posa cominci.
+     */
+    const val NOTIFICATION_EXPOSURE_UPDATE = 8220
     const val NOTIFICATION_TIMELAPSE_STATUS_UPDATE = 8210
     /** Conferma del livello hardware del gimbal: field 2 = 1 (lento), 2 (medio), 3 (veloce). */
     const val NOTIFICATION_GIMBAL_SPEED = 0x206A

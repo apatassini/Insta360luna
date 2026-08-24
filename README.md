@@ -95,11 +95,27 @@ Due cose che la camera dice sullo scatto e che l'app adesso ascolta:
   dice come si chiama la foto. È quello che serve per unire una panoramica senza indovinare
   niente — prima i file si accoppiavano agli angoli confrontando l'elenco prima e dopo, e uno
   scatto perso faceva slittare tutto di una posizione;
+* **la notifica `8220` dice come sarà esposto il prossimo scatto.**
+  `NotificationExposureUpdate { FunctionMode function_mode = 1; ExposureOptions
+  still_exposure = 2; ExposureOptions video_exposure = 3 }` con
+  `ExposureOptions { Program program = 1; uint32 iso = 2; double shutter_speed = 3 }`; la stessa
+  cosa si legge a richiesta con `GET_PHOTOGRAPHY_OPTIONS` sull'opzione 20. È il dato di
+  pre-scatto, e serve a una cosa precisa: la posa è l'unico momento in cui il gimbal deve stare
+  fermo. La compressione e la scrittura che seguono — cinque secondi su questa camera — non
+  riguardano l'inquadratura, perché il sensore è già stato letto, e si spendono andando verso lo
+  scatto successivo;
 * **la notifica `8202` racconta lo scatto mentre avviene.**
   `NotificationTakePictureStateUpdate { TakePictureState state = 1 }` con
   `SHUTTER = 0, COMPRESS = 1, WRITE_FILE = 2`. È la camera che dichiara di stare salvando, ed è
   il motivo per cui a volte non risponde subito: una sequenza fotografica troppo fitta le
   chiedeva lo scatto successivo mentre scriveva il precedente, e quello andava perso.
+
+Attenzione a queste due: sul firmware **v1.0.288** della Luna Ultra **non si vedono**. La
+risposta a `TAKE_PICTURE` arriva in tre decimi di secondo con un `Photo` vuoto, e la `8202` non
+viene mai emessa. Quello che questa camera manda davvero è la `8208`
+(`CAMERA_NOTIFICATION_CURRENT_CAPTURE_STATUS`): stato `4` (`SINGLE_SHOOTING`) quando comincia lo
+scatto, `0` quando ha finito di scrivere, e sono cinque secondi. È da lì che l'app sa quando la
+camera è di nuovo libera; le altre due restano nello schema, per i firmware che le usano.
 
 ### Gimbal Luna Ultra
 

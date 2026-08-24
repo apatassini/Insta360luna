@@ -1169,6 +1169,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setAutoStitchPanorama(enabled: Boolean) =
         container.sequenceStore.update { it.copy(autoStitchPanorama = enabled) }
 
+    fun setMoveWhileSaving(enabled: Boolean) =
+        container.sequenceStore.update { it.copy(moveWhileSaving = enabled) }
+
     fun setPanoramaSpherical(enabled: Boolean) {
         container.sequenceStore.update { it.copy(panoramaSpherical = enabled) }
         refreshPanoramaPreview()

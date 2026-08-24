@@ -1,5 +1,7 @@
 package it.persoft.lunaultra.timelapse
 
+import it.persoft.lunaultra.camera.CameraMode
+import it.persoft.lunaultra.camera.ExposureReading
 import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalCalibrationProfile
@@ -26,6 +28,63 @@ import kotlin.math.roundToInt
 import kotlin.math.sign
 
 enum class RunPhase { IDLE, PREPARING, RUNNING, STOPPING, COMPLETED, ABORTED }
+
+/** Uno scatto accettato dalla camera, con il percorso del file se lo dichiara. */
+internal data class FiredShot(val uri: String?)
+
+/** Dove va la camera per uno scatto, e a che punto del percorso si trova. */
+internal data class PhotoTarget(
+    val pan: Float,
+    val tilt: Float,
+    val legIndex: Int,
+    val legProgress: Float,
+)
+
+/**
+ * Quanto aspettare, dopo il comando di scatto, prima di poter muovere il gimbal.
+ *
+ * L'unico momento in cui il gimbal deve stare fermo è la posa. Quello che viene dopo —
+ * compressione e scrittura sulla scheda, che su questa camera durano insieme cinque secondi —
+ * non ha niente a che vedere con l'inquadratura: il sensore è già stato letto. Quei cinque
+ * secondi si possono quindi spendere andando verso lo scatto successivo invece di stare a
+ * guardare, ed è la differenza fra 8,6 e 5,5 secondi per scatto.
+ *
+ * L'attesa è la posa dichiarata dalla camera, raddoppiata perché fra il comando e l'apertura
+ * dell'otturatore passa un pezzo di tempo che nessuno dichiara, più un margine fisso. Quando la
+ * camera non dichiara niente si usa il tetto: due secondi, che è più di quanto duri una posa in
+ * qualunque situazione in cui abbia senso fare una panoramica — al buio la posa sarebbe lunga,
+ * ma una panoramica al buio viene comunque mossa dal gimbal che riparte.
+ */
+internal fun exposureGuardMillis(exposure: ExposureReading?): Long {
+    if (exposure == null || !exposure.knowsShutter) return MAX_EXPOSURE_GUARD_MS
+    val millis = (exposure.shutterSeconds * EXPOSURE_SAFETY_FACTOR * 1000.0) + EXPOSURE_MARGIN_MS
+    return millis.toLong().coerceIn(MIN_EXPOSURE_GUARD_MS, MAX_EXPOSURE_GUARD_MS)
+}
+
+/** Come raccontare l'esposizione nel log: la posa in frazione di secondo, come la si legge. */
+internal fun describeExposure(exposure: ExposureReading?): String {
+    if (exposure == null) return "non dichiarata dalla camera"
+    val program = if (exposure.isManual) "manuale" else "automatica"
+    if (!exposure.knowsShutter) return "$program, posa non dichiarata"
+    val shutter = if (exposure.shutterSeconds >= 1.0) {
+        "%.1f s".format(exposure.shutterSeconds)
+    } else {
+        "1/${(1.0 / exposure.shutterSeconds).roundToInt()} s"
+    }
+    val iso = if (exposure.iso > 0) " · ISO ${exposure.iso}" else ""
+    return "$program, posa $shutter$iso"
+}
+
+/** Il raddoppio copre il ritardo fra il comando e l'apertura dell'otturatore. */
+private const val EXPOSURE_SAFETY_FACTOR = 2.0
+private const val EXPOSURE_MARGIN_MS = 250.0
+private const val MIN_EXPOSURE_GUARD_MS = 300L
+
+/**
+ * Il tetto, e la ragione per cui è due secondi: nessuna posa che valga una panoramica dura di
+ * più, e oltre i due secondi si perderebbe comunque il vantaggio.
+ */
+private const val MAX_EXPOSURE_GUARD_MS = 2_000L
 
 /**
  * L'orientamento di uno scatto, come lo aveva chiesto il piano, e il file che ne è uscito.
@@ -350,58 +409,91 @@ class TimelapseEngine(
                 ),
             )
 
-            for (legIndex in 0 until sequence.legCount) {
-                val from = sequence.waypoints[legIndex]
-                val to = sequence.waypoints[legIndex + 1]
+            // Quanto dura la posa lo dice la camera: è l'unico momento in cui il gimbal deve
+            // stare fermo davvero. Si chiede una volta, prima di cominciare, e vale per tutta la
+            // sequenza — la scena non cambia da uno scatto all'altro di una panoramica.
+            val exposure = commands.fetchStillExposure(CameraMode.FOTO)
+            log.info(
+                "Esposizione dichiarata: ${describeExposure(exposure)}",
+                "È il dato di pre-scatto: dice quanto dura la posa prima che la posa cominci.",
+            )
 
-                for (shot in 0 until shotsPerLeg) {
-                    if (!currentCoroutineContext().isActive) return
-                    // Il primo scatto di un tratto successivo al primo è già stato fatto.
-                    if (shot == 0 && legIndex > 0) continue
+            val targets = photoTargets(sequence)
+            val guardMs = exposureGuardMillis(exposure)
+            if (sequence.moveWhileSaving) {
+                log.info(
+                    "Sposto il gimbal mentre la camera salva",
+                    "Attesa della posa: ${guardMs} ms. Dopo la posa il gimbal può muoversi, e " +
+                        "il tempo di scrittura si spende andando verso lo scatto successivo.",
+                )
+            }
 
-                    val t = shot.toFloat() / (shotsPerLeg - 1)
-                    val targetPan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation)
-                    val targetTilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation)
+            for ((index, target) in targets.withIndex()) {
+                if (!currentCoroutineContext().isActive) return
 
-                    val done = taken + missed
-                    val remaining = estimateRemaining(startedAtMs, done, planned)
+                val done = taken + missed
+                _state.value = _state.value.copy(
+                    phase = RunPhase.RUNNING,
+                    legIndex = target.legIndex,
+                    legProgress = target.legProgress,
+                    targetPan = target.pan,
+                    targetTilt = target.tilt,
+                    shotsTaken = taken,
+                    shotsPlanned = planned,
+                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                    secondsRemaining = estimateRemaining(startedAtMs, done, planned),
+                    shotsMissed = missed,
+                    message = "In posizione per lo scatto ${done + 1}/$planned",
+                )
+
+                // Dal secondo scatto in poi il gimbal è già arrivato: si è mosso mentre la
+                // camera salvava il precedente. Il richiamo resta perché è a vuoto se la
+                // posizione è già quella, e non lo è se lo spostamento non era finito.
+                approachShot(target, sequence)
+
+                _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
+                val fired = fireShot(done + 1, planned, target)
+                if (fired == null) {
+                    missed++
                     _state.value = _state.value.copy(
-                        phase = RunPhase.RUNNING,
-                        legIndex = legIndex,
-                        legProgress = t,
-                        targetPan = targetPan,
-                        targetTilt = targetTilt,
-                        shotsTaken = taken,
-                        shotsPlanned = planned,
-                        elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
-                        secondsRemaining = remaining,
                         shotsMissed = missed,
-                        message = "In posizione per lo scatto ${done + 1}/$planned",
-                    )
-
-                    // Fra fotografie conta ridurre il tempo morto: il dominante viaggia al 100%.
-                    // L'intervallo configurato resta il ritmo degli scatti, non la velocità del gimbal.
-                    gimbal.moveToPositionAtMaximum(targetPan, targetTilt)
-                        .getOrElse { throw IllegalStateException("Spostamento fotografico non riuscito: ${it.message}", it) }
-
-                    // Il gimbal deve essere davvero fermo prima dello scatto.
-                    delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
-
-                    _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
-                    val shot = shootOnce(done + 1, planned, targetPan, targetTilt)
-
-                    if (shot != null) taken++ else missed++
-                    _state.value = _state.value.copy(
-                        shotsTaken = taken,
-                        shotsMissed = missed,
-                        elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
                         secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
-                        // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
-                        // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
-                        // fotogramma nel posto del successivo.
-                        shotAngles = _state.value.shotAngles + listOfNotNull(shot),
+                    )
+                    continue
+                }
+
+                // La posa è finita: da qui in avanti il gimbal può muoversi senza mosso, e la
+                // camera continua a comprimere e scrivere per conto suo. È il pezzo di tempo
+                // che prima si stava a guardare.
+                val next = targets.getOrNull(index + 1)
+                if (sequence.moveWhileSaving && next != null) {
+                    delay(guardMs)
+                    _state.value = _state.value.copy(
+                        message = "Verso lo scatto ${done + 2}/$planned mentre la camera salva",
+                    )
+                    approachShot(next, sequence)
+                }
+
+                val written = commands.awaitCaptureIdle()
+                if (!written) {
+                    log.warn(
+                        "Scatto ${done + 1}: la camera è rimasta occupata",
+                        "Il file potrebbe non essere stato salvato.",
                     )
                 }
+
+                taken++
+                _state.value = _state.value.copy(
+                    shotsTaken = taken,
+                    shotsMissed = missed,
+                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                    secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
+                    // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
+                    // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
+                    // fotogramma nel posto del successivo.
+                    shotAngles = _state.value.shotAngles +
+                        ShotAngle(target.pan, target.tilt, fired.uri),
+                )
             }
 
             val elapsed = (System.currentTimeMillis() - startedAtMs) / 1000f
@@ -426,25 +518,18 @@ class TimelapseEngine(
     }
 
     /**
-     * Uno scatto, con un secondo tentativo se la camera lo lascia cadere.
+     * Manda lo scatto e aspetta solo che la camera lo accetti, con un secondo tentativo.
      *
-     * La camera accetta il comando e risponde subito, ma il file lo scrive dopo: fra le due cose
-     * passa più di un secondo. Chi va avanti sulla risposta chiede lo scatto successivo mentre il
-     * precedente si sta ancora salvando, e la camera lo perde senza dirlo — in una panoramica di
-     * 23 scatti se ne erano salvati 13, e le foto rimaste non erano più accoppiabili agli angoli.
+     * Accettare e salvare sono due momenti diversi: la camera risponde in tre decimi di secondo,
+     * poi resta occupata cinque secondi a comprimere e scrivere. Questa funzione si ferma al
+     * primo momento — chi la chiama decide cosa fare del secondo — e la ragione è che nel mezzo
+     * c'è la sola cosa che vincola il gimbal, la posa, e finita quella il gimbal è libero.
      *
-     * Il ritmo che la camera regge è noto: otto scatti in venti secondi, cioè uno ogni due secondi
-     * e mezzo. Non è quindi un limite da rispettare aspettando a vuoto, è un limite da rispettare
-     * aspettando *la camera*: si aspetta che torni libera, e appena lo è si riparte. Se non lo
-     * torna entro il tempo massimo, o se il comando non ha risposta, si riprova una volta sola —
-     * un buco in mezzo a una panoramica costa più di due secondi persi.
+     * Il secondo tentativo avviene sul posto, prima che ci si sia mossi: quando il comando non
+     * ha risposta non c'è stato nessuno scatto, e riprovare da qui costa un secondo mentre un
+     * buco in mezzo a una panoramica costa molto di più.
      */
-    private suspend fun shootOnce(
-        number: Int,
-        planned: Int,
-        panDegrees: Float,
-        tiltDegrees: Float,
-    ): ShotAngle? {
+    private suspend fun fireShot(number: Int, planned: Int, target: PhotoTarget): FiredShot? {
         repeat(SHOT_ATTEMPTS) { attempt ->
             if (!currentCoroutineContext().isActive) return null
             if (attempt > 0) {
@@ -452,37 +537,61 @@ class TimelapseEngine(
                 log.warn("Scatto $number: riprovo")
                 delay(SHOT_RETRY_DELAY_MS)
             }
-
-            var accepted = false
-            var uri: String? = null
+            var fired: FiredShot? = null
             commands.takePicture()
-                .onSuccess {
-                    accepted = true
-                    uri = it
-                }
+                .onSuccess { fired = FiredShot(it) }
                 .onFailure { log.warn("Scatto $number non riuscito: ${it.message}") }
-            if (!accepted) return@repeat
-
-            // La risposta arriva a file scritto e ne porta il percorso: se c'è, lo scatto è
-            // finito e si sa anche come si chiama. Senza percorso resta da controllare che la
-            // camera non stia ancora salvando.
-            if (uri != null || commands.awaitCaptureIdle()) {
+            fired?.let {
                 log.info(
-                    "Scatto $number/$planned a %.1f° / %.1f°".format(panDegrees, tiltDegrees),
-                    uri?.let { "File: $it" },
+                    "Scatto $number/$planned a %.1f° / %.1f°".format(target.pan, target.tilt),
+                    it.uri?.let { uri -> "File: $uri" },
                 )
-                return ShotAngle(panDegrees, tiltDegrees, uri)
+                return it
             }
-            log.warn(
-                "Scatto $number: la camera è rimasta occupata",
-                "Il file potrebbe non essere stato salvato.",
-            )
         }
         log.warn(
             "Scatto $number/$planned saltato",
-            "A %.1f° / %.1f° non c'è foto: l'unione avrà un buco lì.".format(panDegrees, tiltDegrees),
+            "A %.1f° / %.1f° la camera non ha risposto nemmeno al secondo tentativo: l'unione avrà un buco lì."
+                .format(target.pan, target.tilt),
         )
         return null
+    }
+
+    /** Va in posizione e aspetta che l'inerzia si esaurisca. A destinazione raggiunta è a vuoto. */
+    private suspend fun approachShot(target: PhotoTarget, sequence: TimelapseSequence) {
+        gimbal.moveToPositionAtMaximum(target.pan, target.tilt)
+            .getOrElse { throw IllegalStateException("Spostamento fotografico non riuscito: ${it.message}", it) }
+        delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
+    }
+
+    /**
+     * Le posizioni degli scatti, in ordine, con il tratto a cui appartengono.
+     *
+     * L'ultimo scatto di un tratto coincide con il primo del successivo e va contato una volta
+     * sola: su una panoramica due scatti identici nello stesso punto complicano l'unione invece
+     * di aiutarla. Distesi in un elenco unico perché ogni scatto deve sapere qual è il prossimo,
+     * e attraverso due cicli annidati non si vede.
+     */
+    private fun photoTargets(sequence: TimelapseSequence): List<PhotoTarget> {
+        val shotsPerLeg = sequence.effectiveShotsPerLeg()
+        return buildList {
+            for (legIndex in 0 until sequence.legCount) {
+                val from = sequence.waypoints[legIndex]
+                val to = sequence.waypoints[legIndex + 1]
+                for (shot in 0 until shotsPerLeg) {
+                    if (shot == 0 && legIndex > 0) continue
+                    val t = shot.toFloat() / (shotsPerLeg - 1)
+                    add(
+                        PhotoTarget(
+                            pan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation),
+                            tilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation),
+                            legIndex = legIndex,
+                            legProgress = t,
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     /**

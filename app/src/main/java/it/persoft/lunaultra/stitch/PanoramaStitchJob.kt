@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import it.persoft.lunaultra.media.GALLERY_FOLDER
+import it.persoft.lunaultra.media.GALLERY_RELATIVE_PATH
+import it.persoft.lunaultra.media.GALLERY_ROOT
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.media.MediaRepository
 import it.persoft.lunaultra.net.EventLog
@@ -179,7 +181,7 @@ class PanoramaStitchJob(
      * colonna che dice in quale sottocartella mettere il file esiste solo dalla decima in poi:
      * usarla comunque non è una regressione elegante, è un errore al momento del salvataggio.
      *
-     * Finisce in Immagini › Luna Ultra, la stessa cartella dove vanno le foto scaricate dalla
+     * Finisce in DCIM › Luna Ultra, la stessa cartella dove vanno le foto scaricate dalla
      * camera: la panoramica unita e gli scatti che l'hanno generata stanno insieme.
      */
     private fun save(bitmap: Bitmap): String {
@@ -216,7 +218,7 @@ class PanoramaStitchJob(
     }
 
     private fun saveToPublicDirectory(name: String, bitmap: Bitmap) {
-        val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+        val root = Environment.getExternalStoragePublicDirectory(GALLERY_ROOT)
         val directory = File(root, GALLERY_FOLDER).apply { mkdirs() }
         val target = File(directory, name)
         FileOutputStream(target).use { bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
@@ -234,8 +236,5 @@ class PanoramaStitchJob(
          * migliora niente, e una panoramica è già un file grande di suo.
          */
         const val JPEG_QUALITY = 92
-
-        val GALLERY_RELATIVE_PATH =
-            "${Environment.DIRECTORY_PICTURES}/${GALLERY_FOLDER}"
     }
 }

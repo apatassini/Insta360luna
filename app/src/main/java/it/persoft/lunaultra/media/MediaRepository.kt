@@ -32,10 +32,26 @@ import java.net.URL
 /**
  * La cartella della galleria del telefono dove finisce tutto quello che viene da questa camera.
  *
- * Una sola, condivisa: le foto scaricate e le panoramiche unite stanno insieme, e chi cerca
- * qualcosa guarda in un posto solo.
+ * Una sola, condivisa: le foto scaricate, i video e le panoramiche unite stanno insieme, e chi
+ * cerca qualcosa guarda in un posto solo.
  */
 const val GALLERY_FOLDER = "Luna Ultra"
+
+/**
+ * `DCIM`, non `Pictures`: sta con le foto della fotocamera, perché di quello si tratta.
+ *
+ * È la cartella che ogni galleria mostra per prima e che ogni programma di importazione va a
+ * cercare quando si collega il telefono al computer; `Pictures` è dove le app mettono le
+ * immagini che producono loro — schermate, copertine, adesivi. Questi file vengono da una
+ * camera, anche la panoramica unita, che è fatta di ventiquattro scatti di quella camera.
+ *
+ * Foto e video insieme, come fa la camera stessa in `DCIM/Camera01`: separarli in `Pictures` e
+ * `Movies` significa cercare in due posti quello che è stato ripreso nello stesso momento.
+ */
+val GALLERY_ROOT: String = Environment.DIRECTORY_DCIM
+
+/** Il percorso completo dentro la memoria condivisa: `DCIM/Luna Ultra`. */
+val GALLERY_RELATIVE_PATH: String = "$GALLERY_ROOT/$GALLERY_FOLDER"
 
 /**
  * La libreria della camera: elencare, guardare, scaricare.
@@ -511,7 +527,7 @@ class MediaRepository(
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, item.name)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType(item.extension))
-            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath(item))
+            put(MediaStore.MediaColumns.RELATIVE_PATH, GALLERY_RELATIVE_PATH)
             if (length > 0) put(MediaStore.MediaColumns.SIZE, length)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
@@ -529,19 +545,13 @@ class MediaRepository(
 
     /** Prima di Android 10 la galleria è una cartella, e va segnalata allo scanner dei media. */
     private fun writeToPublicDirectory(item: MediaItem, write: (OutputStream) -> Unit): Uri {
-        val root = Environment.getExternalStoragePublicDirectory(
-            if (item.isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
-        )
+        val root = Environment.getExternalStoragePublicDirectory(GALLERY_ROOT)
         val directory = File(root, GALLERY_FOLDER).apply { mkdirs() }
         val target = File(directory, item.name)
         FileOutputStream(target).use(write)
         MediaScannerConnection.scanFile(appContext, arrayOf(target.absolutePath), arrayOf(mimeType(item.extension)), null)
         return Uri.fromFile(target)
     }
-
-    private fun relativePath(item: MediaItem): String =
-        if (item.isVideo) "${Environment.DIRECTORY_MOVIES}/$GALLERY_FOLDER"
-        else "${Environment.DIRECTORY_PICTURES}/$GALLERY_FOLDER"
 
     // ------------------------------------------------------------------ utilità
 

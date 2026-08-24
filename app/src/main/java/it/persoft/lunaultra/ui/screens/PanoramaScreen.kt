@@ -356,7 +356,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                         )
                     }
                     LabeledValue("Salvata come", state.fileName, valueColor = Luna.Ok)
-                    Hint("La trovi in Immagini › Luna Ultra, nella galleria del telefono.")
+                    Hint("La trovi in DCIM › Luna Ultra, nella galleria del telefono.")
                 }
 
                 is StitchUiState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

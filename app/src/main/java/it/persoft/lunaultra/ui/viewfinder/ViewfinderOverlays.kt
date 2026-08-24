@@ -117,7 +117,7 @@ fun StitchCard(
 
             is StitchUiState.Done -> Text(
                 text = "${state.fileName} · ${state.report.canvasWidth}×${state.report.canvasHeight} px " +
-                    "· in Immagini › Luna Ultra",
+                    "· in DCIM › Luna Ultra",
                 style = MaterialTheme.typography.bodySmall,
                 color = Luna.OnSurfaceDim,
             )

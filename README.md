@@ -407,7 +407,8 @@ dita, i video si riproducono dalla **copia locale del proxy**, non in streaming 
 il lettore di sistema apre connessioni sue, che non passano dal binding sulla rete della camera.
 
 Tenendo premuto si entra in selezione multipla; il pulsante scarica i file scelti nella galleria
-del telefono, in `Immagini/Luna Ultra` e `Filmati/Luna Ultra`, dicendo a che punto è — «3 di 6»,
+del telefono, in `DCIM/Luna Ultra` — foto, video e panoramiche unite nello stesso posto, come
+fa la camera in `DCIM/Camera01` — dicendo a che punto è — «3 di 6»,
 non sei volte «scaricamento in corso». Lo scaricamento va diritto dentro
 MediaStore invece di passare da una copia in cache: un video lungo occuperebbe due volte lo
 spazio, e su un telefono pieno è la differenza fra riuscire e no. Continua anche se chiudi la

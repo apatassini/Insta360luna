@@ -557,6 +557,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 when (state) {
                     ConnectionState.CONNECTED -> {
                         reconnectAttempts = 0
+                        // Un tentativo di riconnessione ancora in attesa va spento subito:
+                        // se scattasse ora aprirebbe una seconda connessione di controllo,
+                        // e la camera ne ammette una sola — chiuderebbe questa per far
+                        // posto all'altra, cioè ci butteremmo giù da soli.
+                        reconnectJob?.cancel()
+                        reconnectJob = null
                         // La connessione resta manuale, ma una volta riuscita il mirino deve
                         // mostrare subito l'immagine senza richiedere un secondo pulsante.
                         container.preview.start()
@@ -612,6 +618,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.log.warn("Sessione caduta: riprovo fra ${wait / 1000}s (tentativo $attempt)")
             delay(wait)
             if (!wantConnected) return@launch
+            // Nel frattempo la connessione principale può essere riuscita da sola:
+            // in quel caso questo tentativo non deve toccare niente.
+            if (connectionState.value == ConnectionState.CONNECTED) return@launch
             val currentSettings = settings.value
             val network = container.wifiBinder.acquire(
                 password = currentSettings.cameraWifiPassword,

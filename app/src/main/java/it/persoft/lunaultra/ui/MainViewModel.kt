@@ -264,7 +264,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val countsByCode = mutableMapOf<Int, Int>()
 
     /** L'utente vuole essere connesso: resta vero finché non preme «disconnetti». */
-    private var wantConnected = false
+    /**
+     * La volontà dell'utente di stare connesso, come flusso: la legge anche il servizio in
+     * primo piano, che deve restare in piedi *durante* una riconnessione. Se cadesse lì,
+     * l'app in secondo piano perderebbe il diritto di richiedere la rete della camera e la
+     * riconnessione morirebbe in silenzio — era il «cambio app e non si riconnette più».
+     */
+    private val wantConnectedFlow = MutableStateFlow(false)
+    private var wantConnected: Boolean
+        get() = wantConnectedFlow.value
+        set(value) { wantConnectedFlow.value = value }
     private var reconnectAttempts = 0
     private var reconnectJob: Job? = null
     private var connectionJob: Job? = null
@@ -348,14 +357,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun observeForegroundService() {
         viewModelScope.launch {
             combine(
-                connectionState,
+                combine(connectionState, wantConnectedFlow) { c, w -> c to w },
                 _recordingSinceMs,
                 runState,
                 _status,
                 gimbalCalibrationState,
-            ) { connection, recordingSince, run, status, calibration ->
+            ) { (connection, wanted), recordingSince, run, status, calibration ->
                 when {
-                    connection != ConnectionState.CONNECTED -> null
+                    // Durante una riconnessione il servizio deve restare in piedi: è lui che
+                    // tiene l'app «in primo piano» per Android, e senza quello stato la
+                    // richiesta della rete Wi-Fi della camera non è più permessa.
+                    connection != ConnectionState.CONNECTED ->
+                        if (wanted) "Riconnessione alla camera…" else null
                     calibration.running -> if (calibration.pausedForPreview) {
                         "Calibrazione gimbal in pausa — riapri l'app per l'anteprima"
                     } else {
@@ -2577,7 +2590,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Attesa del primo tentativo di riaggancio; i successivi raddoppiano. */
         const val RECONNECT_BASE_MS = 2_000L
-        const val MAX_RECONNECT_ATTEMPTS = 6
+
+        /**
+         * Tanti, apposta: con il servizio in piedi ritentare costa poco, e una sequenza che
+         * gira mentre l'app è in secondo piano merita più di un minuto di pazienza. Il passo
+         * si ferma a sedici secondi: dodici tentativi sono circa tre minuti.
+         */
+        const val MAX_RECONNECT_ATTEMPTS = 12
 
         /**
          * Pausa fra una lettura e la successiva. Con più codici a rotazione questo è il passo

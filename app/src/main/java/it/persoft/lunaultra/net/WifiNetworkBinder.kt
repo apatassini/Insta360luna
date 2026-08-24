@@ -64,6 +64,11 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
             // manuale. Prima di adottare la rete già attiva lo si elimina.
             unregisterRequest()
             network = it
+            // La rete adottata va anche *rivendicata*: senza una richiesta in piedi, per
+            // ConnectivityManager una Wi-Fi senza Internet non serve a nessuno, e appena
+            // l'app va in secondo piano il sistema è libero di lasciarla per tornare ai
+            // dati mobili. È il «cambio app e si disconnette»: la richiesta la pianta lì.
+            pinCurrentWifi()
             log.info("Wi-Fi Luna già connesso: ${ssidOf(it) ?: LUNA_SSID_PREFIX}")
             return it
         }
@@ -344,6 +349,37 @@ class WifiNetworkBinder(context: Context, private val log: EventLog) : SocketBin
     fun release() {
         unregisterRequest()
         network = null
+    }
+
+    /**
+     * Tiene in vita la Wi-Fi corrente con una richiesta senza specifier.
+     *
+     * Serve alla rete a cui l'utente si è collegato dalle impostazioni di sistema: non è stata
+     * chiesta dall'app, quindi nessuno la sta «usando» agli occhi di ConnectivityManager, e
+     * una Wi-Fi che non dichiara Internet viene abbandonata appena lo schermo si spegne o
+     * l'app passa in secondo piano. Una richiesta registrata dice al sistema che quella rete
+     * ha un cliente, e il cliente resta anche in secondo piano.
+     */
+    private fun pinCurrentWifi() {
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(available: Network) {
+                if (callback !== this) return
+                network = available
+            }
+
+            override fun onLost(lost: Network) {
+                if (callback !== this) return
+                if (network == lost) network = null
+                log.warn("Rete Wi-Fi persa")
+            }
+        }
+        callback = cb
+        runCatching { connectivityManager.requestNetwork(request, cb) }
+            .onFailure { log.warn("Rivendicazione della Wi-Fi non riuscita: ${it.message}") }
     }
 
     private fun unregisterRequest() {

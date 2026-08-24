@@ -1,6 +1,9 @@
 package it.persoft.lunaultra.ui.viewfinder
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,7 +21,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.ui.components.HudIconButton
@@ -63,6 +69,7 @@ fun CaptureBar(
     onOpenGallery: () -> Unit,
     vertical: Boolean,
     modifier: Modifier = Modifier,
+    latestThumb: android.graphics.Bitmap? = null,
 ) {
     if (vertical) {
         Column(
@@ -81,6 +88,7 @@ fun CaptureBar(
                     onCaptureWaypoint = onCaptureWaypoint,
                     onRemoveLastWaypoint = onRemoveLastWaypoint,
                     onOpenGallery = onOpenGallery,
+                    latestThumb = latestThumb,
                     size = 34.dp,
                 )
                 HudIconButton(
@@ -123,6 +131,7 @@ fun CaptureBar(
                     onCaptureWaypoint = onCaptureWaypoint,
                     onRemoveLastWaypoint = onRemoveLastWaypoint,
                     onOpenGallery = onOpenGallery,
+                    latestThumb = latestThumb,
                     size = 42.dp,
                 )
             }
@@ -174,18 +183,35 @@ private fun LeftSlot(
     onCaptureWaypoint: () -> Unit,
     onRemoveLastWaypoint: () -> Unit,
     onOpenGallery: () -> Unit,
+    latestThumb: android.graphics.Bitmap?,
     size: androidx.compose.ui.unit.Dp,
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        HudIconButton(
-            icon = LunaIcons.Gallery,
-            contentDescription = "Galleria della camera",
-            onClick = onOpenGallery,
-            size = size,
-        )
+        // Il pulsante della galleria è l'ultima foto: quando la miniatura cambia, lo scatto
+        // è sulla scheda. È la conferma che non ha bisogno di parole, la stessa dell'app
+        // ufficiale. Finché non c'è nessuna foto nota resta l'icona.
+        if (latestThumb != null) {
+            Image(
+                bitmap = latestThumb.asImageBitmap(),
+                contentDescription = "Galleria della camera · ultima foto",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape)
+                    .border(1.dp, Luna.GlassBorder, CircleShape)
+                    .clickable(onClick = onOpenGallery),
+            )
+        } else {
+            HudIconButton(
+                icon = LunaIcons.Gallery,
+                contentDescription = "Galleria della camera",
+                onClick = onOpenGallery,
+                size = size,
+            )
+        }
         HudIconButton(
             icon = LunaIcons.Waypoint,
             contentDescription = "Memorizza il punto corrente",

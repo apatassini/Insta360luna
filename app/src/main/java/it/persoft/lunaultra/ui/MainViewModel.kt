@@ -212,6 +212,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val recordingSinceMs: StateFlow<Long> = _recordingSinceMs
 
     private val _gallery = MutableStateFlow(GalleryState())
+
+    /**
+     * L'ultima foto salvata sulla camera, in miniatura: vive sul pulsante della galleria.
+     *
+     * È anche la conferma visiva che lo scatto è andato: quando la miniatura cambia, il file
+     * c'è. L'app ufficiale fa lo stesso, ed è il posto giusto — dove l'occhio va da solo.
+     */
+    private val _latestShotThumb = MutableStateFlow<android.graphics.Bitmap?>(null)
+    val latestShotThumb: StateFlow<android.graphics.Bitmap?> = _latestShotThumb
+
+    /** Il percorso dell'ultima foto nota: serve a riconoscere quando ne compare una nuova. */
+    @Volatile
+    private var lastKnownNewestPhotoPath: String? = null
     val gallery: StateFlow<GalleryState> = _gallery
 
     /** I file segnati con la stella, ricaricati all'avvio. */
@@ -309,8 +322,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var previous = runState.value.phase
             runState.collect { state ->
                 if (previous != RunPhase.COMPLETED && state.phase == RunPhase.COMPLETED) {
-                    // I file nuovi sono sulla camera: la galleria deve saperlo.
+                    // I file nuovi sono sulla camera: la galleria deve saperlo, e il pulsante
+                    // deve mostrare l'ultimo scatto della sequenza appena finita.
                     markGalleryStale()
+                    viewModelScope.launch {
+                        container.media.list().onSuccess { noteNewestPhoto(it) }
+                    }
                     stitchPanoramaIfRequested(state.shotAngles)
                 }
                 // L'ultimo scatto non ha un seguito che spenga l'avviso: la notifica dice
@@ -531,6 +548,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         // mostrare subito l'immagine senza richiedere un secondo pulsante.
                         container.preview.start()
                         container.log.info("Anteprima avviata automaticamente dopo la connessione")
+                        // Il pulsante della galleria mostra l'ultima foto: appena connessi si
+                        // va a vedere qual è, senza aspettare che qualcuno apra la galleria.
+                        if (lastKnownNewestPhotoPath == null) {
+                            viewModelScope.launch {
+                                container.media.list().onSuccess { noteNewestPhoto(it) }
+                            }
+                        }
                         pollJob = viewModelScope.launch {
                             while (isActive) {
                                 delay(STATUS_POLL_MS)
@@ -1518,25 +1542,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var captureWatchJob: Job? = null
 
     /**
-     * Il guardiano della scrittura: aspetta che la camera torni libera e parla solo se non lo fa.
+     * Il guardiano della scrittura: la verità è il file, e la verifica arriva fin lì.
      *
-     * Un guardiano solo anche con più scatti in coda: la domanda a cui risponde è «la camera
-     * sta ancora scrivendo o si è piantata?», e la risposta vale per tutta la coda.
+     * Aspettare che la camera torni libera non basta più a dire «salvato»: libera lo è anche
+     * quando ha buttato lo scatto. Quindi, tornata libera, si rilegge l'elenco dei file: se in
+     * cima c'è una foto nuova lo scatto esiste, la miniatura sul pulsante della galleria si
+     * aggiorna con quella, e la galleria riceve l'elenco fresco. Se non c'è, lo si dice.
+     *
+     * Un guardiano solo anche con più scatti in coda: la domanda è «la camera sta ancora
+     * scrivendo o si è piantata?», e la risposta vale per tutta la coda.
      */
     private fun watchCaptureCompletion() {
         if (captureWatchJob?.isActive == true) return
         captureWatchJob = viewModelScope.launch {
-            if (container.commands.awaitCaptureIdle(SINGLE_SHOT_SAVE_TIMEOUT_MS)) return@launch
-            container.log.warn(
-                "La camera è rimasta appesa in cattura",
-                "Riavvio il flusso dell'anteprima: è quello che la sblocca.",
-            )
-            container.preview.restart()
-            if (container.commands.awaitCaptureIdle()) {
-                showMessage("La camera si era bloccata: sbloccata, controlla la galleria")
-            } else {
-                showMessage("La camera non sta salvando: spegnila e riaccendila")
+            if (!container.commands.awaitCaptureIdle(SINGLE_SHOT_SAVE_TIMEOUT_MS)) {
+                container.log.warn(
+                    "La camera è rimasta appesa in cattura",
+                    "Riavvio il flusso dell'anteprima: è quello che la sblocca.",
+                )
+                container.preview.restart()
+                if (!container.commands.awaitCaptureIdle()) {
+                    showMessage("La camera non sta salvando: spegnila e riaccendila")
+                    return@launch
+                }
             }
+            val before = lastKnownNewestPhotoPath
+            container.media.list().onSuccess { items ->
+                val newest = items.firstOrNull { !it.isVideo }
+                if (newest != null && newest.path != before) {
+                    _gallery.value = _gallery.value.copy(
+                        items = items,
+                        error = null,
+                        loadedAtMs = System.currentTimeMillis(),
+                    )
+                    noteNewestPhoto(items)
+                    showMessage("Salvata: ${newest.name}")
+                } else {
+                    container.log.warn(
+                        "Scatto senza file",
+                        "La camera è tornata libera ma l'elenco non ha foto nuove.",
+                    )
+                    showMessage("La camera non ha salvato nessun file nuovo")
+                }
+            }
+        }
+    }
+
+    /** Prende nota dell'ultima foto e ne carica la miniatura per il pulsante della galleria. */
+    private fun noteNewestPhoto(items: List<MediaItem>) {
+        val newest = items.firstOrNull { !it.isVideo } ?: return
+        if (newest.path == lastKnownNewestPhotoPath && _latestShotThumb.value != null) return
+        lastKnownNewestPhotoPath = newest.path
+        viewModelScope.launch {
+            container.media.thumbnail(newest)?.let { _latestShotThumb.value = it }
         }
     }
 
@@ -2094,6 +2152,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = if (items.isEmpty()) "Nessun file sulla camera" else null,
                         loadedAtMs = System.currentTimeMillis(),
                     )
+                    noteNewestPhoto(items)
                     warmThumbnails(items)
                 }
                 .onFailure {

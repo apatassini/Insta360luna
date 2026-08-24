@@ -70,6 +70,7 @@ fun ViewfinderScreen(
     val preview by viewModel.preview.collectAsState()
     val sequence by viewModel.sequence.collectAsState()
     val cameraSaving by viewModel.cameraSaving.collectAsState()
+    val latestThumb by viewModel.latestShotThumb.collectAsState()
     val run by viewModel.runState.collectAsState()
     val ptz by viewModel.ptz.collectAsState()
     val moving by viewModel.gimbalMoving.collectAsState()
@@ -415,6 +416,7 @@ fun ViewfinderScreen(
                     onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
                     onOpenGallery = { onOpenPanel(Panel.GALLERY) },
                     vertical = landscape,
+                    latestThumb = latestThumb,
                 )
             }
 

@@ -174,6 +174,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _status = MutableStateFlow(CameraStatus())
     val status: StateFlow<CameraStatus> = _status
 
+    /**
+     * La camera sta salvando lo scatto, e lo dice lei.
+     *
+     * Serve a spiegare l'attesa invece di lasciarla senza motivo: fra uno scatto e il successivo
+     * di una sequenza non è l'app che ci mette, è la camera che comprime e scrive.
+     *
+     * Sta qui sopra, prima di `init`, e non è un dettaglio di stile: `init` avvia i collettori,
+     * `viewModelScope` gira su `Dispatchers.Main.immediate`, e uno `StateFlow` consegna subito il
+     * valore che ha. Il corpo del collettore parte quindi *dentro* il costruttore, e tutto quello
+     * che tocca deve essere già stato costruito. Dichiarato più in basso valeva null, e l'app si
+     * chiudeva all'avvio senza arrivare a disegnare niente.
+     */
+    private val _cameraSaving = MutableStateFlow(false)
+    val cameraSaving: StateFlow<Boolean> = _cameraSaving
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
@@ -262,6 +277,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var probeJob: Job? = null
     private var monitorJob: Job? = null
 
+    /**
+     * I collettori partono da qui, e partono *davvero* da qui.
+     *
+     * `viewModelScope` gira su `Dispatchers.Main.immediate`: una `launch` chiamata dal thread
+     * principale non viene rimandata, comincia subito. E uno `StateFlow` consegna il valore che
+     * ha già al primo collettore che arriva. Il corpo di questi osservatori esegue quindi il suo
+     * primo giro *dentro* il costruttore, prima che le proprietà dichiarate più sotto esistano.
+     *
+     * Regola: tutto ciò che questi osservatori toccano va dichiarato sopra questo blocco. Una
+     * riga aggiunta a un collettore che leggeva una proprietà dichiarata più in basso ha chiuso
+     * l'app all'avvio, senza arrivare a disegnare niente e senza lasciare traccia nel log.
+     */
     init {
         viewModelScope.launch { container.load() }
         observeNotifications()
@@ -1143,15 +1170,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Pausa fra una lettura e l'altra: la camera salva una foto in poco più di un secondo. */
     private val FILE_SETTLE_DELAY_MS = 1_500L
-
-    /**
-     * La camera sta comprimendo o scrivendo il file, e lo dice lei (notifica 8202).
-     *
-     * Serve a spiegare l'attesa invece di lasciarla senza motivo: fra uno scatto e il successivo
-     * di una sequenza non è l'app che ci mette, è la scheda.
-     */
-    private val _cameraSaving = MutableStateFlow(false)
-    val cameraSaving: StateFlow<Boolean> = _cameraSaving
 
     /** Stato dell'unione automatica, per il pannello della panoramica. */
     private val _stitchState = MutableStateFlow<StitchUiState>(StitchUiState.Idle)

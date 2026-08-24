@@ -85,7 +85,7 @@ fun LunaApp(viewModel: MainViewModel) {
         ) {
             PanelHost(panel = panel, onClose = { panelOrdinal = Panel.NONE.ordinal }) {
                 when (panel) {
-                    Panel.GALLERY -> GalleryScreen(viewModel)
+                    Panel.GALLERY -> GalleryScreen(viewModel, onClose = { panelOrdinal = Panel.NONE.ordinal })
                     Panel.SEQUENCE -> SequenceScreen(viewModel)
                     Panel.PANORAMA -> PanoramaScreen(viewModel)
                     Panel.SETTINGS -> SettingsScreen(viewModel, onOpenDiagnostics = {
@@ -115,6 +115,12 @@ private fun PanelHost(
 ) {
     Surface(modifier = Modifier.fillMaxSize(), color = Luna.Bg) {
         Column(modifier = Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+            // La galleria si disegna l'intestazione da sola, tutta su una riga: qui una riga
+            // col solo pulsante indietro le rubava un centimetro di schermo.
+            if (panel == Panel.GALLERY) {
+                content()
+                return@Column
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -128,7 +134,7 @@ private fun PanelHost(
                     onClick = onClose,
                     size = 42.dp,
                 )
-                if (panel != Panel.GALLERY) {
+                run {
                     // L'icona dentro il suo cerchio colorato, come nelle sezioni: aprendo un
                     // pannello si riconosce dove si è dal colore prima ancora di leggere.
                     Box(

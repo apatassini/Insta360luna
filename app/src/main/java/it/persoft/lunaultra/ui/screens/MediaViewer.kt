@@ -297,21 +297,8 @@ fun MediaViewer(
                     )
                 }
 
-                HudIconButton(
-                    icon = LunaIcons.Left,
-                    contentDescription = "File precedente",
-                    onClick = { onStep(-1) },
-                    size = 52.dp,
-                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 10.dp),
-                )
-                HudIconButton(
-                    icon = LunaIcons.Right,
-                    contentDescription = "File successivo",
-                    onClick = { onStep(1) },
-                    size = 52.dp,
-                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
-                )
-
+                // Niente frecce sopra la foto: si cambia toccando i bordi laterali, che ci
+                // sono già e non coprono niente.
                 if (total > 0 && state.index >= 0) {
                     Text(
                         text = "${state.index + 1} / $total",

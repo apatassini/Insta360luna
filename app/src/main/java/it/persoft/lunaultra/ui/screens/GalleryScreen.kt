@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,7 +35,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -56,6 +56,7 @@ import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.viewfinder.StitchCard
 import it.persoft.lunaultra.ui.components.ButtonLabel
+import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
@@ -81,7 +82,7 @@ private enum class GalleryFilter(val label: String) {
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun GalleryScreen(viewModel: MainViewModel) {
+fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
     val stitch by viewModel.stitchState.collectAsState()
     val gallery by viewModel.gallery.collectAsState()
     val viewer by viewModel.viewer.collectAsState()
@@ -102,15 +103,23 @@ fun GalleryScreen(viewModel: MainViewModel) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
+            // Tutta l'intestazione su una riga: indietro, filtri, aggiorna. Lo spazio sopra
+            // è della griglia, non dei bottoni.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // I filtri scorrono se non entrano: quattro pastiglie più «Aggiorna» su un
-                // telefono stretto sforavano, e la stella dei preferiti finiva fuori riga.
+                HudIconButton(
+                    icon = LunaIcons.Back,
+                    contentDescription = "Torna al mirino",
+                    onClick = onClose,
+                    size = 38.dp,
+                )
+                // I filtri scorrono se non entrano: le pastiglie su un telefono stretto
+                // sforavano, e la stella dei preferiti finiva fuori riga.
                 Row(
                     modifier = Modifier
                         .weight(1f)
@@ -158,9 +167,13 @@ fun GalleryScreen(viewModel: MainViewModel) {
                         )
                     }
                 }
-                TextButton(onClick = { viewModel.refreshGallery(force = true) }, enabled = !gallery.loading) {
-                    ButtonLabel(LunaIcons.Refresh, "Aggiorna")
-                }
+                HudIconButton(
+                    icon = LunaIcons.Refresh,
+                    contentDescription = "Aggiorna l'elenco",
+                    onClick = { viewModel.refreshGallery(force = true) },
+                    enabled = !gallery.loading,
+                    size = 38.dp,
+                )
             }
 
             // L'unione lavora anche da qui: la sua carta dice cosa sta facendo e com'è finita,
@@ -171,29 +184,6 @@ fun GalleryScreen(viewModel: MainViewModel) {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
             )
 
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "${gallery.items.size} file · ${gallery.photos} foto · ${gallery.videos} video",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Luna.OnSurfaceDim,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (gallery.items.isNotEmpty()) {
-                    Text(
-                        text = if (gallery.selectionMode) "${gallery.selected.size} selezionati"
-                        else "premi a lungo = seleziona",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (gallery.selectionMode) Luna.Accent else Luna.OnSurfaceDim,
-                        maxLines = 1,
-                    )
-                }
-            }
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
@@ -295,21 +285,44 @@ fun GalleryScreen(viewModel: MainViewModel) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedButton(onClick = viewModel::clearSelection) { Text("Annulla") }
-                    OutlinedButton(onClick = viewModel::selectAll) {
-                        ButtonLabel(LunaIcons.SelectAll, "Tutti")
-                    }
+                    // Solo icone: quattro parole non entravano nella riga, e a sparire era
+                    // sempre l'ultima — il pulsante di scaricamento.
+                    HudIconButton(
+                        icon = LunaIcons.Close,
+                        contentDescription = "Annulla la selezione",
+                        onClick = viewModel::clearSelection,
+                        size = 42.dp,
+                    )
+                    HudIconButton(
+                        icon = LunaIcons.SelectAll,
+                        contentDescription = "Seleziona tutti",
+                        onClick = viewModel::selectAll,
+                        size = 42.dp,
+                    )
                     // Le foto scelte si uniscono nell'ordine in cui sono state scattate: è il
                     // banco di prova dell'unione, senza dover rifare la panoramica ogni volta.
-                    OutlinedButton(
+                    HudIconButton(
+                        icon = LunaIcons.Panorama,
+                        contentDescription = "Unisci le foto selezionate",
                         onClick = viewModel::stitchSelectedFromCamera,
                         enabled = gallery.selected.size >= 2,
-                    ) {
-                        ButtonLabel(LunaIcons.Panorama, "Unisci")
-                    }
-                    Button(onClick = viewModel::downloadSelected, modifier = Modifier.weight(1f)) {
-                        ButtonLabel(LunaIcons.Download, "Scarica ${gallery.selected.size}")
-                    }
+                        size = 42.dp,
+                        activeColor = Luna.Pano,
+                        selected = gallery.selected.size >= 2,
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        text = "${gallery.selected.size}",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Luna.Accent,
+                    )
+                    HudIconButton(
+                        icon = LunaIcons.Download,
+                        contentDescription = "Scarica i selezionati",
+                        onClick = viewModel::downloadSelected,
+                        size = 46.dp,
+                        selected = true,
+                    )
                 }
             } else if (gallery.queueTotal > 0) {
                 Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {

@@ -55,11 +55,12 @@ data class StitchOutcome(val bitmap: Bitmap, val report: StitchReport)
  * all'obiettivo": non è un ritocco, è la geometria della lente applicata al contrario.
  *
  * **Raffinatura.** La posizione nominale non è esatta — il gimbal naviga a stima e sbaglia di
- * gradi — e la correzione si misura sui **punti di coerenza**, come fanno Autopano e i suoi
- * eredi: dettagli con carattere trovati nel vicino già sistemato, ritrovati per correlazione
- * nel fotogramma da sistemare, e trasformati ciascuno in un voto in gradi. La mediana dei voti
- * scarta gli accoppiamenti sbagliati, i concordi decidono. Dove i dettagli mancano (cielo,
- * muri lisci) resta la vecchia ricerca sulle differenze di colore, come rete.
+ * gradi — e la correzione si misura registrando ogni fotogramma sul vicino già sistemato,
+ * dalla nebbia al dettaglio: correlazione normalizzata sulla piramide di luminanza, prima a un
+ * ottavo della risoluzione con la finestra larga quanto tutto l'errore possibile, poi sempre
+ * più fine con finestre sempre più strette. Al livello sfocato i motivi ripetuti — le foglie
+ * di una palma a ventaglio — sono una massa unica e non ingannano; al livello fine resta solo
+ * la rifinitura. È l'ordine con cui lavorano i programmi seri, Autopano compreso.
  *
  * **Fusione.** Multibanda, lo «spline» di Autopano ([MultibandBlender]): ogni pixel appartiene
  * al fotogramma che lì è più a casa sua, il dettaglio fino cambia mano in un taglio netto —
@@ -124,16 +125,53 @@ class PanoramaStitcher(
         }
     }
 
+    /** Un livello della piramide di luminanza: i dati e la sua misura. */
+    private class GrayLevel(val data: FloatArray, val width: Int, val height: Int)
+
     private class Frame(val bitmap: Bitmap, val pixels: IntArray, val label: String) {
         val width get() = bitmap.width
         val height get() = bitmap.height
 
-        /** La luminanza, calcolata una volta: i punti di coerenza si cercano qui sopra. */
+        /** La luminanza, calcolata una volta: l'allineamento lavora qui sopra. */
         val gray: FloatArray by lazy {
             FloatArray(pixels.size) { i ->
                 val c = pixels[i]
                 0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
             }
+        }
+
+        /**
+         * La piramide della luminanza: ogni livello dimezza.
+         *
+         * È la difesa contro i motivi ripetuti. A piena risoluzione le foglie di una palma a
+         * ventaglio sono un pettine: spostandosi di una foglia l'immagine combacia di nuovo, e
+         * qualunque confronto locale può agganciarsi alla foglia sbagliata con grande
+         * convinzione. A un ottavo della risoluzione il pettine è una massa unica, e resta solo
+         * il combaciamento vero. La ricerca parte da lì e si raffina scendendo.
+         */
+        val grayLevels: List<GrayLevel> by lazy {
+            val levels = ArrayList<GrayLevel>(PYRAMID_LEVELS)
+            levels += GrayLevel(gray, width, height)
+            while (levels.size < PYRAMID_LEVELS) {
+                val prev = levels.last()
+                val nw = (prev.width + 1) / 2
+                val nh = (prev.height + 1) / 2
+                val data = FloatArray(nw * nh)
+                for (y in 0 until nh) {
+                    val sy = min(y * 2, prev.height - 1)
+                    val sy1 = min(sy + 1, prev.height - 1)
+                    for (x in 0 until nw) {
+                        val sx = min(x * 2, prev.width - 1)
+                        val sx1 = min(sx + 1, prev.width - 1)
+                        data[y * nw + x] = (
+                            prev.data[sy * prev.width + sx] + prev.data[sy * prev.width + sx1] +
+                                prev.data[sy1 * prev.width + sx] + prev.data[sy1 * prev.width + sx1]
+                            ) / 4f
+                    }
+                }
+                levels += GrayLevel(data, nw, nh)
+            }
+            levels
         }
     }
 
@@ -166,18 +204,16 @@ class PanoramaStitcher(
     )
 
     /**
-     * Corregge la posizione di ogni fotogramma con i punti di coerenza, alla maniera di Autopano.
+     * Corregge la posizione di ogni fotogramma con la registrazione a piramide.
      *
-     * Per ogni fotogramma si prendono i vicini già sistemati (fino a due: quello di fianco e
-     * quello della fila accanto, così le file si richiudono fra loro), si trovano nei vicini i
-     * dettagli con più carattere — angoli, non bordi lisci — e ogni dettaglio si va a cercare
-     * nel fotogramma da sistemare, dove la geometria dice che dovrebbe stare. La differenza fra
-     * il previsto e il trovato, in gradi, è un voto sulla correzione.
-     *
-     * I voti si contano alla maniera robusta: mediana, poi si tengono solo i concordi — un
-     * accoppiamento sbagliato su un motivo ripetuto vota per una correzione assurda, e la
-     * mediana lo ignora. Se i punti concordi sono pochi (un muro liscio, il cielo) si torna
-     * alla vecchia ricerca sulle differenze di colore, che non ha bisogno di dettagli.
+     * Ogni fotogramma, dopo il primo, viene confrontato con il vicino già sistemato nella zona
+     * in cui i due si sovrappongono. Il confronto è una correlazione normalizzata su un
+     * campione di punti — indifferente all'esposizione — e la ricerca è dalla nebbia al
+     * dettaglio: prima su una versione a un ottavo, dove un errore di otto gradi si vede e i
+     * motivi ripetuti non ingannano, poi via via più fine su versioni più nitide, con
+     * finestre sempre più strette. È il modo dei programmi seri, ed è il contrario di una
+     * ricerca locale a piena risoluzione, che su una palma a ventaglio si aggancia alla foglia
+     * sbagliata con grande convinzione — misurato, e si vedeva.
      */
     private suspend fun refine(
         frames: List<Frame>,
@@ -191,411 +227,223 @@ class PanoramaStitcher(
 
         for (index in 1 until frames.size) {
             currentCoroutineContext().ensureActive()
-            onProgress(0.10f + 0.25f * index / frames.size, "Cerco i punti di coerenza di ${frames[index].label}")
+            onProgress(0.10f + 0.25f * index / frames.size, "Allineo ${frames[index].label}")
 
-            // I vicini già sistemati più vicini in angolo: sono quelli con cui si sovrappone.
+            // I vicini già sistemati più vicini in angolo: quello di fianco e, se c'è, quello
+            // della fila accanto — così le file della griglia si richiudono fra loro.
             val anchors = (0 until index)
-                .sortedBy {
-                    angularDistance(
-                        placements[it].effectivePan,
-                        placements[it].effectiveTilt,
+                .map { anchor ->
+                    anchor to angularDistance(
+                        placements[anchor].effectivePan,
+                        placements[anchor].effectiveTilt,
                         placements[index].panDegrees,
                         placements[index].tiltDegrees,
                     )
                 }
-                .filter {
-                    angularDistance(
-                        placements[it].effectivePan,
-                        placements[it].effectiveTilt,
-                        placements[index].panDegrees,
-                        placements[index].tiltDegrees,
-                    ) < max(lens.horizontalFovDegrees, lens.verticalFovDegrees)
-                }
+                .filter { (_, distance) -> distance < max(lens.horizontalFovDegrees, lens.verticalFovDegrees) }
+                .sortedBy { (_, distance) -> distance }
                 .take(MAX_ANCHORS)
+                .map { (anchor, _) -> anchor }
             if (anchors.isEmpty()) continue
 
-            val votes = mutableListOf<FloatArray>()
-            anchors.forEach { anchor ->
-                votes += matchFeatures(
+            val results = anchors.mapNotNull { anchor ->
+                registerPair(
                     moving = frames[index],
-                    movingPlacement = placements[index],
                     fixed = frames[anchor],
+                    movingPlacement = placements[index],
                     fixedPlacement = placements[anchor],
                     lens = lens,
                 )
             }
-
-            var offset: Offset? = null
-            var how = ""
-            if (votes.size >= MIN_MATCHES) {
-                val medPan = median(votes.map { it[0] })
-                val medTilt = median(votes.map { it[1] })
-                val inliers = votes.filter {
-                    abs(it[0] - medPan) <= INLIER_TOLERANCE_DEGREES &&
-                        abs(it[1] - medTilt) <= INLIER_TOLERANCE_DEGREES
-                }
-                if (inliers.size >= MIN_INLIERS) {
-                    offset = Offset(
-                        inliers.map { it[0] }.average().toFloat(),
-                        inliers.map { it[1] }.average().toFloat(),
-                    )
-                    how = "${votes.size} punti di coerenza, ${inliers.size} concordi"
-                }
-            }
-            if (offset == null) {
-                // Pochi dettagli o troppo discordi: la vecchia ricerca sulle differenze di
-                // colore non ha bisogno di angoli, e qui fa da rete.
-                offset = searchOffset(
-                    moving = frames[index],
-                    fixed = frames[anchors.first()],
-                    movingPlacement = placements[index],
-                    fixedPlacement = placements[anchors.first()],
-                    lens = lens,
-                    canvas = canvas,
-                )
-                how = "pochi punti di coerenza (${votes.size}): ricerca sul colore"
-            }
-            if (offset == null) {
+            if (results.isEmpty()) {
                 notes += "${frames[index].label}: sovrapposizione troppo povera, resta dov'era"
                 continue
             }
+
+            // Due vicini concordi si mediano; discordi, vince il più sicuro di sé.
+            val offset = if (results.size == 2 &&
+                abs(results[0].panDegrees - results[1].panDegrees) < ANCHOR_AGREEMENT_DEGREES &&
+                abs(results[0].tiltDegrees - results[1].tiltDegrees) < ANCHOR_AGREEMENT_DEGREES
+            ) {
+                Offset(
+                    (results[0].panDegrees + results[1].panDegrees) / 2f,
+                    (results[0].tiltDegrees + results[1].tiltDegrees) / 2f,
+                    max(results[0].confidence, results[1].confidence),
+                )
+            } else {
+                results.maxByOrNull { it.confidence }!!
+            }
+
             placements[index] = placements[index].copy(
                 panCorrectionDegrees = offset.panDegrees,
                 tiltCorrectionDegrees = offset.tiltDegrees,
             )
             val magnitude = max(abs(offset.panDegrees), abs(offset.tiltDegrees))
             worst = max(worst, magnitude)
-            notes += "%s: %s · corretto %+.2f° / %+.2f°".format(
+            notes += "%s: corretto %+.2f° / %+.2f° · concordanza %.0f%%".format(
                 frames[index].label,
-                how,
                 offset.panDegrees,
                 offset.tiltDegrees,
+                offset.confidence * 100f,
             )
         }
         return Refinement(placements, notes, worst)
     }
 
+    private class Offset(val panDegrees: Float, val tiltDegrees: Float, val confidence: Float)
+
     /**
-     * I punti di coerenza fra due fotogrammi: dettagli del vicino ritrovati in quello da
-     * sistemare, ciascuno con il suo voto di correzione in gradi.
+     * Lo spostamento che fa combaciare [moving] con [fixed], dalla nebbia al dettaglio.
      *
-     * Il dettaglio si sceglie dove l'immagine ha carattere in *entrambe* le direzioni — un
-     * angolo, non un bordo: un bordo si riconosce solo di traverso e lungo di sé scivola. Il
-     * confronto è una correlazione normalizzata, indifferente a esposizioni diverse, e un
-     * accoppiamento ambiguo — un secondo posto quasi buono altrove — si butta: sui motivi
-     * ripetuti l'errore sicuro vale meno di nessuna risposta.
+     * I punti campione nascono su una griglia del fotogramma fermo e diventano direzioni nel
+     * mondo; a ogni livello della piramide si cerca, in una finestra attorno al risultato del
+     * livello prima, lo spostamento che massimizza la correlazione fra i due fotogrammi su quei
+     * punti. Al livello più sfocato la finestra è larga sedici gradi; all'ultimo, un decimo.
      */
-    private fun matchFeatures(
-        moving: Frame,
-        movingPlacement: FramePlacement,
-        fixed: Frame,
-        fixedPlacement: FramePlacement,
-        lens: PinholeLens,
-    ): List<FloatArray> {
-        val fixedGray = fixed.gray
-        val movingGray = moving.gray
-        val margin = PATCH_RADIUS + 2
-        val searchPx = (lens.focalPixels * (MAX_SEARCH_DEGREES * 2f).toRadians())
-            .coerceAtMost(min(moving.width, moving.height) / 3f)
-
-        // Candidati: il punto con più carattere dentro ogni cella di una griglia.
-        val candidates = mutableListOf<IntArray>()
-        var cy = margin
-        while (cy < fixed.height - margin) {
-            var cx = margin
-            while (cx < fixed.width - margin) {
-                var bestScore = 0f
-                var bestX = -1
-                var bestY = -1
-                var y = cy
-                val yEnd = min(cy + GRID_STEP, fixed.height - margin)
-                val xEnd = min(cx + GRID_STEP, fixed.width - margin)
-                while (y < yEnd) {
-                    var x = cx
-                    while (x < xEnd) {
-                        val i = y * fixed.width + x
-                        val dx = abs(fixedGray[i + 2] - fixedGray[i - 2])
-                        val dy = abs(fixedGray[i + 2 * fixed.width] - fixedGray[i - 2 * fixed.width])
-                        val score = min(dx, dy)
-                        if (score > bestScore) {
-                            bestScore = score
-                            bestX = x
-                            bestY = y
-                        }
-                        x += 2
-                    }
-                    y += 2
-                }
-                if (bestScore >= MIN_TEXTURE && bestX >= 0) candidates += intArrayOf(bestX, bestY, (bestScore * 16f).toInt())
-                cx += GRID_STEP
-            }
-            cy += GRID_STEP
-        }
-        candidates.sortByDescending { it[2] }
-
-        val matches = mutableListOf<FloatArray>()
-        for (candidate in candidates) {
-            if (matches.size >= MAX_FEATURES) break
-            val world = frameToWorld(candidate[0].toFloat(), candidate[1].toFloat(), fixedPlacement, lens)
-            val predicted = projectToFrame(world[0], world[1], movingPlacement, lens)
-            if (!predicted.inside) continue
-
-            val found = trackPatch(
-                src = fixedGray, srcWidth = fixed.width,
-                sourceX = candidate[0], sourceY = candidate[1],
-                dst = movingGray, dstWidth = moving.width, dstHeight = moving.height,
-                centerX = predicted.x, centerY = predicted.y,
-                radius = searchPx,
-            ) ?: continue
-
-            val worldFound = frameToWorld(found[0], found[1], movingPlacement, lens)
-            val dPan = wrapDegrees(world[0] - worldFound[0])
-            val dTilt = world[1] - worldFound[1]
-            if (abs(dPan) > MAX_SEARCH_DEGREES * 2f || abs(dTilt) > MAX_SEARCH_DEGREES * 2f) continue
-            matches += floatArrayOf(dPan, dTilt)
-        }
-        return matches
-    }
-
-    /**
-     * Ritrova il ritaglio attorno a (sourceX, sourceY) di [src] dentro [dst], partendo dal
-     * punto previsto e guardando in un raggio. Prima una passata rada su un ritaglio sfoltito,
-     * poi la rifinitura piena attorno al migliore. Correlazione a media e varianza tolte: due
-     * esposizioni diverse dello stesso dettaglio danno lo stesso punteggio.
-     */
-    private fun trackPatch(
-        src: FloatArray,
-        srcWidth: Int,
-        sourceX: Int,
-        sourceY: Int,
-        dst: FloatArray,
-        dstWidth: Int,
-        dstHeight: Int,
-        centerX: Float,
-        centerY: Float,
-        radius: Float,
-    ): FloatArray? {
-        val r = PATCH_RADIUS
-        val side = 2 * r + 1
-
-        // Il modello, con media e norma pronte (versione piena e versione sfoltita).
-        val template = FloatArray(side * side)
-        var mean = 0f
-        for (dy in -r..r) {
-            for (dx in -r..r) {
-                val v = src[(sourceY + dy) * srcWidth + sourceX + dx]
-                template[(dy + r) * side + dx + r] = v
-                mean += v
-            }
-        }
-        mean /= template.size
-        var norm = 0f
-        for (i in template.indices) {
-            template[i] -= mean
-            norm += template[i] * template[i]
-        }
-        if (norm < MIN_PATCH_VARIANCE) return null
-        norm = sqrt(norm)
-
-        fun zncc(px: Int, py: Int, step: Int): Float {
-            var sum = 0f
-            var count = 0
-            var dy = -r
-            while (dy <= r) {
-                var dx = -r
-                while (dx <= r) {
-                    sum += dst[(py + dy) * dstWidth + px + dx]
-                    count++
-                    dx += step
-                }
-                dy += step
-            }
-            val dstMean = sum / count
-            var cross = 0f
-            var dstNorm = 0f
-            var tNorm = 0f
-            dy = -r
-            while (dy <= r) {
-                var dx = -r
-                while (dx <= r) {
-                    val d = dst[(py + dy) * dstWidth + px + dx] - dstMean
-                    val t = template[(dy + r) * side + dx + r]
-                    cross += d * t
-                    dstNorm += d * d
-                    tNorm += t * t
-                    dx += step
-                }
-                dy += step
-            }
-            if (dstNorm < MIN_PATCH_VARIANCE) return -1f
-            return cross / (sqrt(dstNorm) * sqrt(tNorm))
-        }
-
-        val minX = (centerX - radius).toInt().coerceAtLeast(r)
-        val maxX = (centerX + radius).toInt().coerceAtMost(dstWidth - 1 - r)
-        val minY = (centerY - radius).toInt().coerceAtLeast(r)
-        val maxY = (centerY + radius).toInt().coerceAtMost(dstHeight - 1 - r)
-        if (minX > maxX || minY > maxY) return null
-
-        var bestX = -1
-        var bestY = -1
-        var best = -1f
-        var second = -1f
-        var y = minY
-        while (y <= maxY) {
-            var x = minX
-            while (x <= maxX) {
-                val score = zncc(x, y, COARSE_PATCH_STEP)
-                if (score > best) {
-                    if (abs(x - bestX) > DISTINCT_MIN_DISTANCE_PX || abs(y - bestY) > DISTINCT_MIN_DISTANCE_PX) second = best
-                    best = score
-                    bestX = x
-                    bestY = y
-                } else if (score > second &&
-                    (abs(x - bestX) > DISTINCT_MIN_DISTANCE_PX || abs(y - bestY) > DISTINCT_MIN_DISTANCE_PX)
-                ) {
-                    second = score
-                }
-                x += COARSE_SEARCH_STEP
-            }
-            y += COARSE_SEARCH_STEP
-        }
-        if (bestX < 0 || best < MIN_NCC) return null
-        // Ambiguo: un secondo posto quasi identico lontano dal primo è un motivo ripetuto.
-        if (second > best * DISTINCT_RATIO) return null
-
-        var fineX = bestX
-        var fineY = bestY
-        var fineBest = -1f
-        for (py in (bestY - COARSE_SEARCH_STEP)..(bestY + COARSE_SEARCH_STEP)) {
-            if (py < r || py > dstHeight - 1 - r) continue
-            for (px in (bestX - COARSE_SEARCH_STEP)..(bestX + COARSE_SEARCH_STEP)) {
-                if (px < r || px > dstWidth - 1 - r) continue
-                val score = zncc(px, py, 1)
-                if (score > fineBest) {
-                    fineBest = score
-                    fineX = px
-                    fineY = py
-                }
-            }
-        }
-        if (fineBest < MIN_NCC) return null
-        return floatArrayOf(fineX.toFloat(), fineY.toFloat())
-    }
-
-    /** La mediana: il voto che i bari non spostano. */
-    private fun median(values: List<Float>): Float {
-        val sorted = values.sorted()
-        return sorted[sorted.size / 2]
-    }
-
-
-    private class Offset(val panDegrees: Float, val tiltDegrees: Float)
-
-    /**
-     * Lo spostamento che fa combaciare due fotogrammi, cercato a passi che si stringono.
-     *
-     * Si campionano dei punti della zona in cui i due si sovrappongono e si somma la differenza
-     * assoluta fra i colori. Meno è, meglio combaciano. La somma delle differenze è una misura
-     * grezza rispetto a una correlazione normalizzata, ma la luminosità qui viene già
-     * pareggiata prima, e in cambio costa una frazione: su decine di migliaia di prove è la
-     * differenza fra un secondo e un minuto.
-     */
-    private fun searchOffset(
+    private fun registerPair(
         moving: Frame,
         fixed: Frame,
         movingPlacement: FramePlacement,
         fixedPlacement: FramePlacement,
         lens: PinholeLens,
-        canvas: PanoramaCanvas,
     ): Offset? {
-        val samples = overlapSamples(movingPlacement, fixedPlacement, lens, canvas)
-        if (samples.size < MIN_OVERLAP_SAMPLES) return null
-
-        var bestPan = 0f
-        var bestTilt = 0f
-        var bestScore = score(moving, fixed, samples, movingPlacement, fixedPlacement, lens, 0f, 0f)
-            ?: return null
-        var step = MAX_SEARCH_DEGREES
-        while (step >= MIN_SEARCH_DEGREES) {
-            var improved = false
-            for (dp in -1..1) {
-                for (dt in -1..1) {
-                    if (dp == 0 && dt == 0) continue
-                    val pan = bestPan + dp * step
-                    val tilt = bestTilt + dt * step
-                    if (abs(pan) > MAX_SEARCH_DEGREES * 2f || abs(tilt) > MAX_SEARCH_DEGREES * 2f) continue
-                    val candidate = score(
-                        moving, fixed, samples, movingPlacement, fixedPlacement, lens, pan, tilt,
-                    ) ?: continue
-                    if (candidate < bestScore) {
-                        bestScore = candidate
-                        bestPan = pan
-                        bestTilt = tilt
-                        improved = true
-                    }
-                }
+        // Le direzioni campione: punti del fotogramma fermo che cadono anche nel mobile.
+        val directions = ArrayList<FloatArray>()
+        var y = REG_SAMPLE_STEP / 2
+        while (y < fixed.height) {
+            var x = REG_SAMPLE_STEP / 2
+            while (x < fixed.width) {
+                val world = frameToWorld(x.toFloat(), y.toFloat(), fixedPlacement, lens)
+                val predicted = projectToFrame(world[0], world[1], movingPlacement, lens)
+                if (predicted.inside) directions += floatArrayOf(world[0], world[1], x.toFloat(), y.toFloat())
+                x += REG_SAMPLE_STEP
             }
-            if (!improved) step /= 2f
+            y += REG_SAMPLE_STEP
         }
-        return Offset(bestPan, bestTilt)
+        if (directions.size < REG_MIN_SAMPLES) return null
+
+        var dPan = 0f
+        var dTilt = 0f
+        var confidence = -1f
+        SEARCH_SCHEDULE.forEach { (levelIndex, range, step) ->
+            val fixedLevel = fixed.grayLevels[min(levelIndex, fixed.grayLevels.size - 1)]
+            val movingLevel = moving.grayLevels[min(levelIndex, moving.grayLevels.size - 1)]
+            val fixedScale = fixedLevel.width.toFloat() / fixed.width
+            val movingScale = movingLevel.width.toFloat() / moving.width
+
+            // I valori del fermo a questo livello, una volta sola.
+            val fixedValues = FloatArray(directions.size)
+            for (i in directions.indices) {
+                fixedValues[i] = bilinear(
+                    fixedLevel,
+                    directions[i][2] * fixedScale,
+                    directions[i][3] * fixedScale,
+                )
+            }
+
+            var bestPan = dPan
+            var bestTilt = dTilt
+            var bestNcc = -2f
+            var cp = -range
+            while (cp <= range + 1e-3f) {
+                var ct = -range
+                while (ct <= range + 1e-3f) {
+                    val candPan = (dPan + cp).coerceIn(-MAX_SEARCH_DEGREES * 2f, MAX_SEARCH_DEGREES * 2f)
+                    val candTilt = (dTilt + ct).coerceIn(-MAX_SEARCH_DEGREES * 2f, MAX_SEARCH_DEGREES * 2f)
+                    val candidate = movingPlacement.copy(
+                        panCorrectionDegrees = candPan,
+                        tiltCorrectionDegrees = candTilt,
+                    )
+                    val ncc = sampledNcc(directions, fixedValues, movingLevel, movingScale, candidate, lens)
+                    if (ncc > bestNcc) {
+                        bestNcc = ncc
+                        bestPan = candPan
+                        bestTilt = candTilt
+                    }
+                    ct += step
+                }
+                cp += step
+            }
+            dPan = bestPan
+            dTilt = bestTilt
+            confidence = bestNcc
+        }
+        if (confidence < REG_MIN_NCC) return null
+        return Offset(dPan, dTilt, confidence.coerceIn(0f, 1f))
     }
 
-    /** Direzioni campione dentro la sovrapposizione fra due fotogrammi, in gradi. */
+    /**
+     * La correlazione normalizzata fra i due fotogrammi sui punti campione, con il mobile
+     * spostato della correzione candidata. Normalizzata su media e varianza di *questo*
+     * sottoinsieme: due esposizioni diverse danno lo stesso punteggio.
+     */
+    private fun sampledNcc(
+        directions: List<FloatArray>,
+        fixedValues: FloatArray,
+        movingLevel: GrayLevel,
+        movingScale: Float,
+        candidate: FramePlacement,
+        lens: PinholeLens,
+    ): Float {
+        var n = 0
+        var sumF = 0f
+        var sumM = 0f
+        var sumFF = 0f
+        var sumMM = 0f
+        var sumFM = 0f
+        for (i in directions.indices) {
+            val direction = directions[i]
+            val point = projectToFrame(direction[0], direction[1], candidate, lens)
+            if (!point.inside) continue
+            val m = bilinear(movingLevel, point.x * movingScale, point.y * movingScale)
+            val f = fixedValues[i]
+            n++
+            sumF += f
+            sumM += m
+            sumFF += f * f
+            sumMM += m * m
+            sumFM += f * m
+        }
+        if (n < REG_MIN_SAMPLES / 2) return -2f
+        val varF = n * sumFF - sumF * sumF
+        val varM = n * sumMM - sumM * sumM
+        if (varF < 1f || varM < 1f) return -2f
+        return (n * sumFM - sumF * sumM) / sqrt(varF * varM)
+    }
+
+    /** Direzioni campione nella sovrapposizione fra due fotogrammi, per il pareggio di esposizione. */
     private fun overlapSamples(
         a: FramePlacement,
         b: FramePlacement,
         lens: PinholeLens,
-        canvas: PanoramaCanvas,
     ): List<FloatArray> {
         val samples = mutableListOf<FloatArray>()
-        val stepLon = canvas.horizontalDegrees / SAMPLE_GRID
-        val stepLat = canvas.verticalDegrees / SAMPLE_GRID
-        var lat = canvas.centerTiltDegrees - canvas.verticalDegrees / 2f
-        while (lat <= canvas.centerTiltDegrees + canvas.verticalDegrees / 2f) {
-            var lon = canvas.centerPanDegrees - canvas.horizontalDegrees / 2f
-            while (lon <= canvas.centerPanDegrees + canvas.horizontalDegrees / 2f) {
-                val inA = projectToFrame(lon, lat, a, lens)
-                val inB = projectToFrame(lon, lat, b, lens)
-                if (inA.inside && inB.inside) samples += floatArrayOf(lon, lat)
-                lon += stepLon
+        var y = REG_SAMPLE_STEP
+        while (y < lens.imageHeight) {
+            var x = REG_SAMPLE_STEP
+            while (x < lens.imageWidth) {
+                val world = frameToWorld(x.toFloat(), y.toFloat(), a, lens)
+                if (projectToFrame(world[0], world[1], b, lens).inside) {
+                    samples += floatArrayOf(world[0], world[1])
+                }
+                x += REG_SAMPLE_STEP * 2
             }
-            lat += stepLat
+            y += REG_SAMPLE_STEP * 2
         }
         return samples
     }
 
-    /** Quanto male combaciano, con il fotogramma mobile spostato di [panDelta] e [tiltDelta]. */
-    private fun score(
-        moving: Frame,
-        fixed: Frame,
-        samples: List<FloatArray>,
-        movingPlacement: FramePlacement,
-        fixedPlacement: FramePlacement,
-        lens: PinholeLens,
-        panDelta: Float,
-        tiltDelta: Float,
-    ): Float? {
-        val shifted = movingPlacement.copy(
-            panCorrectionDegrees = movingPlacement.panCorrectionDegrees + panDelta,
-            tiltCorrectionDegrees = movingPlacement.tiltCorrectionDegrees + tiltDelta,
-        )
-        var total = 0f
-        var counted = 0
-        samples.forEach { sample ->
-            val lon = sample[0]
-            val lat = sample[1]
-            val m = projectToFrame(lon, lat, shifted, lens)
-            if (!m.inside) return@forEach
-            val f = projectToFrame(lon, lat, fixedPlacement, lens)
-            if (!f.inside) return@forEach
-            val mc = sample(moving, m.x, m.y)
-            val fc = sample(fixed, f.x, f.y)
-            total += abs(luma(mc) - luma(fc))
-            counted++
-        }
-        if (counted < MIN_OVERLAP_SAMPLES) return null
-        return total / counted
+    private fun bilinear(level: GrayLevel, x: Float, y: Float): Float {
+        val cx = x.coerceIn(0f, level.width - 1.001f)
+        val cy = y.coerceIn(0f, level.height - 1.001f)
+        val x0 = cx.toInt()
+        val y0 = cy.toInt()
+        val tx = cx - x0
+        val ty = cy - y0
+        val base = y0 * level.width + x0
+        val top = level.data[base] * (1f - tx) + level.data[base + 1] * tx
+        val bottom = level.data[base + level.width] * (1f - tx) + level.data[base + level.width + 1] * tx
+        return top * (1f - ty) + bottom * ty
     }
 
     /**
@@ -949,7 +797,7 @@ class PanoramaStitcher(
                     placements[index].effectiveTilt,
                 )
             } ?: continue
-            val samples = overlapSamples(placements[index], placements[anchorIndex], lens, canvas)
+            val samples = overlapSamples(placements[index], placements[anchorIndex], lens)
             if (samples.size < MIN_OVERLAP_SAMPLES) {
                 gains[index] = gains[anchorIndex]
                 continue
@@ -1022,42 +870,37 @@ class PanoramaStitcher(
         const val MAX_SEARCH_DEGREES = 4f
 
         /** Sotto questo passo la correzione è più fine di un pixel: cercare oltre è rumore. */
-        // ---- Punti di coerenza (l'allineamento alla Autopano) ----
+        // ---- Registrazione a piramide (l'allineamento) ----
 
         /** Vicini con cui confrontarsi: quello di fianco e quello della fila accanto. */
         const val MAX_ANCHORS = 2
 
-        /** Sotto questi voti la statistica non regge e si passa alla ricerca sul colore. */
-        const val MIN_MATCHES = 10
-        const val MIN_INLIERS = 6
+        /** Livelli della piramide di luminanza: pieno, metà, quarto, ottavo. */
+        const val PYRAMID_LEVELS = 4
 
-        /** Un voto più lontano di così dalla mediana è un accoppiamento sbagliato, non rumore. */
-        const val INLIER_TOLERANCE_DEGREES = 0.5f
+        /** Griglia dei punti campione sul fotogramma fermo, a piena risoluzione. */
+        const val REG_SAMPLE_STEP = 20
 
-        /** Una cella della griglia dei candidati: un punto con carattere per cella. */
-        const val GRID_STEP = 28
+        /** Sotto questi campioni nella sovrapposizione la statistica non regge. */
+        const val REG_MIN_SAMPLES = 80
 
-        /** Mezzo lato del ritaglio confrontato: 15×15 pixel, abbastanza carattere, poco costo. */
-        const val PATCH_RADIUS = 7
+        /** Una correlazione finale più bassa non è un allineamento, è un caso. */
+        const val REG_MIN_NCC = 0.30f
 
-        const val MAX_FEATURES = 120
+        /** Due vicini che suggeriscono correzioni più lontane di così sono in disaccordo. */
+        const val ANCHOR_AGREEMENT_DEGREES = 0.8f
 
-        /** Sotto questo gradiente in entrambe le direzioni non è un angolo, è una superficie. */
-        const val MIN_TEXTURE = 5f
-
-        /** Una correlazione più bassa non è un ritrovamento, è una coincidenza. */
-        const val MIN_NCC = 0.55f
-
-        /** Un ritaglio quasi uniforme non ha niente da correlare. */
-        const val MIN_PATCH_VARIANCE = 40f
-
-        /** Passata rada: ogni 3 pixel, sul ritaglio sfoltito a metà. */
-        const val COARSE_SEARCH_STEP = 3
-        const val COARSE_PATCH_STEP = 2
-
-        /** Un secondo posto oltre questa frazione del primo, lontano da lui, è ambiguità. */
-        const val DISTINCT_RATIO = 0.92f
-        const val DISTINCT_MIN_DISTANCE_PX = 6
+        /**
+         * La tabella della ricerca: livello della piramide, semiampiezza della finestra in
+         * gradi, passo. Dalla nebbia al dettaglio: al livello sfocato la finestra copre tutto
+         * l'errore possibile del gimbal, all'ultimo si rifinisce di un ventesimo di grado.
+         */
+        val SEARCH_SCHEDULE = listOf(
+            Triple(3, MAX_SEARCH_DEGREES * 2f, 0.8f),
+            Triple(2, 1.2f, 0.3f),
+            Triple(1, 0.4f, 0.12f),
+            Triple(0, 0.12f, 0.05f),
+        )
 
         /**
          * Il ritaglio di cucitura sborda dal campo del fotogramma di questo margine: le
@@ -1066,10 +909,6 @@ class PanoramaStitcher(
          */
         const val BBOX_MARGIN_DEGREES = 3f
 
-        const val MIN_SEARCH_DEGREES = 0.02f
-
-        /** Punti campione lungo ogni lato della tela per trovare le sovrapposizioni. */
-        const val SAMPLE_GRID = 90
 
         /** Sotto questi punti in comune il confronto non dice niente di affidabile. */
         const val MIN_OVERLAP_SAMPLES = 40

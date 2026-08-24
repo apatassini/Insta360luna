@@ -2,6 +2,7 @@ package it.persoft.lunaultra.stitch
 
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
@@ -276,6 +277,46 @@ fun projectToFrame(
     val zr = y * sinT + z * cosT
 
     return lens.project(x, yr, zr)
+}
+
+/**
+ * Da un pixel del fotogramma alla direzione nel mondo: l'inverso esatto di [projectToFrame].
+ *
+ * Serve ai punti di coerenza: un dettaglio trovato in un fotogramma diventa una direzione
+ * (longitudine, latitudine), e la stessa direzione si va a cercare nell'altro fotogramma. La
+ * differenza fra dove la geometria lo prevede e dove l'immagine lo trova è la correzione.
+ */
+fun frameToWorld(
+    pixelX: Float,
+    pixelY: Float,
+    placement: FramePlacement,
+    lens: PinholeLens,
+): FloatArray {
+    val x = (pixelX - lens.imageWidth / 2f) / lens.focalPixels
+    val y = (lens.imageHeight / 2f - pixelY) / lens.focalPixels
+    val norm = sqrt(x * x + y * y + 1f)
+    val xn = x / norm
+    val yn = y / norm
+    val zn = 1f / norm
+
+    // Rotazione diretta del tilt: l'inversa di quella applicata nella proiezione.
+    val tilt = placement.effectiveTilt.toRadians()
+    val cosT = cos(tilt)
+    val sinT = sin(tilt)
+    val yw = yn * cosT + zn * sinT
+    val zw = -yn * sinT + zn * cosT
+
+    val latitude = asin(yw.coerceIn(-1f, 1f)).toDegrees()
+    val longitude = atan2(xn, zw).toDegrees() + placement.effectivePan
+    return floatArrayOf(longitude, latitude)
+}
+
+/** La differenza fra due longitudini, riportata nel giro corto: 350° − 10° fa −20, non 340. */
+fun wrapDegrees(delta: Float): Float {
+    var d = delta % 360f
+    if (d > 180f) d -= 360f
+    if (d < -180f) d += 360f
+    return d
 }
 
 /**

@@ -8,9 +8,12 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /** Uno scatto della panoramica: il file sul telefono e dove guardava la camera. */
 data class PanoramaShot(
@@ -51,20 +54,18 @@ data class StitchOutcome(val bitmap: Bitmap, val report: StitchReport)
  * campionato con interpolazione bilineare. È qui che le foto vengono "riformate in base
  * all'obiettivo": non è un ritocco, è la geometria della lente applicata al contrario.
  *
- * **Raffinatura.** La posizione nominale non è esatta — la prova di andata e ritorno della
- * calibrazione dice che il modello sbaglia fino a un paio di gradi — e un paio di gradi su un
- * fotogramma largo sono decine di pixel, che si vedono. Allora ogni fotogramma, dopo il primo,
- * viene confrontato con quello che c'è già sulla tela nella zona in cui si sovrappongono, e si
- * cerca lo spostamento che li fa combaciare meglio. La ricerca parte grossolana e si stringe,
- * così costa poco e non si perde in un minimo locale.
+ * **Raffinatura.** La posizione nominale non è esatta — il gimbal naviga a stima e sbaglia di
+ * gradi — e la correzione si misura sui **punti di coerenza**, come fanno Autopano e i suoi
+ * eredi: dettagli con carattere trovati nel vicino già sistemato, ritrovati per correlazione
+ * nel fotogramma da sistemare, e trasformati ciascuno in un voto in gradi. La mediana dei voti
+ * scarta gli accoppiamenti sbagliati, i concordi decidono. Dove i dettagli mancano (cielo,
+ * muri lisci) resta la vecchia ricerca sulle differenze di colore, come rete.
  *
- * **Fusione.** Anche dopo la raffinatura la giunzione non è perfetta, e non può esserlo: due
- * scatti presi ruotando la camera hanno centri di proiezione diversi, e la parallasse fra
- * oggetti vicini e lontani non si annulla con nessuna rotazione. Quindi il confine non si fa
- * vedere invece di fingere che non ci sia: ogni pixel pesa in proporzione a quanto è lontano
- * dal bordo del suo fotogramma, e nella sovrapposizione i due si mescolano gradualmente. Con
- * una correzione di luminosità prima, perché altrimenti a vedersi non è il confine ma il salto
- * di tono ai suoi due lati.
+ * **Fusione.** Multibanda, lo «spline» di Autopano ([MultibandBlender]): ogni pixel appartiene
+ * al fotogramma che lì è più a casa sua, il dettaglio fino cambia mano in un taglio netto —
+ * così un oggetto mosso viene tagliato, non stampato due volte — e i toni larghi si spalmano
+ * su decine di pixel, dove l'occhio non li vede. La parallasse fra vicino e lontano non si
+ * annulla con nessuna rotazione: si nasconde, ed è questo il modo in cui la nascondono tutti.
  */
 class PanoramaStitcher(
     private val onProgress: (Float, String) -> Unit = { _, _ -> },
@@ -126,6 +127,14 @@ class PanoramaStitcher(
     private class Frame(val bitmap: Bitmap, val pixels: IntArray, val label: String) {
         val width get() = bitmap.width
         val height get() = bitmap.height
+
+        /** La luminanza, calcolata una volta: i punti di coerenza si cercano qui sopra. */
+        val gray: FloatArray by lazy {
+            FloatArray(pixels.size) { i ->
+                val c = pixels[i]
+                0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
+            }
+        }
     }
 
     /**
@@ -157,16 +166,18 @@ class PanoramaStitcher(
     )
 
     /**
-     * Corregge la posizione di ogni fotogramma confrontandolo con quelli già sistemati.
+     * Corregge la posizione di ogni fotogramma con i punti di coerenza, alla maniera di Autopano.
      *
-     * Il primo fotogramma resta dov'è: è il riferimento, e non ha senso spostare tutto rispetto
-     * a niente. Ognuno dei successivi si confronta con il vicino già sistemato più prossimo, e
-     * il confronto avviene su un campione di punti della zona di sovrapposizione — non su tutti,
-     * perché sarebbero milioni e la risposta non cambierebbe.
+     * Per ogni fotogramma si prendono i vicini già sistemati (fino a due: quello di fianco e
+     * quello della fila accanto, così le file si richiudono fra loro), si trovano nei vicini i
+     * dettagli con più carattere — angoli, non bordi lisci — e ogni dettaglio si va a cercare
+     * nel fotogramma da sistemare, dove la geometria dice che dovrebbe stare. La differenza fra
+     * il previsto e il trovato, in gradi, è un voto sulla correzione.
      *
-     * La ricerca è a passi che si dimezzano: prima si guarda lontano con passo grosso, poi si
-     * stringe attorno al migliore. Trova il minimo senza provare tutte le combinazioni, e non
-     * scivola in un minimo locale vicino come farebbe una discesa a passo fisso.
+     * I voti si contano alla maniera robusta: mediana, poi si tengono solo i concordi — un
+     * accoppiamento sbagliato su un motivo ripetuto vota per una correzione assurda, e la
+     * mediana lo ignora. Se i punti concordi sono pochi (un muro liscio, il cielo) si torna
+     * alla vecchia ricerca sulle differenze di colore, che non ha bisogno di dettagli.
      */
     private suspend fun refine(
         frames: List<Frame>,
@@ -180,44 +191,304 @@ class PanoramaStitcher(
 
         for (index in 1 until frames.size) {
             currentCoroutineContext().ensureActive()
-            onProgress(0.10f + 0.25f * index / frames.size, "Allineo ${frames[index].label}")
+            onProgress(0.10f + 0.25f * index / frames.size, "Cerco i punti di coerenza di ${frames[index].label}")
 
-            // Il vicino già sistemato più vicino in angolo: è quello con cui si sovrappone.
-            val anchorIndex = (0 until index).minByOrNull {
-                angularDistance(
-                    placements[it].effectivePan,
-                    placements[it].effectiveTilt,
-                    placements[index].panDegrees,
-                    placements[index].tiltDegrees,
+            // I vicini già sistemati più vicini in angolo: sono quelli con cui si sovrappone.
+            val anchors = (0 until index)
+                .sortedBy {
+                    angularDistance(
+                        placements[it].effectivePan,
+                        placements[it].effectiveTilt,
+                        placements[index].panDegrees,
+                        placements[index].tiltDegrees,
+                    )
+                }
+                .filter {
+                    angularDistance(
+                        placements[it].effectivePan,
+                        placements[it].effectiveTilt,
+                        placements[index].panDegrees,
+                        placements[index].tiltDegrees,
+                    ) < max(lens.horizontalFovDegrees, lens.verticalFovDegrees)
+                }
+                .take(MAX_ANCHORS)
+            if (anchors.isEmpty()) continue
+
+            val votes = mutableListOf<FloatArray>()
+            anchors.forEach { anchor ->
+                votes += matchFeatures(
+                    moving = frames[index],
+                    movingPlacement = placements[index],
+                    fixed = frames[anchor],
+                    fixedPlacement = placements[anchor],
+                    lens = lens,
                 )
-            } ?: continue
+            }
 
-            val best = searchOffset(
-                moving = frames[index],
-                fixed = frames[anchorIndex],
-                movingPlacement = placements[index],
-                fixedPlacement = placements[anchorIndex],
-                lens = lens,
-                canvas = canvas,
-            )
-            if (best == null) {
+            var offset: Offset? = null
+            var how = ""
+            if (votes.size >= MIN_MATCHES) {
+                val medPan = median(votes.map { it[0] })
+                val medTilt = median(votes.map { it[1] })
+                val inliers = votes.filter {
+                    abs(it[0] - medPan) <= INLIER_TOLERANCE_DEGREES &&
+                        abs(it[1] - medTilt) <= INLIER_TOLERANCE_DEGREES
+                }
+                if (inliers.size >= MIN_INLIERS) {
+                    offset = Offset(
+                        inliers.map { it[0] }.average().toFloat(),
+                        inliers.map { it[1] }.average().toFloat(),
+                    )
+                    how = "${votes.size} punti di coerenza, ${inliers.size} concordi"
+                }
+            }
+            if (offset == null) {
+                // Pochi dettagli o troppo discordi: la vecchia ricerca sulle differenze di
+                // colore non ha bisogno di angoli, e qui fa da rete.
+                offset = searchOffset(
+                    moving = frames[index],
+                    fixed = frames[anchors.first()],
+                    movingPlacement = placements[index],
+                    fixedPlacement = placements[anchors.first()],
+                    lens = lens,
+                    canvas = canvas,
+                )
+                how = "pochi punti di coerenza (${votes.size}): ricerca sul colore"
+            }
+            if (offset == null) {
                 notes += "${frames[index].label}: sovrapposizione troppo povera, resta dov'era"
                 continue
             }
             placements[index] = placements[index].copy(
-                panCorrectionDegrees = best.panDegrees,
-                tiltCorrectionDegrees = best.tiltDegrees,
+                panCorrectionDegrees = offset.panDegrees,
+                tiltCorrectionDegrees = offset.tiltDegrees,
             )
-            val magnitude = max(abs(best.panDegrees), abs(best.tiltDegrees))
+            val magnitude = max(abs(offset.panDegrees), abs(offset.tiltDegrees))
             worst = max(worst, magnitude)
-            notes += "%s: corretto di %+.2f° in orizzontale e %+.2f° in verticale".format(
+            notes += "%s: %s · corretto %+.2f° / %+.2f°".format(
                 frames[index].label,
-                best.panDegrees,
-                best.tiltDegrees,
+                how,
+                offset.panDegrees,
+                offset.tiltDegrees,
             )
         }
         return Refinement(placements, notes, worst)
     }
+
+    /**
+     * I punti di coerenza fra due fotogrammi: dettagli del vicino ritrovati in quello da
+     * sistemare, ciascuno con il suo voto di correzione in gradi.
+     *
+     * Il dettaglio si sceglie dove l'immagine ha carattere in *entrambe* le direzioni — un
+     * angolo, non un bordo: un bordo si riconosce solo di traverso e lungo di sé scivola. Il
+     * confronto è una correlazione normalizzata, indifferente a esposizioni diverse, e un
+     * accoppiamento ambiguo — un secondo posto quasi buono altrove — si butta: sui motivi
+     * ripetuti l'errore sicuro vale meno di nessuna risposta.
+     */
+    private fun matchFeatures(
+        moving: Frame,
+        movingPlacement: FramePlacement,
+        fixed: Frame,
+        fixedPlacement: FramePlacement,
+        lens: PinholeLens,
+    ): List<FloatArray> {
+        val fixedGray = fixed.gray
+        val movingGray = moving.gray
+        val margin = PATCH_RADIUS + 2
+        val searchPx = (lens.focalPixels * (MAX_SEARCH_DEGREES * 2f).toRadians())
+            .coerceAtMost(min(moving.width, moving.height) / 3f)
+
+        // Candidati: il punto con più carattere dentro ogni cella di una griglia.
+        val candidates = mutableListOf<IntArray>()
+        var cy = margin
+        while (cy < fixed.height - margin) {
+            var cx = margin
+            while (cx < fixed.width - margin) {
+                var bestScore = 0f
+                var bestX = -1
+                var bestY = -1
+                var y = cy
+                val yEnd = min(cy + GRID_STEP, fixed.height - margin)
+                val xEnd = min(cx + GRID_STEP, fixed.width - margin)
+                while (y < yEnd) {
+                    var x = cx
+                    while (x < xEnd) {
+                        val i = y * fixed.width + x
+                        val dx = abs(fixedGray[i + 2] - fixedGray[i - 2])
+                        val dy = abs(fixedGray[i + 2 * fixed.width] - fixedGray[i - 2 * fixed.width])
+                        val score = min(dx, dy)
+                        if (score > bestScore) {
+                            bestScore = score
+                            bestX = x
+                            bestY = y
+                        }
+                        x += 2
+                    }
+                    y += 2
+                }
+                if (bestScore >= MIN_TEXTURE && bestX >= 0) candidates += intArrayOf(bestX, bestY, (bestScore * 16f).toInt())
+                cx += GRID_STEP
+            }
+            cy += GRID_STEP
+        }
+        candidates.sortByDescending { it[2] }
+
+        val matches = mutableListOf<FloatArray>()
+        for (candidate in candidates) {
+            if (matches.size >= MAX_FEATURES) break
+            val world = frameToWorld(candidate[0].toFloat(), candidate[1].toFloat(), fixedPlacement, lens)
+            val predicted = projectToFrame(world[0], world[1], movingPlacement, lens)
+            if (!predicted.inside) continue
+
+            val found = trackPatch(
+                src = fixedGray, srcWidth = fixed.width,
+                sourceX = candidate[0], sourceY = candidate[1],
+                dst = movingGray, dstWidth = moving.width, dstHeight = moving.height,
+                centerX = predicted.x, centerY = predicted.y,
+                radius = searchPx,
+            ) ?: continue
+
+            val worldFound = frameToWorld(found[0], found[1], movingPlacement, lens)
+            val dPan = wrapDegrees(world[0] - worldFound[0])
+            val dTilt = world[1] - worldFound[1]
+            if (abs(dPan) > MAX_SEARCH_DEGREES * 2f || abs(dTilt) > MAX_SEARCH_DEGREES * 2f) continue
+            matches += floatArrayOf(dPan, dTilt)
+        }
+        return matches
+    }
+
+    /**
+     * Ritrova il ritaglio attorno a (sourceX, sourceY) di [src] dentro [dst], partendo dal
+     * punto previsto e guardando in un raggio. Prima una passata rada su un ritaglio sfoltito,
+     * poi la rifinitura piena attorno al migliore. Correlazione a media e varianza tolte: due
+     * esposizioni diverse dello stesso dettaglio danno lo stesso punteggio.
+     */
+    private fun trackPatch(
+        src: FloatArray,
+        srcWidth: Int,
+        sourceX: Int,
+        sourceY: Int,
+        dst: FloatArray,
+        dstWidth: Int,
+        dstHeight: Int,
+        centerX: Float,
+        centerY: Float,
+        radius: Float,
+    ): FloatArray? {
+        val r = PATCH_RADIUS
+        val side = 2 * r + 1
+
+        // Il modello, con media e norma pronte (versione piena e versione sfoltita).
+        val template = FloatArray(side * side)
+        var mean = 0f
+        for (dy in -r..r) {
+            for (dx in -r..r) {
+                val v = src[(sourceY + dy) * srcWidth + sourceX + dx]
+                template[(dy + r) * side + dx + r] = v
+                mean += v
+            }
+        }
+        mean /= template.size
+        var norm = 0f
+        for (i in template.indices) {
+            template[i] -= mean
+            norm += template[i] * template[i]
+        }
+        if (norm < MIN_PATCH_VARIANCE) return null
+        norm = sqrt(norm)
+
+        fun zncc(px: Int, py: Int, step: Int): Float {
+            var sum = 0f
+            var count = 0
+            var dy = -r
+            while (dy <= r) {
+                var dx = -r
+                while (dx <= r) {
+                    sum += dst[(py + dy) * dstWidth + px + dx]
+                    count++
+                    dx += step
+                }
+                dy += step
+            }
+            val dstMean = sum / count
+            var cross = 0f
+            var dstNorm = 0f
+            var tNorm = 0f
+            dy = -r
+            while (dy <= r) {
+                var dx = -r
+                while (dx <= r) {
+                    val d = dst[(py + dy) * dstWidth + px + dx] - dstMean
+                    val t = template[(dy + r) * side + dx + r]
+                    cross += d * t
+                    dstNorm += d * d
+                    tNorm += t * t
+                    dx += step
+                }
+                dy += step
+            }
+            if (dstNorm < MIN_PATCH_VARIANCE) return -1f
+            return cross / (sqrt(dstNorm) * sqrt(tNorm))
+        }
+
+        val minX = (centerX - radius).toInt().coerceAtLeast(r)
+        val maxX = (centerX + radius).toInt().coerceAtMost(dstWidth - 1 - r)
+        val minY = (centerY - radius).toInt().coerceAtLeast(r)
+        val maxY = (centerY + radius).toInt().coerceAtMost(dstHeight - 1 - r)
+        if (minX > maxX || minY > maxY) return null
+
+        var bestX = -1
+        var bestY = -1
+        var best = -1f
+        var second = -1f
+        var y = minY
+        while (y <= maxY) {
+            var x = minX
+            while (x <= maxX) {
+                val score = zncc(x, y, COARSE_PATCH_STEP)
+                if (score > best) {
+                    if (abs(x - bestX) > DISTINCT_MIN_DISTANCE_PX || abs(y - bestY) > DISTINCT_MIN_DISTANCE_PX) second = best
+                    best = score
+                    bestX = x
+                    bestY = y
+                } else if (score > second &&
+                    (abs(x - bestX) > DISTINCT_MIN_DISTANCE_PX || abs(y - bestY) > DISTINCT_MIN_DISTANCE_PX)
+                ) {
+                    second = score
+                }
+                x += COARSE_SEARCH_STEP
+            }
+            y += COARSE_SEARCH_STEP
+        }
+        if (bestX < 0 || best < MIN_NCC) return null
+        // Ambiguo: un secondo posto quasi identico lontano dal primo è un motivo ripetuto.
+        if (second > best * DISTINCT_RATIO) return null
+
+        var fineX = bestX
+        var fineY = bestY
+        var fineBest = -1f
+        for (py in (bestY - COARSE_SEARCH_STEP)..(bestY + COARSE_SEARCH_STEP)) {
+            if (py < r || py > dstHeight - 1 - r) continue
+            for (px in (bestX - COARSE_SEARCH_STEP)..(bestX + COARSE_SEARCH_STEP)) {
+                if (px < r || px > dstWidth - 1 - r) continue
+                val score = zncc(px, py, 1)
+                if (score > fineBest) {
+                    fineBest = score
+                    fineX = px
+                    fineY = py
+                }
+            }
+        }
+        if (fineBest < MIN_NCC) return null
+        return floatArrayOf(fineX.toFloat(), fineY.toFloat())
+    }
+
+    /** La mediana: il voto che i bari non spostano. */
+    private fun median(values: List<Float>): Float {
+        val sorted = values.sorted()
+        return sorted[sorted.size / 2]
+    }
+
 
     private class Offset(val panDegrees: Float, val tiltDegrees: Float)
 
@@ -328,23 +599,19 @@ class PanoramaStitcher(
     }
 
     /**
-     * Dipinge la tela: ogni pixel viene da *un* fotogramma, e la fusione vive solo sulla cucitura.
+     * Dipinge la tela con la fusione multibanda: la cucitura di Autopano, non una dissolvenza.
      *
-     * La prima versione mediava tutti i fotogrammi che coprivano il punto, pesati con la
-     * sfumatura: su una sovrapposizione del trenta per cento significava una doppia esposizione
-     * larga venti gradi, e ogni errore residuo di allineamento diventava un fantasma — tronchi
-     * semitrasparenti, sdraio sdoppiate. È il difetto visto sulla prima panoramica riuscita.
+     * Un fotogramma alla volta, in ordine di scatto: il nuovo viene cucito su quello che c'è
+     * già. La maschera dice chi possiede ogni pixel — il fotogramma che lì è più «a casa sua»,
+     * cioè più lontano dal proprio bordo — ed è netta come un taglio. Poi la fusione la
+     * ammorbidisce banda per banda ([MultibandBlender]): il dettaglio fino cambia mano in un
+     * pixel, così un oggetto mosso fra due scatti viene tagliato e non stampato due volte; i
+     * toni larghi cambiano mano in decine di pixel, così una differenza di esposizione si
+     * spalma dove l'occhio non la vede. È la coppia che una striscia sola, larga o stretta che
+     * sia, non può dare.
      *
-     * Adesso si fa come i programmi seri di stitching: si sceglie, punto per punto, il
-     * fotogramma che lì è più «a casa sua» (il peso della sfumatura misura proprio questo:
-     * pieno al centro, povero sul bordo), e si fonde con il secondo migliore solo dove i due
-     * pesi quasi si equivalgono — cioè in una striscia stretta a cavallo della cucitura. Fuori
-     * dalla striscia ogni pixel è puro: un oggetto che si muove fra due scatti viene tagliato
-     * da una parte o dall'altra, non stampato due volte. Il salto di esposizione lo pareggia
-     * il guadagno calcolato prima, che resta.
-     *
-     * A nastri di righe per una ragione di memoria: servono due candidati per pixel, e su una
-     * tela intera sarebbero centinaia di megabyte.
+     * Il lavoro pesante avviene solo nel rettangolo del fotogramma nuovo, non su tutta la
+     * tela: la memoria resta quella di un ritaglio.
      */
     private suspend fun compose(
         frames: List<Frame>,
@@ -353,74 +620,236 @@ class PanoramaStitcher(
         canvas: PanoramaCanvas,
     ): Bitmap {
         val output = Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
+        // Nero, non trasparente: un JPEG non ha trasparenza e diventerebbe bianco.
+        output.eraseColor(0xFF000000.toInt())
         val gains = exposureGains(frames, placements, lens, canvas)
-        val bandRows = min(BAND_ROWS, canvas.height)
-        val bestWeight = FloatArray(canvas.width * bandRows)
-        val bestColor = IntArray(canvas.width * bandRows)
-        val secondWeight = FloatArray(canvas.width * bandRows)
-        val secondColor = IntArray(canvas.width * bandRows)
-        val row = IntArray(canvas.width * bandRows)
 
-        var top = 0
-        while (top < canvas.height) {
+        // Chi possiede ogni pixel della tela, quantificato: il peso della sfumatura del
+        // fotogramma che l'ha dipinto. Serve a decidere le maschere dei fotogrammi successivi.
+        val ownerWeight = ByteArray(canvas.width * canvas.height)
+
+        frames.forEachIndexed { index, frame ->
             currentCoroutineContext().ensureActive()
-            val rows = min(bandRows, canvas.height - top)
-            java.util.Arrays.fill(bestWeight, 0f)
-            java.util.Arrays.fill(secondWeight, 0f)
-
-            frames.forEachIndexed { index, frame ->
-                val placement = placements[index]
-                val gain = gains[index]
-                for (y in 0 until rows) {
-                    val latitude = canvas.latitudeAt(top + y)
-                    for (x in 0 until canvas.width) {
-                        val point = projectToFrame(canvas.longitudeAt(x), latitude, placement, lens)
-                        if (!point.inside) continue
-                        val weight = featherWeight(point.x, point.y, frame.width, frame.height)
-                        if (weight <= 0f) continue
-                        val color = sample(frame, point.x, point.y)
-                        val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val gained = (r shl 16) or (g shl 8) or b
-                        val i = y * canvas.width + x
-                        if (weight > bestWeight[i]) {
-                            secondWeight[i] = bestWeight[i]
-                            secondColor[i] = bestColor[i]
-                            bestWeight[i] = weight
-                            bestColor[i] = gained
-                        } else if (weight > secondWeight[i]) {
-                            secondWeight[i] = weight
-                            secondColor[i] = gained
-                        }
-                    }
-                }
-            }
-
-            for (i in 0 until canvas.width * rows) {
-                val first = bestWeight[i]
-                row[i] = when {
-                    // Nessun fotogramma copre questo punto: la tela è rettangolare ma la
-                    // panoramica non lo è, e gli angoli restano vuoti. Nero, non trasparente:
-                    // un JPEG non ha trasparenza e la trasparenza diventerebbe bianco.
-                    first <= 0f -> 0xFF000000.toInt()
-                    secondWeight[i] <= 0f -> 0xFF000000.toInt() or bestColor[i]
-                    else -> {
-                        val alpha = seamAlpha(first, secondWeight[i])
-                        val c1 = bestColor[i]
-                        val c2 = secondColor[i]
-                        val r = (alpha * ((c1 shr 16) and 0xFF) + (1f - alpha) * ((c2 shr 16) and 0xFF)).roundToInt()
-                        val g = (alpha * ((c1 shr 8) and 0xFF) + (1f - alpha) * ((c2 shr 8) and 0xFF)).roundToInt()
-                        val b = (alpha * (c1 and 0xFF) + (1f - alpha) * (c2 and 0xFF)).roundToInt()
-                        (0xFF shl 24) or (r.coerceIn(0, 255) shl 16) or (g.coerceIn(0, 255) shl 8) or b.coerceIn(0, 255)
-                    }
-                }
-            }
-            output.setPixels(row, 0, canvas.width, 0, top, canvas.width, rows)
-            top += rows
-            onProgress(0.35f + 0.6f * top / canvas.height, "Unisco lungo le cuciture")
+            onProgress(
+                0.35f + 0.6f * index / frames.size,
+                "Cucio ${frame.label} (${index + 1}/${frames.size})",
+            )
+            pasteFrame(output, ownerWeight, frame, placements[index], gains[index], lens, canvas)
         }
         return output
+    }
+
+    /**
+     * Cuce un fotogramma sulla tela, fondendo in multibanda dentro il suo rettangolo.
+     *
+     * Le zone dove solo uno dei due esiste vengono riempite con l'altro prima delle piramidi:
+     * senza, il nero fuori campo entrerebbe nelle bande larghe e scurirebbe i bordi veri.
+     */
+    private fun pasteFrame(
+        output: Bitmap,
+        ownerWeight: ByteArray,
+        frame: Frame,
+        placement: FramePlacement,
+        gain: Float,
+        lens: PinholeLens,
+        canvas: PanoramaCanvas,
+    ) {
+        val margin = BBOX_MARGIN_DEGREES
+        val halfH = lens.horizontalFovDegrees / 2f + margin
+        val halfV = lens.verticalFovDegrees / 2f + margin
+        val startLon = canvas.centerPanDegrees - canvas.horizontalDegrees / 2f
+        val topLat = canvas.centerTiltDegrees + canvas.verticalDegrees / 2f
+
+        val col0 = floor((placement.effectivePan - halfH - startLon) * canvas.pixelsPerDegree).toInt()
+        val col1 = ceil((placement.effectivePan + halfH - startLon) * canvas.pixelsPerDegree).toInt()
+        val row0 = floor((topLat - (placement.effectiveTilt + halfV)) * canvas.pixelsPerDegree).toInt()
+            .coerceIn(0, canvas.height - 1)
+        val row1 = ceil((topLat - (placement.effectiveTilt - halfV)) * canvas.pixelsPerDegree).toInt()
+            .coerceIn(0, canvas.height - 1)
+
+        // Le colonne possono sbordare dalla tela. Se la tela chiude il giro si passa
+        // dall'altra parte (modulo); altrimenti si tagliano e basta.
+        val wraps = canvas.horizontalDegrees >= PanoramaCanvas.FULL_TURN_DEGREES - 0.5f
+        val c0 = if (wraps) col0 else col0.coerceIn(0, canvas.width - 1)
+        val c1 = if (wraps) col1 else col1.coerceIn(0, canvas.width - 1)
+        val bw = (c1 - c0 + 1).coerceAtMost(canvas.width)
+        val bh = row1 - row0 + 1
+        if (bw <= 0 || bh <= 0) return
+
+        val count = bw * bh
+        val columns = IntArray(bw) { bx -> ((c0 + bx) % canvas.width + canvas.width) % canvas.width }
+
+        // Il fotogramma nuovo, proiettato nel ritaglio.
+        val newR = FloatArray(count)
+        val newG = FloatArray(count)
+        val newB = FloatArray(count)
+        val newW = FloatArray(count)
+        for (by in 0 until bh) {
+            val latitude = canvas.latitudeAt(row0 + by)
+            for (bx in 0 until bw) {
+                val longitude = canvas.longitudeAt(columns[bx])
+                val point = projectToFrame(longitude, latitude, placement, lens)
+                if (!point.inside) continue
+                val weight = featherWeight(point.x, point.y, frame.width, frame.height)
+                if (weight <= 0f) continue
+                val color = sample(frame, point.x, point.y)
+                val i = by * bw + bx
+                newW[i] = weight
+                newR[i] = (gain * ((color shr 16) and 0xFF)).coerceIn(0f, 255f)
+                newG[i] = (gain * ((color shr 8) and 0xFF)).coerceIn(0f, 255f)
+                newB[i] = (gain * (color and 0xFF)).coerceIn(0f, 255f)
+            }
+        }
+
+        // Quello che c'è già sulla tela, nello stesso ritaglio.
+        val oldColor = IntArray(count)
+        readRegion(output, columns, row0, bw, bh, oldColor)
+        val oldW = FloatArray(count)
+        for (by in 0 until bh) {
+            val rowBase = (row0 + by) * canvas.width
+            for (bx in 0 until bw) {
+                oldW[by * bw + bx] = (ownerWeight[rowBase + columns[bx]].toInt() and 0xFF) / 255f
+            }
+        }
+
+        val baseR = FloatArray(count)
+        val baseG = FloatArray(count)
+        val baseB = FloatArray(count)
+        val mask = FloatArray(count)
+        var hasOverlap = false
+        for (i in 0 until count) {
+            val old = oldColor[i]
+            baseR[i] = ((old shr 16) and 0xFF).toFloat()
+            baseG[i] = ((old shr 8) and 0xFF).toFloat()
+            baseB[i] = (old and 0xFF).toFloat()
+            when {
+                newW[i] <= 0f && oldW[i] <= 0f -> Unit
+                newW[i] <= 0f -> {
+                    // Solo la tela: il nuovo si riempie con il vecchio, così le sue bande
+                    // larghe non trascinano dentro il nero fuori campo.
+                    newR[i] = baseR[i]; newG[i] = baseG[i]; newB[i] = baseB[i]
+                }
+                oldW[i] <= 0f -> {
+                    baseR[i] = newR[i]; baseG[i] = newG[i]; baseB[i] = newB[i]
+                    mask[i] = 1f
+                }
+                else -> {
+                    hasOverlap = true
+                    if (newW[i] > oldW[i]) mask[i] = 1f
+                }
+            }
+        }
+
+        // I punti che nessuno copre restano neri sulla tela, ma dentro le piramidi il nero
+        // sanguinerebbe nelle bande larghe e scurirebbe il bordo vero della panoramica: si
+        // riempiono con il colore valido più vicino, solo per la durata della fusione.
+        val valid = BooleanArray(count) { newW[it] > 0f || oldW[it] > 0f }
+        fillHoles(baseR, valid, bw, bh)
+        fillHoles(baseG, valid, bw, bh)
+        fillHoles(baseB, valid, bw, bh)
+        for (i in 0 until count) {
+            if (!valid[i]) {
+                newR[i] = baseR[i]; newG[i] = baseG[i]; newB[i] = baseB[i]
+            }
+        }
+
+        val outColor = IntArray(count)
+        if (!hasOverlap) {
+            // Nessuna sovrapposizione: si dipinge e basta.
+            for (i in 0 until count) {
+                outColor[i] = if (newW[i] > 0f) {
+                    (0xFF shl 24) or (newR[i].toChannel() shl 16) or (newG[i].toChannel() shl 8) or newB[i].toChannel()
+                } else {
+                    oldColor[i]
+                }
+            }
+        } else {
+            val blended = MultibandBlender.blend(
+                baseChannels = arrayOf(baseR, baseG, baseB),
+                overlayChannels = arrayOf(newR, newG, newB),
+                mask = mask,
+                width = bw,
+                height = bh,
+            )
+            for (i in 0 until count) {
+                outColor[i] = if (newW[i] <= 0f && oldW[i] <= 0f) {
+                    oldColor[i]
+                } else {
+                    (0xFF shl 24) or (blended[0][i].toChannel() shl 16) or
+                        (blended[1][i].toChannel() shl 8) or blended[2][i].toChannel()
+                }
+            }
+        }
+
+        writeRegion(output, columns, row0, bw, bh, outColor)
+        for (by in 0 until bh) {
+            val rowBase = (row0 + by) * canvas.width
+            for (bx in 0 until bw) {
+                val i = by * bw + bx
+                val winner = max(oldW[i], newW[i])
+                val quantized = (winner * 255f).roundToInt().coerceIn(0, 255)
+                val index = rowBase + columns[bx]
+                if (quantized > (ownerWeight[index].toInt() and 0xFF)) {
+                    ownerWeight[index] = quantized.toByte()
+                }
+            }
+        }
+    }
+
+    /**
+     * Riempie i punti non validi con il valore valido più vicino sulla riga (e poi sulla
+     * colonna, per le righe completamente vuote). Non è interpolazione fine: serve solo a non
+     * far entrare il nero fuori campo nelle bande larghe della fusione.
+     */
+    private fun fillHoles(channel: FloatArray, valid: BooleanArray, width: Int, height: Int) {
+        for (y in 0 until height) {
+            val base = y * width
+            var lastValue = Float.NaN
+            for (x in 0 until width) {
+                val i = base + x
+                if (valid[i]) lastValue = channel[i] else if (!lastValue.isNaN()) channel[i] = lastValue
+            }
+            lastValue = Float.NaN
+            for (x in width - 1 downTo 0) {
+                val i = base + x
+                if (valid[i]) lastValue = channel[i]
+                else if (!lastValue.isNaN() && channel[i] == 0f) channel[i] = lastValue
+            }
+        }
+        // Le righe senza nemmeno un punto valido prendono dalla riga valida sopra o sotto.
+        for (x in 0 until width) {
+            var lastValue = Float.NaN
+            for (y in 0 until height) {
+                val i = y * width + x
+                if (valid[i]) lastValue = channel[i]
+                else if (channel[i] == 0f && !lastValue.isNaN()) channel[i] = lastValue
+            }
+            lastValue = Float.NaN
+            for (y in height - 1 downTo 0) {
+                val i = y * width + x
+                if (valid[i]) lastValue = channel[i]
+                else if (channel[i] == 0f && !lastValue.isNaN()) channel[i] = lastValue
+            }
+        }
+    }
+
+    /** Legge un ritaglio che può avvolgersi oltre il bordo destro della tela. */
+    private fun readRegion(bitmap: Bitmap, columns: IntArray, row0: Int, bw: Int, bh: Int, out: IntArray) {
+        val rowPixels = IntArray(bitmap.width)
+        for (by in 0 until bh) {
+            bitmap.getPixels(rowPixels, 0, bitmap.width, 0, row0 + by, bitmap.width, 1)
+            for (bx in 0 until bw) out[by * bw + bx] = rowPixels[columns[bx]]
+        }
+    }
+
+    /** Scrive un ritaglio che può avvolgersi oltre il bordo destro della tela. */
+    private fun writeRegion(bitmap: Bitmap, columns: IntArray, row0: Int, bw: Int, bh: Int, data: IntArray) {
+        val rowPixels = IntArray(bitmap.width)
+        for (by in 0 until bh) {
+            bitmap.getPixels(rowPixels, 0, bitmap.width, 0, row0 + by, bitmap.width, 1)
+            for (bx in 0 until bw) rowPixels[columns[bx]] = data[by * bw + bx]
+            bitmap.setPixels(rowPixels, 0, bitmap.width, 0, row0 + by, bitmap.width, 1)
+        }
     }
 
     /**
@@ -583,8 +1012,6 @@ class PanoramaStitcher(
         /** Tetto del lato lungo della tela, perché il risultato entri nella memoria di un telefono. */
         const val MAX_CANVAS_LONG_SIDE = 5000
 
-        /** Righe dipinte per volta: la memoria degli accumulatori è quattro volte il nastro. */
-        const val BAND_ROWS = 192
 
         /** Quanto lontano si cerca l'allineamento: due gradi è il peggio che la calibrazione dà. */
         /**
@@ -595,6 +1022,50 @@ class PanoramaStitcher(
         const val MAX_SEARCH_DEGREES = 4f
 
         /** Sotto questo passo la correzione è più fine di un pixel: cercare oltre è rumore. */
+        // ---- Punti di coerenza (l'allineamento alla Autopano) ----
+
+        /** Vicini con cui confrontarsi: quello di fianco e quello della fila accanto. */
+        const val MAX_ANCHORS = 2
+
+        /** Sotto questi voti la statistica non regge e si passa alla ricerca sul colore. */
+        const val MIN_MATCHES = 10
+        const val MIN_INLIERS = 6
+
+        /** Un voto più lontano di così dalla mediana è un accoppiamento sbagliato, non rumore. */
+        const val INLIER_TOLERANCE_DEGREES = 0.5f
+
+        /** Una cella della griglia dei candidati: un punto con carattere per cella. */
+        const val GRID_STEP = 28
+
+        /** Mezzo lato del ritaglio confrontato: 15×15 pixel, abbastanza carattere, poco costo. */
+        const val PATCH_RADIUS = 7
+
+        const val MAX_FEATURES = 120
+
+        /** Sotto questo gradiente in entrambe le direzioni non è un angolo, è una superficie. */
+        const val MIN_TEXTURE = 5f
+
+        /** Una correlazione più bassa non è un ritrovamento, è una coincidenza. */
+        const val MIN_NCC = 0.55f
+
+        /** Un ritaglio quasi uniforme non ha niente da correlare. */
+        const val MIN_PATCH_VARIANCE = 40f
+
+        /** Passata rada: ogni 3 pixel, sul ritaglio sfoltito a metà. */
+        const val COARSE_SEARCH_STEP = 3
+        const val COARSE_PATCH_STEP = 2
+
+        /** Un secondo posto oltre questa frazione del primo, lontano da lui, è ambiguità. */
+        const val DISTINCT_RATIO = 0.92f
+        const val DISTINCT_MIN_DISTANCE_PX = 6
+
+        /**
+         * Il ritaglio di cucitura sborda dal campo del fotogramma di questo margine: le
+         * correzioni di allineamento arrivano a qualche grado, e un ritaglio giusto giusto
+         * taglierebbe proprio la striscia dove si fonde.
+         */
+        const val BBOX_MARGIN_DEGREES = 3f
+
         const val MIN_SEARCH_DEGREES = 0.02f
 
         /** Punti campione lungo ogni lato della tela per trovare le sovrapposizioni. */
@@ -619,23 +1090,3 @@ fun sampleSizeFor(sourceWidth: Int, targetLongSide: Int): Int {
     return size
 }
 
-/**
- * Quanta parte del pixel spetta al fotogramma migliore, sulla cucitura e attorno.
- *
- * Vicino alla cucitura i pesi dei due candidati si equivalgono e si fonde a metà; appena il
- * migliore prende un vantaggio netto — la dominanza supera [SEAM_SOFTNESS] — il pixel è tutto
- * suo. È questo che confina la fusione in una striscia stretta: fuori dalla striscia ogni punto
- * viene da un solo scatto, e un oggetto mosso viene tagliato, non stampato due volte.
- */
-internal fun seamAlpha(bestWeight: Float, secondWeight: Float): Float {
-    if (secondWeight <= 0f) return 1f
-    val dominance = (bestWeight - secondWeight) / (bestWeight + secondWeight)
-    return (0.5f + 0.5f * (dominance / SEAM_SOFTNESS)).coerceIn(0.5f, 1f)
-}
-
-/**
- * Quanto stretta è la striscia di fusione, in frazione di dominanza dei pesi. Più piccolo =
- * cucitura più netta: 0,15 tiene la fusione dentro qualche grado, abbastanza da nascondere la
- * linea e troppo poco per creare fantasmi.
- */
-internal const val SEAM_SOFTNESS = 0.15f

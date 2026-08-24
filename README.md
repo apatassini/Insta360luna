@@ -1,11 +1,18 @@
 # Luna Ultra Timelapse Controller
 
-App Android (Kotlin + Jetpack Compose) per pilotare una **Insta360 Luna Ultra** via Wi-Fi e
-realizzare timelapse con movimento automatico del gimbal fra punti memorizzati.
+**© Persoft di Patassini Alessandro** — progetto e sviluppo.
 
-Implementa le specifiche MVP: connessione TCP alla camera, sessione con handshake e keep-alive,
-lettura stato, controllo manuale pan/tilt, memorizzazione waypoint, interpolazione lineare o
-`SmoothStep`, esecuzione della sequenza con start/stop registrazione e pulsante di STOP.
+App Android (Kotlin + Jetpack Compose) per pilotare una **Insta360 Luna Ultra** via Wi-Fi:
+mirino con anteprima dal vivo, controllo del gimbal con punti memorizzati, timelapse e sequenze
+fotografiche, **panoramiche scattate e unite sul telefono** (proiezione sferica, punti di
+controllo, fusione multibanda), galleria della camera con miniature veloci e organizzazione per
+giornate, scaricamento con **coordinate GPS negli EXIF**, cancellazione dalla scheda, e
+aggiornamenti automatici dalla release di GitHub.
+
+Nata come MVP per il timelapse (connessione TCP, handshake e keep-alive, waypoint,
+interpolazione lineare o `SmoothStep`), è cresciuta misurando il protocollo direttamente sulla
+camera: quello che c'è scritto qui sotto è stato verificato sul firmware **v1.0.288**, non
+dedotto.
 
 ---
 
@@ -84,8 +91,11 @@ Comandi usati dall'app, tutti con numero noto:
 | 22 / 23 | `START` / `STOP_TIMELAPSE` | timelapse interno della camera |
 | 3 | `TAKE_PICTURE` | scatto singolo |
 | 9 | `SET_PHOTOGRAPHY_OPTIONS` | proporzione della panoramica (sferica / 2:1) |
+| 11 | `GET_FILE_EXTRA` | i record «extra» dentro un file: metadati, anteprima grezza, giroscopio |
+| 12 | `DELETE_FILES` | cancellazione dalla scheda; `DeleteFilesResp` elenca gli `uri` falliti |
 | 13 | `GET_FILE_LIST` | elenco dei media sulla camera, a pagine |
-| 30 | `GET_MINI_THUMBNAIL` | miniatura di un file |
+| 16 | `SET_FILE_EXTRA` | scrittura di un record extra — **su questo firmware è un no-op silenzioso** |
+| 30 | `GET_MINI_THUMBNAIL` | miniatura di un file (non implementato su questo firmware) |
 | 226 / `0x00E2` | `GIMBAL_CONTROL` | vettore continuo pan/tilt e stop |
 
 Due cose che la camera dice sullo scatto e che l'app adesso ascolta:
@@ -116,6 +126,32 @@ viene mai emessa. Quello che questa camera manda davvero è la `8208`
 (`CAMERA_NOTIFICATION_CURRENT_CAPTURE_STATUS`): stato `4` (`SINGLE_SHOOTING`) quando comincia lo
 scatto, `0` quando ha finito di scrivere, e sono cinque secondi. È da lì che l'app sa quando la
 camera è di nuovo libera; le altre due restano nello schema, per i firmware che le usano.
+
+**E la camera sa dire «non ora».** Misurato dal vivo: a uno scatto che non può eseguire risponde
+comunque `200`, ma un attimo dopo manda `CAMERA_NOTIFICATION_CAPTURE_STOPPED` (**8201**) con un
+codice d'errore (`NotificationCaptureStopped.ErrorCode`: 1 scheda piena, 2 altra situazione —
+tipicamente «sto ancora scrivendo» —, 4 scheda lenta, 7 batteria, 9 temperatura) e lo stato non
+passa mai per `SINGLE_SHOOTING`. L'app si mette in ascolto **prima** di inviare il comando
+(la notifica può arrivare nello stesso millisecondo della risposta), dichiara il rifiuto con
+parole chiare e riprova da sola a distanza crescente — sia sullo scatto singolo sia nelle
+sequenze, dove uno scatto perso è un buco nella panoramica.
+
+### Il canale «extra» della scheda
+
+Ogni file della camera porta in coda, dopo la fine del JPEG, un blocco proprietario di record
+(lo stesso schema dei formati `.insp`/`.insv`). `GET_FILE_EXTRA` li restituisce uno alla volta
+per tipo (`ExtraType` 0–17). Misurato su questo firmware:
+
+- i tipi pieni su una foto sono **METADATA (1)** — l'`ExtraMetadata` protobuf con seriale,
+  modello, firmware —, **THUMBNAIL (2)**, **GYRO (3)** e **AAA_DATA (9)**;
+- **THUMBNAIL è un'anteprima grezza 1024×768** in YUV 4:2:0 con un'intestazione di 40 byte
+  (larghezza e altezza agli offset 16 e 20, little-endian), **già orientata come la foto si
+  guarda**. Pesa ~1,15 MB e arriva in una frazione di secondo: è la fonte delle miniature della
+  galleria, contro le decine di MB del JPEG intero;
+- **la scrittura non esiste**: `SET_FILE_EXTRA` risponde `200` e non salva niente, su nessun
+  tipo, nemmeno su quelli vuoti — riletti sempre 0 byte. Il firmware conserva solo i record che
+  riempie lui. Per questo il «passaporto» delle panoramiche vive negli EXIF delle copie sul
+  telefono, non sulla scheda.
 
 ### Gimbal Luna Ultra
 
@@ -206,12 +242,15 @@ Per quello che resta scoperto, in quest'ordine:
 
 1. l'**anteprima EXIF** dentro il file, leggendone solo i primi 512 KB e chiudendo la
    connessione. Non si chiede un intervallo di byte con `Range` — c'è chi risponde 416 e chi
-   ignora l'intestazione — si legge l'inizio e si smette: quello che non si legge non si scarica;
+   ignora l'intestazione — si legge l'inizio e si smette: quello che non si legge non si scarica.
+   Le foto della Luna Ultra, però, **non la contengono**;
 2. `GET_MINI_THUMBNAIL` sulla sessione di controllo, che **si spegne da solo** dopo tre rifiuti
-   di fila. Non tutte le camere lo implementano, e il modo in cui una camera dice «non lo
-   conosco» è far scadere l'attesa: pagare quel timeout su ogni casella è ciò che faceva
+   di fila. Non tutte le camere lo implementano — questa no — e il modo in cui una camera dice
+   «non lo conosco» è far scadere l'attesa: pagare quel timeout su ogni casella è ciò che faceva
    sembrare le anteprime rotte;
-3. per i video, il **primo fotogramma del proxy** `.lrv`, che va scaricato comunque per
+3. **l'anteprima grezza del canale extra** (`GET_FILE_EXTRA` tipo 2): 1024×768 in YUV, ~1,15 MB
+   in una frazione di secondo, già dritta. Su questo firmware è la via che funziona davvero;
+4. per i video, il **primo fotogramma del proxy** `.lrv`, che va scaricato comunque per
    guardarli.
 
 Se nessuna di queste porta un'immagine resta l'ultima spiaggia: **scaricare la foto intera e
@@ -255,8 +294,10 @@ Due cose diverse, tutte e due necessarie:
   «si disconnette quando cambio app». Il servizio tiene il processo sveglio, con un wake lock e
   un Wi-Fi lock, e mostra una notifica che dice cosa sta girando;
 - **il riaggancio automatico.** Se la sessione cade lo stesso, l'app riprova da sola a distanze
-  crescenti (2, 4, 8, 16 secondi…) finché non riesce o finché non si arrende dopo sei tentativi.
-  Smette solo quando sei tu a premere «disconnetti».
+  crescenti (2, 4, 8, 16 secondi…) finché non riesce o finché non si arrende dopo dodici
+  tentativi. Smette solo quando sei tu a premere «disconnetti». Un tentativo in attesa viene
+  annullato appena la connessione riesce per altra via: se scattasse aprirebbe una seconda
+  sessione di controllo, e la camera — che ne ammette una sola — chiuderebbe la prima.
 
 Prima di richiedere un cambio rete, l'app controlla tutte le reti Wi-Fi attive e riutilizza
 direttamente la Luna se il telefono è già collegato: in questo caso non apre il selettore di
@@ -312,6 +353,12 @@ Ultra di installare app da questa origine; Android richiede comunque la conferma
 installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
 sistema. Se GitHub non è raggiungibile, il controllo non blocca la connessione alla camera.
 
+Le build **si presentano con la loro data** («Build installata: domenica 24 agosto, 09:55»),
+non con l'esadecimale del commit — quello resta nei log. E siccome la pubblicazione cancella e
+ricrea la release, per qualche minuto chi controlla può trovare il vuoto: l'app riconosce quel
+momento (404, o release ancora senza APK), riprova da sola fino a tre volte a novanta secondi di
+distanza, e solo alla fine lo dice.
+
 ### La panoramica ha un pannello suo
 
 Si descrive con due cose — **quanti gradi coprire** e **con che obiettivo** — e la griglia degli
@@ -327,6 +374,40 @@ panoramica*, che pianifica e parte.
 
 Serve una calibrazione valida: la griglia nasce dai fine corsa misurati, e senza quelli l'app
 non sa se la copertura richiesta ci sta.
+
+### Dagli scatti alla panoramica: passaporto, job, unione
+
+A fine giro l'app **non unisce subito**: scarica gli scatti in
+`DCIM › Luna Ultra › Panoramiche/<id>` e registra un **job**. Unire sono minuti di calcolo e
+possono aspettare la sera; scaricare no, va fatto finché la camera è a portata di Wi-Fi. La
+scheda dei lavori sta in basso a destra nel mirino: il triangolo lancia l'unione, la X annulla
+il job lasciando le foto dove sono, e solo a panoramica salvata gli scatti temporanei si
+cancellano. I job sopravvivono alla chiusura dell'app. Finito il giro, il gimbal **torna
+all'inquadratura che aveva prima dello scatto**.
+
+Ogni copia scaricata riceve negli EXIF (UserComment) il **passaporto**
+`LUNAPANO1|id|numero|totale|pan|tilt|fov`: identità del panorama, ordine e angoli esatti. Da lì
+in poi quelle foto si riconoscono da sole — l'unione manuale dalla galleria le rimette insieme
+con gli angoli veri anche fra un mese, senza indovinare niente. Foto senza passaporto si
+uniscono lo stesso, nell'ordine dato, assumendo una fila orizzontale con la sovrapposizione
+scelta e una finestra di ricerca larga per gli scatti fatti a mano.
+
+L'unione lavora sul telefono, senza servizi esterni: proiezione di ogni scatto sulla sfera
+(dal campo visivo dell'obiettivo), **registrazione a piramide** da grossolana a fine,
+**punti di controllo** (almeno 150 candidati, tenuti sopra l'80% di correlazione) per la
+rifinitura, compensazione dell'esposizione fra scatti adiacenti, **fusione multibanda**
+Burt-Adelson sulle giunzioni e ritaglio automatico dei bordi neri. La risoluzione di lavoro si
+adatta alla memoria del telefono. Il risultato va in `DCIM › Luna Ultra` con le coordinate GPS
+del momento dello scatto.
+
+### GPS nelle foto
+
+La camera non sa dove sta; il telefono sì. Mentre si è connessi, un **diario delle posizioni**
+annota dove sta il telefono (campione ogni cinque minuti, o quando ci si sposta). Quando una
+foto viene copiata sul telefono, negli EXIF finisce la posizione annotata **più vicina alla sua
+ora di scatto** — scaricando la sera a casa, la foto riceve le coordinate della spiaggia, non
+del divano. Se il diario non ha niente entro tre ore dallo scatto, meglio nessuna coordinata di
+una sbagliata. Il permesso è lo stesso di posizione già chiesto al primo avvio per il Wi-Fi.
 
 **Quale release.** L'app ha **un ramo solo, `main`**, e la sua release è `apk-main`: si installa
 da lì e si aggiorna da lì, senza scelte da fare.
@@ -367,9 +448,9 @@ un'app di ripresa. Un tocco sull'immagine nasconde i comandi e lascia solo l'inq
 3. L'app forza il routing dei socket sulla rete Wi-Fi della camera anche se non offre Internet.
    Batteria, spazio e stato compaiono subito nella riga in alto: se li vedi, il protocollo gira.
 4. **Accendi l'anteprima** con il primo tasto della colonna dei comandi rapidi, a destra.
-5. **La prima volta**: menu ⋮ → **Diagnostica** → trovare il codice del comando gimbal
-   (vedi sotto). È l'unico passo di configurazione, e finché manca i comandi di movimento
-   restano visibili ma inerti.
+5. **La prima volta**: fare la **calibrazione del gimbal** (Impostazioni → Movimento), che
+   misura fine corsa e curva di risposta. Il codice del comando gimbal non va più cercato:
+   `0x00E2` è verificato sulla Luna Ultra ed è il predefinito.
 6. Scegliere la **modalità** sulla ghiera in basso: foto, video e timelapse comandano la camera
    e basta; sequenza, sequenza TL e panorama percorrono i punti memorizzati.
 7. Con la **levetta** (o la croce, che muove un asse alla volta) portare il gimbal sulla prima
@@ -417,18 +498,28 @@ Quattro pannelli si aprono sopra il mirino e si chiudono con Indietro: **Galleri
 
 ### La galleria
 
-Griglia dei file sulla camera, con filtro foto/video e i distintivi che dicono cos'è ogni cosa —
-video, panoramica, RAW. Un tocco apre il file a schermo intero: le foto si ingrandiscono con due
-dita, i video si riproducono dalla **copia locale del proxy**, non in streaming dalla camera —
-il lettore di sistema apre connessioni sue, che non passano dal binding sulla rete della camera.
+Griglia dei file sulla camera, **organizzata per giornate**: ogni giorno ha la sua intestazione
+che si apre e si chiude al tocco — di serie è aperta solo la più recente, e un giorno chiuso non
+chiede nemmeno le miniature. Sulle caselle c'è **l'ora dello scatto**, non il nome del file; i
+distintivi dicono cos'è ogni cosa — video, panoramica, RAW, preferito. Filtri per foto, video e
+preferiti (con la stella), ognuno con il suo conteggio.
 
-Tenendo premuto si entra in selezione multipla; il pulsante scarica i file scelti nella galleria
-del telefono, in `DCIM/Luna Ultra` — foto, video e panoramiche unite nello stesso posto, come
-fa la camera in `DCIM/Camera01` — dicendo a che punto è — «3 di 6»,
-non sei volte «scaricamento in corso». Lo scaricamento va diritto dentro
+Un tocco apre il file a schermo intero: le foto si ingrandiscono con due dita, si cambia
+immagine toccando i bordi o trascinando, le panoramiche si aprono nella sfera, i video partono
+da soli dalla **copia locale del proxy** (tocco = pausa/riprendi) — non in streaming dalla
+camera, perché il lettore di sistema apre connessioni sue che non passano dal binding sulla rete
+della camera.
+
+Tenendo premuto si entra in selezione multipla, con una barra di sole icone: seleziona tutto,
+**unisci** (le foto scelte diventano una panoramica), **elimina dalla camera** (con conferma:
+cancella anche i compagni LRV/DNG, e `DeleteFilesResp` dice quali `uri` non ha cancellato), e
+scarica. I file scelti finiscono nella galleria del telefono, in `DCIM/Luna Ultra` — foto,
+video e panoramiche unite nello stesso posto, come fa la camera in `DCIM/Camera01` — dicendo a
+che punto è — «3 di 6», non sei volte «scaricamento in corso». Lo scaricamento va diritto dentro
 MediaStore invece di passare da una copia in cache: un video lungo occuperebbe due volte lo
 spazio, e su un telefono pieno è la differenza fra riuscire e no. Continua anche se chiudi la
-galleria.
+galleria. **Le copie JPEG ricevono negli EXIF le coordinate GPS** del posto in cui la foto è
+stata scattata (vedi sotto).
 
 ### Le modalità della ghiera
 
@@ -501,6 +592,10 @@ cambiano il risultato:
 ---
 
 ## Trovare il codice del comando gimbal
+
+*Sezione storica: il codice è stato trovato — `0x00E2`, verificato — ed è il predefinito
+dell'app. Il metodo resta documentato perché è con questo che ci si arriva, e perché la scheda
+Diagnostica lo offre ancora per altri firmware.*
 
 Tutto nella scheda **Diagnostica**, con la camera connessa e ferma.
 
@@ -760,24 +855,34 @@ it.persoft.lunaultra
 ├─ camera/       CameraSession (handshake, keep-alive, requestId), LunaCommands,
 │                LunaError, CodeProbe (scanner), modelli
 ├─ preview/      AnnexB, VideoDecoder (MediaCodec), MjpegStream, PreviewController
-├─ gimbal/       GimbalController (jog manuale, dead reckoning, drive verso target)
-├─ timelapse/    Waypoint, TimelapseSequence, Interpolation, TimelapseEngine
+├─ gimbal/       GimbalController (jog manuale, dead reckoning, drive verso target),
+│                GimbalCalibrator, GimbalLimitMonitor
+├─ timelapse/    Waypoint, TimelapseSequence, Interpolation, TimelapseEngine,
+│                PanoramaPlanner (griglia degli scatti, assottigliamento ai poli)
+├─ stitch/       PanoramaStitcher (proiezione, registrazione a piramide, punti di
+│                controllo, composizione), MultibandBlender (Burt-Adelson),
+│                PanoramaStitchJob (scarico, passaporto, salvataggio), PanoTags,
+│                PanoJob (i lavori in attesa)
+├─ media/        MediaRepository (elenco, miniature, scaricamento, MediaStore),
+│                LocationDiary (il GPS per gli EXIF), Favorites, Jpeg, OscMedia
+├─ update/       UpdateManager (release GitHub, digest SHA-256)
 ├─ data/         AppSettings, JsonFileStore (persistenza JSON)
 └─ ui/           MainActivity, MainViewModel, LunaApp (mirino + pannelli)
-   ├─ viewfinder/  ViewfinderScreen, ghiera delle modalità, pulsante di scatto, HUD,
-   │               pannello del gimbal, griglia, avanzamento della sequenza
+   ├─ viewfinder/  ViewfinderScreen, fascia di scatto, HUD, pannello del gimbal,
+   │               griglia, avanzamento, scheda dei job delle panoramiche
    ├─ components/  vetro dei comandi sovrapposti, levetta, croce, anteprima, campi
-   ├─ screens/     Sequenza, Impostazioni, Diagnostica
+   ├─ screens/     Galleria, visore (sfera per le panoramiche), Panoramica,
+   │               Sequenza, Impostazioni, Diagnostica
    └─ theme/       palette scura, tipografia, icone
 ```
 
 Il core (tutto tranne `ui/` e `WifiNetworkBinder`) non dipende dall'SDK Android ed è testato
-come codice JVM puro: 54 test coprono framing UCD2 e checksum, riaggancio al magic dopo byte
-spuri, frame media, riconoscimento degli errori, corpi dei comandi confrontati con quelli
-osservati, riconoscimento dei NAL Annex-B e dei keyframe, conteggio degli scatti di una
-panoramica, roundtrip protobuf, interpolazione, calcolo delle durate, un giro completo su socket
-in loopback e le **risposte reali catturate dalla camera** — batteria, spazio disco a 64 bit,
-modello, seriale e firmware, byte per byte come sono arrivati.
+come codice JVM puro: i test coprono framing UCD2 e checksum, riaggancio al magic dopo byte
+spuri, frame media, corpi dei comandi confrontati con quelli osservati, riconoscimento dei NAL
+Annex-B e dei keyframe, il piano degli scatti di una panoramica, la fusione multibanda, la
+guardia di esposizione, roundtrip protobuf, interpolazione, calcolo delle durate, un giro
+completo su socket in loopback e le **risposte reali catturate dalla camera** — batteria,
+spazio disco a 64 bit, modello, seriale e firmware, byte per byte come sono arrivati.
 
 ---
 
@@ -817,7 +922,13 @@ Il codice qui è scritto da zero in Kotlin; da quei progetti vengono i **fatti s
 Editing dei media, AI tracking, Deep Track, live streaming, cloud e account Insta360,
 controllo multi-camera.
 
-## Nota legale
+## Paternità e nota legale
+
+Progetto ideato e sviluppato da **Persoft di Patassini Alessandro** (<info@persoft.it>), che ne
+detiene i diritti. © 2026 Persoft di Patassini Alessandro — tutti i diritti riservati, salvo
+diversa licenza indicata in futuro. I fatti sul protocollo elencati nei Crediti restano dei
+rispettivi progetti.
 
 Progetto non ufficiale, non affiliato a Insta360, basato su reverse engineering del protocollo
-di controllo per interoperabilità con la propria camera.
+di controllo per interoperabilità con la propria camera. «Insta360» e «Luna Ultra» sono marchi
+dei rispettivi proprietari.

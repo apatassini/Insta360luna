@@ -20,7 +20,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
@@ -102,6 +104,23 @@ fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
             GalleryFilter.VIDEO -> gallery.items.filter { it.isVideo }
             GalleryFilter.PREFERITI -> gallery.items.filter { it.path in favorites }
         }
+    }
+
+    // La griglia si legge per giornate: ogni giorno ha la sua intestazione che si apre e si
+    // chiude. Di serie è aperto solo il giorno più recente — è quasi sempre quello che si
+    // cerca — e i giorni chiusi non chiedono nemmeno le miniature alla camera.
+    val days = remember(items) { items.groupBy { dayKeyOf(it.takenAtMs) } }
+    val newestDay = days.keys.firstOrNull()
+    // Si memorizzano solo le giornate girate a mano rispetto alla regola: così lo stato
+    // sopravvive alla rotazione senza dipendere da quali giorni esistono.
+    var toggledDays by rememberSaveable { mutableStateOf("") }
+    val toggled = remember(toggledDays) {
+        toggledDays.split('|').filterTo(mutableSetOf()) { it.isNotEmpty() }
+    }
+    val isDayOpen: (String) -> Boolean = { day -> (day == newestDay) != (day in toggled) }
+    val toggleDay: (String) -> Unit = { day ->
+        toggled.apply { if (!add(day)) remove(day) }
+        toggledDays = toggled.joinToString("|")
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -259,21 +278,34 @@ fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    items(items, key = { it.path }) { item ->
-                        MediaTile(
-                            item = item,
-                            selected = item.path in gallery.selected,
-                            selectionMode = gallery.selectionMode,
-                            favorite = item.path in favorites,
-                            progress = gallery.downloads[item.path],
-                            loadThumbnail = { viewModel.thumbnail(item) },
-                            reloadKey = gallery.thumbnailsVersion,
-                            onClick = {
-                                if (gallery.selectionMode) viewModel.toggleSelection(item)
-                                else viewModel.openViewer(item)
-                            },
-                            onLongClick = { viewModel.toggleSelection(item) },
-                        )
+                    days.forEach { (day, dayItems) ->
+                        val open = isDayOpen(day)
+                        item(key = "day-$day", span = { GridItemSpan(maxLineSpan) }) {
+                            DayHeader(
+                                label = dayLabelOf(dayItems.first().takenAtMs),
+                                count = dayItems.size,
+                                expanded = open,
+                                onToggle = { toggleDay(day) },
+                            )
+                        }
+                        if (open) {
+                            items(dayItems, key = { it.path }) { item ->
+                                MediaTile(
+                                    item = item,
+                                    selected = item.path in gallery.selected,
+                                    selectionMode = gallery.selectionMode,
+                                    favorite = item.path in favorites,
+                                    progress = gallery.downloads[item.path],
+                                    loadThumbnail = { viewModel.thumbnail(item) },
+                                    reloadKey = gallery.thumbnailsVersion,
+                                    onClick = {
+                                        if (gallery.selectionMode) viewModel.toggleSelection(item)
+                                        else viewModel.openViewer(item)
+                                    },
+                                    onLongClick = { viewModel.toggleSelection(item) },
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -497,8 +529,10 @@ private fun MediaTile(
             }
         }
 
+        // L'ora dello scatto, non il nome del file: il giorno lo dice già l'intestazione
+        // della sezione, e IMG_20260823_… non lo legge nessuno su una casella così piccola.
         Text(
-            text = item.name,
+            text = if (item.takenAtMs > 0L) tileTimeFormat.format(Date(item.takenAtMs)) else item.name,
             style = MaterialTheme.typography.labelSmall,
             color = Color.White.copy(alpha = 0.85f),
             maxLines = 1,
@@ -544,3 +578,52 @@ private fun TileBadge(icon: androidx.compose.ui.graphics.vector.ImageVector, tin
 fun mediaDateLabel(takenAtMs: Long): String =
     if (takenAtMs <= 0L) "data sconosciuta"
     else SimpleDateFormat("d MMM yyyy · HH:mm", Locale.getDefault()).format(Date(takenAtMs))
+
+/** L'intestazione di una giornata: si tocca per aprirla o chiuderla. */
+@Composable
+private fun DayHeader(label: String, count: Int, expanded: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Luna.SurfaceHigh, RoundedCornerShape(8.dp))
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = if (expanded) LunaIcons.Down else LunaIcons.Right,
+            contentDescription = if (expanded) "Chiudi la giornata" else "Apri la giornata",
+            tint = if (expanded) Luna.Accent else Luna.OnSurfaceDim,
+            modifier = Modifier.size(20.dp),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = 6.dp),
+        )
+        Text(
+            text = "$count",
+            style = MaterialTheme.typography.labelMedium,
+            color = Luna.OnSurfaceDim,
+        )
+    }
+}
+
+/** Ora dello scatto sulla casella: il resto della data sta nell'intestazione del giorno. */
+private val tileTimeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+/** La chiave di raggruppamento: un giorno di calendario, nel fuso del telefono. */
+private val dayKeyFormat = SimpleDateFormat("yyyyMMdd", Locale.US)
+
+private fun dayKeyOf(takenAtMs: Long): String =
+    if (takenAtMs <= 0L) "senza-data" else dayKeyFormat.format(Date(takenAtMs))
+
+/** «Sabato 23 agosto 2026», nella lingua del telefono. */
+private fun dayLabelOf(takenAtMs: Long): String =
+    if (takenAtMs <= 0L) "Senza data"
+    else SimpleDateFormat("EEEE d MMMM yyyy", Locale.getDefault())
+        .format(Date(takenAtMs))
+        .replaceFirstChar { it.uppercase(Locale.getDefault()) }

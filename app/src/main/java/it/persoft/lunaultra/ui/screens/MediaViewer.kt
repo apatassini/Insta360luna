@@ -101,15 +101,12 @@ fun MediaViewer(
     var scale by remember(item.path) { mutableFloatStateOf(1f) }
     var offset by remember(item.path) { mutableStateOf(Offset.Zero) }
     val sphere = remember(item.path) { SphereState() }
-    var sphereMode by remember(item.path) { mutableStateOf(item.panoramic) }
+    // Il visore navigabile si sceglie, non si subisce: anche una panoramica 2:1 che copre un
+    // pezzo di sfera finiva dentro la palla, e una striscia di paesaggio dentro una sfera è
+    // quasi tutta nera. La foto si apre piatta; il pulsante della sfera resta lì per chi la
+    // vuole girare.
+    var sphereMode by remember(item.path) { mutableStateOf(false) }
     val sphereAvailable = item.panoramic || state.photo?.let(::looksEquirectangular) == true
-
-    // Alcuni firmware chiamano le sferiche IMG_*.jpg invece di PANO_*.jpg. In quel caso il
-    // nome non aiuta, ma la proporzione equirettangolare 2:1 sì: appena arriva il bitmap si
-    // entra automaticamente nel visore navigabile.
-    LaunchedEffect(item.path, state.photo) {
-        if (sphereAvailable) sphereMode = true
-    }
 
     LaunchedEffect(item.path, chromeVisible) {
         if (chromeVisible) {
@@ -144,7 +141,9 @@ fun MediaViewer(
                                 // Un dito che attraversa lo schermo gira di quanto si vede:
                                 // così la scena segue la mano invece di scappare.
                                 val degreesPerPixel = sphere.fovDegrees / width
-                                sphere.rotateBy(-panChange.x * degreesPerPixel, panChange.y * degreesPerPixel)
+                                // Il dito trascina la scena, non la testa: destra e sinistra
+                                // seguono il gesto, come in ogni visore di sferiche.
+                                sphere.rotateBy(panChange.x * degreesPerPixel, panChange.y * degreesPerPixel)
                             } else if (scale > 1f) {
                                 offset += panChange
                             }

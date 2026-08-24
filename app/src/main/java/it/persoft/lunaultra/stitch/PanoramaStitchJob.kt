@@ -69,6 +69,11 @@ class PanoramaStitchJob(
             val paired = pairByUri(after, angles) ?: pairByArrival(before, after, angles)
 
             onProgress(0f, "Scarico ${paired.size} scatti")
+            // L'identità del panorama finisce nell'EXIF di ogni copia scaricata: id, numero,
+            // angoli esatti. Da lì in poi queste foto si riconoscono e si riuniscono da sole,
+            // anche fra un mese, senza indovinare più niente.
+            val panoramaId = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
             val shots = paired.mapIndexed { index, (item, angle) ->
                 val file = media.cache(item) { fraction ->
                     onProgress(
@@ -76,6 +81,17 @@ class PanoramaStitchJob(
                         "Scarico lo scatto ${index + 1} di ${paired.size}",
                     )
                 }.getOrElse { throw IllegalStateException("Scaricamento di ${item.name} non riuscito: ${it.message}") }
+                PanoTags.write(
+                    file,
+                    PanoTag(
+                        panoramaId = panoramaId,
+                        index = index + 1,
+                        count = paired.size,
+                        panDegrees = angle.panDegrees,
+                        tiltDegrees = angle.tiltDegrees,
+                        fovDegrees = horizontalFovDegrees,
+                    ),
+                )
                 PanoramaShot(
                     file = file,
                     panDegrees = angle.panDegrees,
@@ -107,6 +123,31 @@ class PanoramaStitchJob(
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
             require(files.size >= 2) { "Servono almeno due foto da unire" }
+
+            // Se ogni foto porta il passaporto della stessa panoramica, non c'è niente da
+            // indovinare: ordine dai numeri, angoli esatti dai tag, ricerca stretta.
+            val tags = files.map { PanoTags.read(it) }
+            val sameId = tags.all { it != null } &&
+                tags.mapNotNull { it?.panoramaId }.distinct().size == 1
+            if (sameId) {
+                val ordered = files.zip(tags).sortedBy { it.second!!.index }
+                val fov = ordered.first().second!!.fovDegrees.takeIf { it > 10f } ?: horizontalFovDegrees
+                val shots = ordered.map { (file, tag) ->
+                    PanoramaShot(
+                        file = file,
+                        panDegrees = tag!!.panDegrees,
+                        tiltDegrees = tag.tiltDegrees,
+                        label = "Foto ${tag.index}",
+                    )
+                }
+                log.info(
+                    "UNIONE MANUALE · FOTO RICONOSCIUTE",
+                    "Panorama ${ordered.first().second!!.panoramaId}: ${shots.size} foto con angoli " +
+                        "esatti dai tag EXIF. Niente ipotesi, ricerca stretta.",
+                )
+                return@runCatching stitchAndSave(shots, fov, fillNadir = false, onProgress = onProgress)
+            }
+
             val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
             val start = -stepDegrees * (files.size - 1) / 2f
             val shots = files.mapIndexed { index, file ->

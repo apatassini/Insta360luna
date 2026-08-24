@@ -631,6 +631,7 @@ class MediaRepository(
             inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSize)
         }
         BitmapFactory.decodeFile(file.absolutePath, options)
+            ?.let { applyExifOrientation(it, ExifInterface(file)) }
     }.getOrElse {
         log.warn("Decodifica di ${file.name} non riuscita: ${it.message}")
         null
@@ -643,6 +644,7 @@ class MediaRepository(
             inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSize)
         }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            ?.let { applyExifOrientation(it, ExifInterface(java.io.ByteArrayInputStream(bytes))) }
     }.getOrNull()
 
     /**
@@ -687,4 +689,39 @@ class MediaRepository(
         const val CONNECT_TIMEOUT_MS = 8_000
         const val READ_TIMEOUT_MS = 20_000
     }
+}
+
+/**
+ * Applica al bitmap la rotazione che l'EXIF dichiara e il decodificatore ignora.
+ *
+ * Le foto scattate col telefono in verticale sono quasi sempre salvate coricate, con un tag che
+ * dice «girami di 90°»: ogni visore la applica, `BitmapFactory` no. Senza questo passaggio la
+ * miniatura e l'anteprima escono sdraiate — e l'unione riceverebbe fotogrammi coricati, che è
+ * anche peggio.
+ */
+internal fun applyExifOrientation(bitmap: android.graphics.Bitmap, exif: androidx.exifinterface.media.ExifInterface): android.graphics.Bitmap {
+    val orientation = exif.getAttributeInt(
+        androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL,
+    )
+    val matrix = android.graphics.Matrix()
+    when (orientation) {
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSPOSE -> {
+            matrix.postRotate(90f)
+            matrix.postScale(-1f, 1f)
+        }
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSVERSE -> {
+            matrix.postRotate(270f)
+            matrix.postScale(-1f, 1f)
+        }
+        else -> return bitmap
+    }
+    val rotated = android.graphics.Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    if (rotated !== bitmap) bitmap.recycle()
+    return rotated
 }

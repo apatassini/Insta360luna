@@ -263,8 +263,16 @@ class PanoramaStitcher(
             inSampleSize = sampleSizeFor(bounds.outWidth, workingLongSide)
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        val decoded = BitmapFactory.decodeFile(shot.file.absolutePath, options)
+        val raw = BitmapFactory.decodeFile(shot.file.absolutePath, options)
             ?: throw IllegalStateException("Non riesco a leggere ${shot.file.name}")
+        // Le foto del telefono in verticale arrivano coricate con l'EXIF che dice di girarle:
+        // il decodificatore lo ignora, e un fotogramma sdraiato manda a monte l'unione.
+        val decoded = runCatching {
+            it.persoft.lunaultra.media.applyExifOrientation(
+                raw,
+                androidx.exifinterface.media.ExifInterface(shot.file),
+            )
+        }.getOrDefault(raw)
         // Il decodificatore riduce solo per potenze di due: una foto da 4000 pixel scende a
         // 2000, non a 1600, e quel 25% in più di lato è il 56% in più di memoria — che
         // moltiplicato per cinque foto è la differenza fra unire e morire di memoria.

@@ -1283,6 +1283,103 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Unisce foto già esistenti, scelte a mano: il banco di prova dell'unione.
+     *
+     * Serve a lavorare sulla qualità senza rifare gli scatti ogni volta. Le foto selezionate
+     * nella galleria della camera si ordinano da sole per ora di scatto — l'ordine in cui sono
+     * state fatte — si scaricano e si uniscono come una fila orizzontale. Gli angoli veri non
+     * ci sono: il passo si assume dal campo visivo dello zoom attuale e dalla sovrapposizione
+     * scelta nel pannello, e l'allineamento trova il resto.
+     */
+    fun stitchSelectedFromCamera() {
+        if (stitchJob?.isActive == true) {
+            showMessage("Un'unione è già in corso")
+            return
+        }
+        val chosen = _gallery.value.items
+            .filter { it.path in _gallery.value.selected && !it.isVideo }
+            .sortedWith(compareBy({ it.takenAtMs }, { it.name }))
+        if (chosen.size < 2) {
+            showMessage("Seleziona almeno due foto (non video) da unire")
+            return
+        }
+        stitchJob = viewModelScope.launch {
+            _stitchState.value = StitchUiState.Working(0f, "Scarico ${chosen.size} foto dalla camera")
+            val files = mutableListOf<java.io.File>()
+            chosen.forEachIndexed { index, item ->
+                val file = container.media.cache(item) { fraction ->
+                    _stitchState.value = StitchUiState.Working(
+                        0.25f * (index + fraction) / chosen.size,
+                        "Scarico ${item.name}",
+                    )
+                }.getOrElse {
+                    _stitchState.value = StitchUiState.Failed("Scaricamento di ${item.name} non riuscito: ${it.message}")
+                    return@launch
+                }
+                files += file
+            }
+            stitchFiles(files, downloadShare = 0.25f)
+        }
+    }
+
+    /**
+     * Unisce foto scelte dalla galleria del telefono, nell'ordine in cui sono state toccate.
+     *
+     * Il selettore di sistema restituisce le foto nell'ordine della scelta: toccarle una, due,
+     * tre come sono state scattate è il modo di dare l'ordine.
+     */
+    fun stitchPickedPhotos(context: android.content.Context, uris: List<android.net.Uri>) {
+        if (uris.size < 2) {
+            showMessage("Scegli almeno due foto, nell'ordine in cui sono state scattate")
+            return
+        }
+        if (stitchJob?.isActive == true) {
+            showMessage("Un'unione è già in corso")
+            return
+        }
+        stitchJob = viewModelScope.launch {
+            _stitchState.value = StitchUiState.Working(0f, "Leggo ${uris.size} foto dal telefono")
+            val files = withContext(Dispatchers.IO) {
+                runCatching {
+                    uris.mapIndexed { index, uri ->
+                        val target = java.io.File(context.cacheDir, "stitch-input-$index.jpg")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            target.outputStream().use { output -> input.copyTo(output) }
+                        } ?: error("la foto ${index + 1} non si apre")
+                        target
+                    }
+                }
+            }.getOrElse {
+                _stitchState.value = StitchUiState.Failed("Foto non leggibili: ${it.message}")
+                return@launch
+            }
+            stitchFiles(files, downloadShare = 0.05f)
+        }
+    }
+
+    /** Il tratto comune: fila orizzontale nell'ordine dato, FOV dallo zoom, unione, esito. */
+    private suspend fun stitchFiles(files: List<java.io.File>, downloadShare: Float) {
+        val seq = sequence.value
+        val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, seq.panoramaAspect)
+        container.stitchJob.runOnFiles(
+            files = files,
+            horizontalFovDegrees = fov.horizontalDegrees,
+            overlapPercent = seq.panoramaOverlapPercent,
+            onProgress = { fraction, message ->
+                _stitchState.value = StitchUiState.Working(
+                    downloadShare + (1f - downloadShare) * fraction,
+                    message,
+                )
+            },
+        ).onSuccess {
+            _stitchState.value = it
+            showMessage("Panoramica unita: ${it.fileName}")
+        }.onFailure {
+            _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita")
+        }
+    }
+
+    /**
      * Unisce gli scatti appena finiti, se erano di una panoramica e l'unione è accesa.
      *
      * Viene chiamata quando la corsa passa a completata. Il campo visivo è quello dell'obiettivo

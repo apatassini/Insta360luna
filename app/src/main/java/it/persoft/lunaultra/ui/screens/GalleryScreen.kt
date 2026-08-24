@@ -264,6 +264,14 @@ fun GalleryScreen(viewModel: MainViewModel) {
                     OutlinedButton(onClick = viewModel::selectAll) {
                         ButtonLabel(LunaIcons.SelectAll, "Tutti")
                     }
+                    // Le foto scelte si uniscono nell'ordine in cui sono state scattate: è il
+                    // banco di prova dell'unione, senza dover rifare la panoramica ogni volta.
+                    OutlinedButton(
+                        onClick = viewModel::stitchSelectedFromCamera,
+                        enabled = gallery.selected.size >= 2,
+                    ) {
+                        ButtonLabel(LunaIcons.Panorama, "Unisci")
+                    }
                     Button(onClick = viewModel::downloadSelected, modifier = Modifier.weight(1f)) {
                         ButtonLabel(LunaIcons.Download, "Scarica ${gallery.selected.size}")
                     }

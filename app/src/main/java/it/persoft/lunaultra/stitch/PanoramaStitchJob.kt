@@ -84,39 +84,85 @@ class PanoramaStitchJob(
                 )
             }
 
-            val stitcher = PanoramaStitcher { fraction, message ->
+            stitchAndSave(shots, horizontalFovDegrees, fillNadir) { fraction, message ->
                 onProgress(DOWNLOAD_SHARE + (1f - DOWNLOAD_SHARE) * fraction, message)
             }
-            val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir).getOrThrow()
-            val name = save(outcome.bitmap)
-            outcome.bitmap.recycle()
-
-            log.info(
-                "PANORAMICA UNITA",
-                buildString {
-                    appendLine("$name · ${outcome.report.canvasWidth}×${outcome.report.canvasHeight} px")
-                    appendLine(
-                        "%d scatti · copertura %.0f° × %.0f°".format(
-                            outcome.report.frames,
-                            outcome.report.coverageHorizontalDegrees,
-                            outcome.report.coverageVerticalDegrees,
-                        ),
-                    )
-                    if (outcome.report.nadirPatchRows > 0) {
-                        appendLine(
-                            "Buco sotto chiuso: %d righe inventate a partire dall'ultimo anello buono."
-                                .format(outcome.report.nadirPatchRows),
-                        )
-                    }
-                    outcome.report.refinements.forEach { appendLine(it) }
-                    append(
-                        "Correzione massima dell'allineamento: %.2f°"
-                            .format(outcome.report.worstCorrectionDegrees),
-                    )
-                },
-            )
-            StitchUiState.Done(name, outcome.report)
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
+    }
+
+    /**
+     * Unisce dei file già sul telefono, nell'ordine dato, come una fila orizzontale.
+     *
+     * È il banco di prova dell'unione: si lavora sugli scatti che ci sono già, senza rifare la
+     * panoramica ogni volta. Gli angoli veri non ci sono, quindi si assume quello che una fila
+     * di scatti è: passi uguali da sinistra a destra, larghi quanto il campo visivo meno la
+     * sovrapposizione scelta. Il resto lo trova l'allineamento, che parte con otto gradi di
+     * finestra e i punti di controllo per la rifinitura.
+     */
+    suspend fun runOnFiles(
+        files: List<File>,
+        horizontalFovDegrees: Float,
+        overlapPercent: Int,
+        onProgress: (Float, String) -> Unit,
+    ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(files.size >= 2) { "Servono almeno due foto da unire" }
+            val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
+            val start = -stepDegrees * (files.size - 1) / 2f
+            val shots = files.mapIndexed { index, file ->
+                PanoramaShot(
+                    file = file,
+                    panDegrees = start + index * stepDegrees,
+                    tiltDegrees = 0f,
+                    label = "Foto ${index + 1}",
+                )
+            }
+            log.info(
+                "UNIONE MANUALE",
+                "${files.size} foto nell'ordine dato · passo assunto %.1f° (FOV %.1f°, sovrapposizione $overlapPercent%%)"
+                    .format(stepDegrees, horizontalFovDegrees),
+            )
+            stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, onProgress = onProgress)
+        }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
+    }
+
+    /** Il tratto comune: unione, salvataggio in galleria, racconto nel log. */
+    private suspend fun stitchAndSave(
+        shots: List<PanoramaShot>,
+        horizontalFovDegrees: Float,
+        fillNadir: Boolean,
+        onProgress: (Float, String) -> Unit,
+    ): StitchUiState.Done {
+        val stitcher = PanoramaStitcher(onProgress)
+        val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir).getOrThrow()
+        val name = save(outcome.bitmap)
+        outcome.bitmap.recycle()
+
+        log.info(
+            "PANORAMICA UNITA",
+            buildString {
+                appendLine("$name · ${outcome.report.canvasWidth}×${outcome.report.canvasHeight} px")
+                appendLine(
+                    "%d scatti · copertura %.0f° × %.0f°".format(
+                        outcome.report.frames,
+                        outcome.report.coverageHorizontalDegrees,
+                        outcome.report.coverageVerticalDegrees,
+                    ),
+                )
+                if (outcome.report.nadirPatchRows > 0) {
+                    appendLine(
+                        "Buco sotto chiuso: %d righe inventate a partire dall'ultimo anello buono."
+                            .format(outcome.report.nadirPatchRows),
+                    )
+                }
+                outcome.report.refinements.forEach { appendLine(it) }
+                append(
+                    "Correzione massima dell'allineamento: %.2f°"
+                        .format(outcome.report.worstCorrectionDegrees),
+                )
+            },
+        )
+        return StitchUiState.Done(name, outcome.report)
     }
 
     /**

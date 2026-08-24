@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -73,6 +74,15 @@ fun PanoramaScreen(viewModel: MainViewModel) {
     val run by viewModel.runState.collectAsState()
     val stitch by viewModel.stitchState.collectAsState()
     val connected = connection == ConnectionState.CONNECTED
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    // Il selettore restituisce le foto nell'ordine in cui vengono toccate: toccarle una, due,
+    // tre come sono state scattate è il modo di dare l'ordine all'unione.
+    val photoPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) viewModel.stitchPickedPhotos(context, uris)
+    }
 
     // Il piano si rifà a ogni modifica: il numero di scatti è la cosa che decide se ne vale
     // la pena, e va saputo prima di cominciare.
@@ -327,6 +337,22 @@ fun PanoramaScreen(viewModel: MainViewModel) {
         }
 
         SectionCard(title = "Unione delle foto", icon = LunaIcons.Panorama, accent = Luna.Ok) {
+            // Il banco di prova: unire foto che esistono già, senza rifare gli scatti.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { photoPicker.launch(arrayOf("image/*")) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    ButtonLabel(LunaIcons.Gallery, "Unisci foto dal telefono")
+                }
+            }
+            Hint(
+                "Tocca le foto nell'ordine in cui sono state scattate: quello è l'ordine " +
+                    "dell'unione. Dalla galleria della camera, invece, selezionale e premi " +
+                    "«Unisci»: l'ordine lo dà l'ora di scatto. Il campo visivo assunto è " +
+                    "quello dello zoom attuale, con la sovrapposizione impostata qui sopra.",
+            )
+
             ToggleRow(
                 title = "Unisci da sola alla fine",
                 subtitle = "Scarica gli scatti, li rimette sulla sfera secondo l'obiettivo, " +

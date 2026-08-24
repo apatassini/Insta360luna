@@ -2398,12 +2398,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * La prova del canale «extra»: si può scrivere qualcosa dentro un file della scheda?
+     * La prova del canale «extra», seconda stesura: prima la mappa, poi l'andata e ritorno.
      *
-     * `SET_FILE_EXTRA` è il comando con cui l'app ufficiale aggiunge metadati ai file dopo lo
-     * scatto. Se il firmware accetta anche un tipo nostro e lo rilegge uguale, il passaporto
-     * delle panoramiche può vivere sulla camera invece che solo sulle copie. Non tocca i pixel:
-     * scrive un blocco dati accanto, e la prova lo rilegge subito per dire com'è andata.
+     * La prima stesura scriveva un tipo inventato (200) e la camera lo scartava in silenzio:
+     * l'enum del firmware registra solo i tipi 0-17, e fuori da quelli il SET risponde OK
+     * senza fare niente — questa camera non manda mai errori. Quindi adesso si lavora dentro
+     * il recinto: si leggono tutti i tipi registrati sull'ultima foto, per vedere cosa c'è, e
+     * poi si prova l'andata e ritorno sul GPS (tipo 7) — che è il tipo pensato apposta per
+     * essere scritto dal telefono dopo lo scatto. Se il GPS fa il giro, il canale scrive
+     * davvero sulla scheda: e per una panoramica, longitudine e latitudine possono
+     * trasportare pan e tilt.
      */
     fun probeFileExtra() {
         viewModelScope.launch {
@@ -2413,30 +2417,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 showMessage("Serve almeno una foto sulla camera per la prova")
                 return@launch
             }
-            val payload = "LUNAPANO-PROVA-${System.currentTimeMillis()}"
-            container.log.info(
-                "PROVA SET_FILE_EXTRA",
-                "File: ${target.path}\nTipo: $PROBE_EXTRA_TYPE · ${payload.length} byte",
-            )
-            container.commands.setFileExtra(target.path, PROBE_EXTRA_TYPE, payload.toByteArray())
-                .onSuccess { container.log.info("SET_FILE_EXTRA accettato dalla camera") }
-                .onFailure { container.log.warn("SET_FILE_EXTRA rifiutato: ${it.message}") }
-            container.commands.getFileExtra(target.path, PROBE_EXTRA_TYPE)
-                .onSuccess { bytes ->
-                    val text = String(bytes, Charsets.UTF_8)
-                    if (text.contains(payload)) {
-                        container.log.info(
-                            "GET_FILE_EXTRA riletto: il dato è tornato identico",
-                            "Il passaporto delle panoramiche può vivere sulla scheda.",
-                        )
-                    } else {
-                        container.log.warn(
-                            "GET_FILE_EXTRA risponde ma il dato non è il nostro",
-                            "${bytes.size} byte: ${Hex.encode(bytes, limit = 48)}",
+
+            val map = StringBuilder()
+            for (type in 0..LunaProtocolCodes.ExtraType.LAST_KNOWN) {
+                container.commands.getFileExtra(target.path, type).onSuccess { bytes ->
+                    if (bytes.isNotEmpty()) {
+                        map.appendLine(
+                            "tipo $type (${LunaProtocolCodes.ExtraType.name(type)}): " +
+                                "${bytes.size} byte · ${Hex.encode(bytes, limit = 24)}",
                         )
                     }
                 }
-                .onFailure { container.log.warn("GET_FILE_EXTRA rifiutato: ${it.message}") }
+            }
+            container.log.info(
+                "CANALE EXTRA · MAPPA DI ${target.name}",
+                map.toString().ifBlank { "Nessun tipo risponde con dati." },
+            )
+
+            // L'andata e ritorno sul GPS: coordinate riconoscibili, non plausibili.
+            val existing = container.commands
+                .getFileExtra(target.path, LunaProtocolCodes.ExtraType.GPS)
+                .getOrNull()
+            if (existing != null && existing.isNotEmpty()) {
+                container.log.info(
+                    "GPS già presente su ${target.name}: non lo tocco",
+                    "${existing.size} byte · ${Hex.encode(existing, limit = 24)}",
+                )
+                showMessage("Prova finita: l'esito è nel log")
+                return@launch
+            }
+            val payload = it.persoft.lunaultra.protocol.ProtoWriter()
+                .double(1, PROBE_GPS_LON)
+                .double(2, PROBE_GPS_LAT)
+                .double(3, PROBE_GPS_ALT)
+                .toByteArray()
+            container.commands.setFileExtra(target.path, LunaProtocolCodes.ExtraType.GPS, payload)
+                .onFailure { container.log.warn("SET del GPS rifiutato: ${it.message}") }
+            container.commands.getFileExtra(target.path, LunaProtocolCodes.ExtraType.GPS)
+                .onSuccess { bytes ->
+                    val reader = it.persoft.lunaultra.protocol.ProtoReader(bytes)
+                    val lon = reader.doubleOrNull(1) ?: reader.doubleOrNull(3, 1)
+                    if (lon != null && kotlin.math.abs(lon - PROBE_GPS_LON) < 1e-6) {
+                        container.log.info(
+                            "GPS SCRITTO E RILETTO IDENTICO",
+                            "Il canale scrive davvero sulla scheda. Longitudine e latitudine " +
+                                "possono trasportare pan e tilt: il passaporto delle panoramiche " +
+                                "può vivere sulla camera.",
+                        )
+                    } else {
+                        container.log.warn(
+                            "GPS riletto ma non combacia",
+                            "${bytes.size} byte · ${Hex.encode(bytes, limit = 32)}",
+                        )
+                    }
+                }
+                .onFailure { container.log.warn("GET del GPS rifiutato: ${it.message}") }
             showMessage("Prova finita: l'esito è nel log")
         }
     }
@@ -2648,8 +2683,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          */
         const val SINGLE_SHOT_SAVE_TIMEOUT_MS = 20_000L
 
-        /** Un tipo alto e improbabile: se il firmware lo accetta, è spazio libero per noi. */
-        const val PROBE_EXTRA_TYPE = 200
+        /** Coordinate di prova riconoscibili: nessun posto vero è a 11.111111, 22.222222. */
+        const val PROBE_GPS_LON = 11.111111
+        const val PROBE_GPS_LAT = 22.222222
+        const val PROBE_GPS_ALT = 333.25
 
         /** Attesa fra l'azione di prova e la miniatura di confronto: il gimbal deve arrivare. */
         const val GIMBAL_ACTION_PROBE_WAIT_MS = 4_000L

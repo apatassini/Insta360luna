@@ -28,6 +28,23 @@ object LunaProtocolCodes {
      */
     const val GET_FILE_EXTRA = 11
     const val SET_FILE_EXTRA = 16
+
+    /** Valori di `ExtraMetadata.ExtraType`: gli unici che il firmware registra. */
+    object ExtraType {
+        const val METADATA = 1
+        const val GPS = 7
+
+        private val names = mapOf(
+            0 to "ALL", 1 to "METADATA", 2 to "THUMBNAIL", 3 to "GYRO", 4 to "EXPOSURE",
+            5 to "EXT_THUMBNAIL", 6 to "FRAME_PTS", 7 to "GPS", 8 to "STAR_NUM",
+            9 to "AAA_DATA", 10 to "HIGHLIGHT", 11 to "AAA_SIM", 12 to "EXPOTIME_VIN1",
+            13 to "MAGNETIC", 14 to "EULER", 15 to "SECGYRO", 16 to "SPEED", 17 to "TBOX",
+        )
+
+        fun name(value: Int): String = names[value] ?: "#$value"
+
+        const val LAST_KNOWN = 17
+    }
     const val GET_FILE_LIST = 13
     const val GET_MINI_THUMBNAIL = 30
     const val SET_OPTIONS = 7

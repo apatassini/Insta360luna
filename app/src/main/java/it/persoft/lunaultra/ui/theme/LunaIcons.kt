@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
@@ -99,6 +100,9 @@ object LunaIcons {
     // galleria
     val Gallery: ImageVector = Icons.Filled.Collections
     val Download: ImageVector = Icons.Filled.Download
+
+    /** Rimettere dentro un file scelto: il contrario di [Download]. */
+    val Upload: ImageVector = Icons.Filled.FileUpload
     val Selected: ImageVector = Icons.Filled.CheckCircle
     val Unselected: ImageVector = Icons.Filled.RadioButtonUnchecked
     val SelectAll: ImageVector = Icons.Filled.SelectAll

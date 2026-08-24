@@ -1692,6 +1692,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun exportSettings(): String = container.settingsStore.exportJson()
 
+    /**
+     * La calibrazione fuori dall'app, e di nuovo dentro.
+     *
+     * Misurarla costa sette minuti; è una misura dell'hardware e non cambia. L'unica ragione per
+     * rifarla era averla persa reinstallando l'app, e questa è la ragione che sparisce.
+     */
+    fun saveCalibrationToDownloads(context: android.content.Context) {
+        if (!gimbalCalibration.value.isValid) {
+            showMessage("Non c'è ancora una calibrazione da salvare")
+            return
+        }
+        val json = container.calibrationStore.exportJson()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { CalibrationBackup.saveToDownloads(context, json) }
+                .onSuccess { showMessage("Calibrazione salvata in $it") }
+                .onFailure { showMessage("Non salvata: ${it.message}") }
+        }
+    }
+
+    fun shareCalibration(context: android.content.Context) {
+        if (!gimbalCalibration.value.isValid) {
+            showMessage("Non c'è ancora una calibrazione da condividere")
+            return
+        }
+        CalibrationBackup.share(context, container.calibrationStore.exportJson())
+            .onFailure { showMessage("Condivisione non riuscita: ${it.message}") }
+    }
+
+    fun importCalibration(context: android.content.Context, uri: android.net.Uri) {
+        viewModelScope.launch {
+            val text = withContext(Dispatchers.IO) { CalibrationBackup.read(context, uri) }
+                .getOrElse {
+                    showMessage("File non leggibile: ${it.message}")
+                    return@launch
+                }
+            container.calibrationStore.importJson(text)
+                .onSuccess {
+                    val profile = gimbalCalibration.value
+                    if (profile.isValid) {
+                        container.log.info(
+                            "Calibrazione importata",
+                            "Misurata il " + java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.ITALIAN)
+                                .format(java.util.Date(profile.calibratedAtMs)),
+                        )
+                        showMessage("Calibrazione importata")
+                    } else {
+                        // Il JSON era valido ma il profilo dentro non lo è: dirlo adesso, invece
+                        // di lasciare che una panoramica finisca dove capita.
+                        showMessage("Il file è leggibile ma la calibrazione dentro non è completa")
+                    }
+                }
+                .onFailure { showMessage("Non è una calibrazione: ${it.message}") }
+        }
+    }
+
     fun importSettings(text: String) {
         container.settingsStore.importJson(text)
             .onSuccess { showMessage("Impostazioni importate") }

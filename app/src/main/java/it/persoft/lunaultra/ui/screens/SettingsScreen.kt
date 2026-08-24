@@ -1,5 +1,7 @@
 package it.persoft.lunaultra.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -77,6 +79,13 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
     val connected = connection == ConnectionState.CONNECTED
     val gimbal = settings.gimbal
     var wifiPasswordVisible by rememberSaveable { mutableStateOf(false) }
+
+    // Il selettore di sistema: nessun permesso da chiedere, e chi sceglie il file è chi sa
+    // dove l'ha messo. Il filtro è aperto perché non tutti i gestori di file riconoscono un
+    // `.json` come `application/json`, e un file che non compare è peggio di uno di troppo.
+    val calibrationPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.importCalibration(context, it) }
+    }
 
     Column(
         modifier = Modifier
@@ -341,6 +350,39 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         hasProfile = calibration.isValid,
                         enabled = connected,
                         onStart = viewModel::startGimbalCalibration,
+                    )
+
+                    // La calibrazione misura l'hardware, non le preferenze: la corsa degli assi
+                    // e la curva dei comandi sono le stesse ieri e domani. L'unica ragione per
+                    // rifarla erano i sette minuti persi reinstallando l'app, ed è la ragione
+                    // che questi due pulsanti tolgono di mezzo.
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { viewModel.saveCalibrationToDownloads(context) },
+                            enabled = calibration.isValid,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            ButtonLabel(LunaIcons.Download, "Salva")
+                        }
+                        OutlinedButton(
+                            onClick = { calibrationPicker.launch(arrayOf("*/*")) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            ButtonLabel(LunaIcons.Upload, "Carica")
+                        }
+                    }
+                    if (calibration.isValid) {
+                        OutlinedButton(
+                            onClick = { viewModel.shareCalibration(context) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            ButtonLabel(LunaIcons.Share, "Mandala fuori dal telefono")
+                        }
+                    }
+                    Hint(
+                        "«Salva» scrive un file JSON nei Download. «Carica» lo rimette dentro dopo " +
+                            "una reinstallazione, e i sette minuti di calibrazione non si rifanno. " +
+                            "Vale per questa camera: è la sua corsa e la sua curva, misurate.",
                     )
                 }
             }

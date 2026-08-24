@@ -7,4 +7,8 @@
     <cache-path
         name="updates"
         path="updates/" />
+    <!-- La copia della calibrazione da mandare fuori: stessa cache privata, stesso trattamento. -->
+    <cache-path
+        name="backup"
+        path="backup/" />
 </paths>

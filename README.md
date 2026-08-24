@@ -922,12 +922,15 @@ Il codice qui è scritto da zero in Kotlin; da quei progetti vengono i **fatti s
 Editing dei media, AI tracking, Deep Track, live streaming, cloud e account Insta360,
 controllo multi-camera.
 
-## Paternità e nota legale
+## Paternità e licenza
 
-Progetto ideato e sviluppato da **Persoft di Patassini Alessandro** (<info@persoft.it>), che ne
-detiene i diritti. © 2026 Persoft di Patassini Alessandro — tutti i diritti riservati, salvo
-diversa licenza indicata in futuro. I fatti sul protocollo elencati nei Crediti restano dei
-rispettivi progetti.
+Progetto ideato e sviluppato da **Persoft di Patassini Alessandro** (<info@persoft.it>).
+© 2026 Persoft di Patassini Alessandro.
+
+Rilasciato con **licenza MIT** (vedi [LICENSE](LICENSE)): chiunque può usarlo, copiarlo,
+modificarlo e ridistribuirlo, anche a fini commerciali, a una condizione — **ogni copia deve
+conservare la nota di paternità** qui sopra. I fatti sul protocollo elencati nei Crediti
+restano dei rispettivi progetti.
 
 Progetto non ufficiale, non affiliato a Insta360, basato su reverse engineering del protocollo
 di controllo per interoperabilità con la propria camera. «Insta360» e «Luna Ultra» sono marchi

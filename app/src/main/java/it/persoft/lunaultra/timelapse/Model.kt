@@ -119,19 +119,21 @@ data class TimelapseSequence(
      */
     val panoramaSpherical: Boolean = false,
     /**
-     * Muovere il gimbal mentre la camera salva lo scatto precedente.
+     * Il ritmo veloce: usare il buffer della camera invece di aspettarla a ogni scatto.
      *
-     * L'unico momento in cui il gimbal deve stare fermo è la posa; la compressione e la scrittura
-     * che seguono — cinque secondi su questa camera — non riguardano l'inquadratura, perché il
-     * sensore è già stato letto. Spendere quei secondi andando verso lo scatto successivo taglia
-     * un terzo abbondante della durata di una panoramica.
+     * La camera tiene in coda fino a quattro scatti mentre scrive — misurato da chi la usa —
+     * quindi fermarsi ad aspettare la scrittura dopo ogni foto è pagare cinque secondi sedici
+     * volte quando si possono pagare una volta ogni tre. Acceso: si scatta, si protegge la posa
+     * (che è l'unico momento in cui il gimbal deve stare fermo), ci si sposta mentre la camera
+     * scrive, e la si aspetta solo a buffer pieno. Spento: uno scatto alla volta, con l'attesa
+     * completa fra uno e l'altro.
      *
-     * Spento finché non è provato. La prima prova sulla camera è finita con sedici scatti e
-     * zero file salvati: la causa era un'altra — l'anteprima spenta durante la sequenza — ma
-     * finché non c'è una panoramica riuscita con questo acceso, il valore di partenza è quello
-     * che si sa funzionare. Si accende dal pannello Panorama.
+     * Il fallimento «sedici scatti, zero file» che aveva fatto spegnere tutto questo aveva
+     * un'altra causa, trovata e corretta: l'anteprima spenta durante la sequenza, che impedisce
+     * alla camera di chiudere qualunque cattura. Se gli scatti venissero mossi o la camera si
+     * incantasse, questo resta l'interruttore da spegnere.
      */
-    val moveWhileSaving: Boolean = false,
+    val moveWhileSaving: Boolean = true,
     val panoramaAspect: PhotoFrameAspect = PhotoFrameAspect.FOUR_THREE,
 ) {
     val legCount: Int get() = (waypoints.size - 1).coerceAtLeast(0)

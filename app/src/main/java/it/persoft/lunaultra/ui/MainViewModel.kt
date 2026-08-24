@@ -309,6 +309,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var previous = runState.value.phase
             runState.collect { state ->
                 if (previous != RunPhase.COMPLETED && state.phase == RunPhase.COMPLETED) {
+                    // I file nuovi sono sulla camera: la galleria deve saperlo.
+                    markGalleryStale()
                     stitchPanoramaIfRequested(state.shotAngles)
                 }
                 // L'ultimo scatto non ha un seguito che spenga l'avviso: la notifica dice
@@ -1490,44 +1492,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Uno scatto singolo, e la verità su com'è finito.
+     * Uno scatto singolo: risposta subito, verifica dietro le quinte.
      *
-     * «Scatto eseguito» appena la camera accetta il comando è una mezza informazione: fra
-     * l'accettazione e il file sulla scheda passano cinque secondi, e se la camera resta appesa
-     * in cattura il file non arriva mai. Dirlo subito significa dire di sì a una foto che non
-     * esiste — e chi scatta se ne accorge solo aprendo la galleria.
-     *
-     * Quando resta appesa, il riavvio del flusso dell'anteprima la sblocca: la cattura passa
-     * dalla stessa catena. Si prova quello prima di dare la cosa per persa.
+     * La camera accetta in tre decimi di secondo e scrive il file nei cinque successivi, con un
+     * buffer che tiene qualche scatto in coda: far aspettare chi preme il pulsante fino a fine
+     * scrittura rende «lentissimo» uno scatto che in realtà è già partito. Quindi la conferma
+     * arriva appena la camera accetta — che è quando l'otturatore lavora — e la scrittura la
+     * controlla un guardiano in coda: parla solo se qualcosa va storto, e in quel caso riavvia
+     * il flusso dell'anteprima, che è la leva che sblocca la camera.
      */
     private suspend fun shoot(mode: CaptureMode) {
         val pano = mode.cameraMode == CameraMode.PANORAMA
-        // Senza flusso la camera non chiude la cattura: si accende prima di chiedere lo scatto,
-        // non dopo aver scoperto che il file non c'è.
+        // Senza flusso la camera non chiude la cattura: si accende prima di chiedere lo
+        // scatto, non dopo aver scoperto che il file non c'è.
         container.preview.ensureRunningForCapture()
         container.commands.takePicture(instaPano = pano)
             .onFailure { showMessage("Scatto non riuscito: ${it.message}") }
             .onSuccess {
-                if (pano) {
-                    showMessage("Panoramica in corso")
-                    return@onSuccess
-                }
-                showMessage("Scatto in corso…")
-                if (container.commands.awaitCaptureIdle()) {
-                    showMessage("Scatto salvato")
-                    return@onSuccess
-                }
-                container.log.warn(
-                    "La camera è rimasta appesa in cattura",
-                    "Riavvio il flusso dell'anteprima: è quello che la sblocca.",
-                )
-                container.preview.restart()
-                if (container.commands.awaitCaptureIdle()) {
-                    showMessage("Scatto salvato, ma la camera si era bloccata")
-                } else {
-                    showMessage("La camera non sta salvando: spegnila e riaccendila")
-                }
+                showMessage(if (pano) "Panoramica in corso" else "Scatto eseguito")
+                markGalleryStale()
+                watchCaptureCompletion()
             }
+    }
+
+    private var captureWatchJob: Job? = null
+
+    /**
+     * Il guardiano della scrittura: aspetta che la camera torni libera e parla solo se non lo fa.
+     *
+     * Un guardiano solo anche con più scatti in coda: la domanda a cui risponde è «la camera
+     * sta ancora scrivendo o si è piantata?», e la risposta vale per tutta la coda.
+     */
+    private fun watchCaptureCompletion() {
+        if (captureWatchJob?.isActive == true) return
+        captureWatchJob = viewModelScope.launch {
+            if (container.commands.awaitCaptureIdle(SINGLE_SHOT_SAVE_TIMEOUT_MS)) return@launch
+            container.log.warn(
+                "La camera è rimasta appesa in cattura",
+                "Riavvio il flusso dell'anteprima: è quello che la sblocca.",
+            )
+            container.preview.restart()
+            if (container.commands.awaitCaptureIdle()) {
+                showMessage("La camera si era bloccata: sbloccata, controlla la galleria")
+            } else {
+                showMessage("La camera non sta salvando: spegnila e riaccendila")
+            }
+        }
     }
 
     // ---------------------------------------------------------------- modalità della camera
@@ -2053,6 +2063,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Rilegge la libreria dalla camera. Senza [force] non rifà il giro se l'elenco è recente:
      * aprire e chiudere la galleria non deve costare un'enumerazione di migliaia di file.
      */
+    /**
+     * Uno scatto nuovo rende vecchio l'elenco: al prossimo giro in galleria si rilegge.
+     *
+     * Senza questa riga la galleria mostrava l'elenco di prima finché la sua età non scadeva,
+     * e le foto appena fatte comparivano solo riavviando l'app.
+     */
+    fun markGalleryStale() {
+        _gallery.value = _gallery.value.copy(loadedAtMs = 0L)
+    }
+
     fun refreshGallery(force: Boolean = false) {
         if (_gallery.value.loading) return
         if (connectionState.value != ConnectionState.CONNECTED) {
@@ -2373,6 +2393,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val STATUS_POLL_MS = 3_000L
+
+        /**
+         * Quanto il guardiano concede alla camera per scrivere uno scatto prima di dichiararla
+         * appesa. Largo apposta: con il buffer pieno la coda vera può essere di più scatti.
+         */
+        const val SINGLE_SHOT_SAVE_TIMEOUT_MS = 20_000L
 
         /** Attesa fra l'azione di prova e la miniatura di confronto: il gimbal deve arrivare. */
         const val GIMBAL_ACTION_PROBE_WAIT_MS = 4_000L

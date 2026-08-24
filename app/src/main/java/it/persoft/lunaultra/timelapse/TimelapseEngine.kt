@@ -424,13 +424,47 @@ class TimelapseEngine(
 
         val targets = photoTargets(sequence)
         val guardMs = exposureGuardMillis(exposure)
-        var overlapMoves = sequence.moveWhileSaving
-        if (overlapMoves) {
-            log.info(
-                "Sposto il gimbal mentre la camera salva",
-                "Attesa della posa: ${guardMs} ms. Dopo la posa il gimbal può muoversi, e " +
-                    "il tempo di scrittura si spende andando verso lo scatto successivo.",
+
+        // La camera tiene in pancia qualche scatto e li scrive con calma: aspettare che abbia
+        // finito dopo *ogni* scatto vuol dire pagare cinque secondi di scrittura a ogni foto,
+        // quando si possono pagare una volta ogni tre. Il ritmo veloce sfrutta il buffer: si
+        // scatta, si protegge la posa, ci si sposta mentre lei scrive, e ci si ferma ad
+        // aspettarla solo a buffer pieno. Quello prudente si ferma a ogni scatto.
+        val fastPipeline = sequence.moveWhileSaving
+        val depth = if (fastPipeline) CAMERA_SHOT_BUFFER else 1
+        var inFlight = 0
+        log.info(
+            if (fastPipeline) "Ritmo veloce: uso il buffer della camera" else "Ritmo prudente: uno scatto alla volta",
+            if (fastPipeline) {
+                "Fino a $depth scatti in coda; posa protetta per $guardMs ms, poi il gimbal riparte."
+            } else {
+                "Aspetto che ogni scatto sia scritto prima di muovermi."
+            },
+        )
+
+        // Quando la camera resta occupata oltre il tempo massimo, il riavvio del flusso è la
+        // leva che la sblocca (misurato: un secondo dopo lo stato torna a riposo). Due volte
+        // appesa senza recupero = sequenza interrotta: meglio fermarsi che scattare nel vuoto.
+        suspend fun drainCamera() {
+            _state.value = _state.value.copy(message = "Aspetto che la camera scriva…")
+            if (commands.awaitCaptureIdle()) {
+                stuck = 0
+                return
+            }
+            stuck++
+            log.warn(
+                "La camera è rimasta occupata oltre il tempo massimo",
+                "Riavvio il flusso dell'anteprima per sbloccarla.",
             )
+            preview.restart()
+            preview.ensureRunningForCapture()
+            if (commands.awaitCaptureIdle()) return
+            if (stuck >= MAX_STUCK_SHOTS) {
+                throw IllegalStateException(
+                    "La camera non chiude più le catture nemmeno riavviando il flusso. " +
+                        "Sequenza interrotta invece di continuare a vuoto: spegni e riaccendi la camera.",
+                )
+            }
         }
 
         for ((index, target) in targets.withIndex()) {
@@ -451,9 +485,16 @@ class TimelapseEngine(
                 message = "In posizione per lo scatto ${done + 1}/$planned",
             )
 
-            // Dal secondo scatto in poi il gimbal è già arrivato: si è mosso mentre la
-            // camera salvava il precedente. Il richiamo resta perché è a vuoto se la
-            // posizione è già quella, e non lo è se lo spostamento non era finito.
+            // Prima di muoversi verso uno scatto nuovo, a buffer pieno si aspetta la
+            // camera: è l'unico punto in cui il ritmo veloce si ferma.
+            if (inFlight >= depth) {
+                drainCamera()
+                inFlight = 0
+            }
+
+            // Dal secondo scatto in poi il gimbal è spesso già arrivato: si è mosso mentre la
+            // camera salvava. Il richiamo resta perché è a vuoto se la posizione è già quella,
+            // e non lo è se lo spostamento non era finito.
             approachShot(target, sequence)
 
             _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
@@ -466,59 +507,19 @@ class TimelapseEngine(
                 )
                 continue
             }
+            inFlight++
 
-            // La posa è finita: da qui in avanti il gimbal può muoversi senza mosso, e la
-            // camera continua a comprimere e scrivere per conto suo. È il pezzo di tempo
-            // che prima si stava a guardare.
+            // La posa va protetta: è l'unico momento in cui il gimbal deve stare fermo.
+            delay(guardMs)
+
+            // Posa finita: la camera comprime e scrive per conto suo, e quel tempo si spende
+            // andando verso lo scatto successivo invece di stare a guardare.
             val next = targets.getOrNull(index + 1)
-            if (overlapMoves && next != null) {
-                delay(guardMs)
+            if (fastPipeline && next != null) {
                 _state.value = _state.value.copy(
                     message = "Verso lo scatto ${done + 2}/$planned mentre la camera salva",
                 )
                 approachShot(next, sequence)
-            }
-
-            val written = commands.awaitCaptureIdle()
-            if (written) {
-                stuck = 0
-            } else {
-                stuck++
-                log.warn(
-                    "Scatto ${done + 1}: la camera è rimasta occupata",
-                    "Il file quasi certamente non è stato salvato.",
-                )
-                // Il flusso dell'anteprima è la leva che rimette in moto la camera: quando
-                // resta appesa in cattura, riavviarlo la sblocca — misurato, un secondo dopo lo
-                // stato torna a riposo. Prima di rinunciare allo scatto successivo vale la pena
-                // provarlo, perché costa un secondo e l'alternativa è una sequenza vuota.
-                preview.restart()
-                preview.ensureRunningForCapture()
-                log.warn(
-                    "Riavvio l'anteprima per sbloccare la camera",
-                    "La cattura passa dalla stessa catena del flusso: riavviarlo la chiude.",
-                )
-
-                // Il sospetto numero due è lo spostamento durante il salvataggio: si spegne per
-                // il resto della sequenza, così il tentativo successivo è nelle condizioni che
-                // si sa funzionare.
-                if (overlapMoves) {
-                    overlapMoves = false
-                    log.warn(
-                        "Smetto di muovere il gimbal mentre la camera salva",
-                        "Torno al ritmo lento: prima gli scatti, poi la velocità.",
-                    )
-                }
-                // Una sequenza che scatta a vuoto non va portata a termine. Se la camera non
-                // torna a riposo due volte di fila non ci torna nemmeno alla terza: sono tre
-                // minuti e mezzo di gimbal per zero file, ed è successo davvero.
-                if (stuck >= MAX_STUCK_SHOTS) {
-                    throw IllegalStateException(
-                        "La camera non chiude più le catture: occupata su $stuck scatti di fila " +
-                            "e nessun file salvato. Sequenza interrotta invece di continuare a " +
-                            "vuoto. Spegni e riaccendi la camera.",
-                    )
-                }
             }
 
             taken++
@@ -534,6 +535,10 @@ class TimelapseEngine(
                     ShotAngle(target.pan, target.tilt, fired.uri),
             )
         }
+
+        // Gli ultimi scatti sono ancora nel buffer della camera: si aspettano qui, prima
+        // che qualcuno vada a contare i file.
+        if (inFlight > 0) drainCamera()
 
         val elapsed = (System.currentTimeMillis() - startedAtMs) / 1000f
         _state.value = _state.value.copy(elapsedSeconds = elapsed, secondsRemaining = 0f)
@@ -910,6 +915,12 @@ class TimelapseEngine(
          * minuti e mezzo, zero file — e non se ne accorge nessuno finché non è finita.
          */
         const val MAX_STUCK_SHOTS = 2
+
+        /**
+         * Quanti scatti la camera tiene in coda mentre scrive. Misurato da chi la usa: quattro,
+         * poi bisogna aspettare. Qui tre, per non ballare mai sul bordo.
+         */
+        const val CAMERA_SHOT_BUFFER = 3
         const val SHOT_RETRY_DELAY_MS = 700L
 
         const val MOVE_TICK_HZ = 10

@@ -311,19 +311,18 @@ fun PanoramaScreen(viewModel: MainViewModel) {
 
         SectionCard(title = "Ritmo degli scatti", icon = LunaIcons.MotionTimelapse, accent = Luna.Accent) {
             ToggleRow(
-                title = "Muovi mentre la camera salva",
-                subtitle = "La camera resta occupata cinque secondi dopo ogni scatto, ma solo la " +
-                    "posa vincola il gimbal: il resto è compressione e scrittura, e il sensore " +
-                    "è già stato letto. Spendendo quel tempo per andare avanti, una panoramica " +
-                    "dura un terzo di meno.",
+                title = "Ritmo veloce (buffer della camera)",
+                subtitle = "La camera tiene in coda fino a quattro scatti mentre scrive. Acceso, " +
+                    "l'app scatta, protegge la posa, si sposta mentre la camera salva e la " +
+                    "aspetta solo a coda piena: una panoramica dura la metà. Spento, uno " +
+                    "scatto alla volta con l'attesa completa fra uno e l'altro.",
                 checked = sequence.moveWhileSaving,
                 onCheckedChange = viewModel::setMoveWhileSaving,
             )
             Hint(
-                "L'attesa della posa la detta la camera, che dichiara il tempo prima di scattare. " +
-                    "Parte spento: non è ancora stato provato con una panoramica riuscita. " +
-                    "Se lo accendi e gli scatti vengono mossi, o la camera smette di salvare, " +
-                    "è la prima cosa da rispegnere.",
+                "L'attesa della posa la detta la camera, che dichiara il tempo prima di " +
+                    "scattare. Se gli scatti venissero mossi o mancassero file alla fine, " +
+                    "questa è la prima cosa da spegnere.",
             )
         }
 

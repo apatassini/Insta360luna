@@ -449,14 +449,6 @@ class LunaCommands(
                 ?: throw IllegalStateException("nessuna miniatura nella risposta")
         }
 
-    /** Cancella file dalla camera. Irreversibile: la conferma la chiede chi chiama. */
-    suspend fun deleteFiles(uris: List<String>): Result<Unit> =
-        session.request(
-            LunaProtocolCodes.DELETE_FILES,
-            LunaMessages.deleteFiles(uris),
-            timeoutMs = DELETE_TIMEOUT_MS,
-        ).map { }
-
     // ---- Anteprima dal vivo ----
 
     /**
@@ -641,7 +633,6 @@ class LunaCommands(
          * ottanta caselle per otto secondi sono dieci minuti di caselle vuote.
          */
         private const val THUMBNAIL_TIMEOUT_MS = 2_500L
-        private const val DELETE_TIMEOUT_MS = 20_000L
     }
 }
 

@@ -81,8 +81,23 @@ class PanoramaStitcher(
         runCatching {
             require(shots.size >= 2) { "Servono almeno due scatti per unire una panoramica" }
 
-            onProgress(0.02f, "Leggo gli scatti")
-            val frames = loadFrames(shots)
+            // La qualità si adatta al telefono, non al minimo comune: la heap che Android
+            // concede all'app decide la risoluzione di lavoro e la grandezza della tela. I
+            // Bitmap vivono in memoria nativa, fuori dal tetto; i vettori di lavoro in heap
+            // Java, e vivono un fotogramma alla volta.
+            val heapMb = (Runtime.getRuntime().maxMemory() / (1024L * 1024L)).toInt()
+            val workingLongSide = when {
+                heapMb >= 384 -> GENEROUS_WORKING_LONG_SIDE
+                heapMb >= 256 -> 2_000
+                else -> WORKING_LONG_SIDE
+            }
+            val canvasLongSide = when {
+                heapMb >= 384 -> GENEROUS_CANVAS_LONG_SIDE
+                heapMb >= 256 -> 6_000
+                else -> MAX_CANVAS_LONG_SIDE
+            }
+            onProgress(0.02f, "Leggo gli scatti ($workingLongSide px, heap $heapMb MB)")
+            val frames = loadFrames(shots, workingLongSide)
             val first = frames.first().bitmap
             val lens = PinholeLens(first.width, first.height, horizontalFovDegrees)
 
@@ -91,13 +106,13 @@ class PanoramaStitcher(
                 placements = placements,
                 lens = lens,
                 requestedPixelsPerDegree = lens.imageWidth / lens.horizontalFovDegrees,
-                maximumLongSide = MAX_CANVAS_LONG_SIDE,
+                maximumLongSide = canvasLongSide,
             )
 
             onProgress(0.10f, "Allineo i fotogrammi")
             val refinement = refine(frames, placements, lens, canvas)
             placements = refinement.placements
-            frames.forEach { it.releaseAlignmentData() }
+            frames.forEach { it.releaseWorkingData() }
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
             var bitmap = compose(frames, placements, lens, canvas)
@@ -112,6 +127,7 @@ class PanoramaStitcher(
             // copertura che non lo è. Si ritagliano, tranne che sulla sferica: lì la tela 2:1
             // È il formato, e chi la guarda a 360° la vuole intera.
             val notes = refinement.notes.toMutableList()
+            notes.add(0, "Risoluzione di lavoro $workingLongSide px, tela fino a $canvasLongSide px (heap $heapMb MB)")
             if (!fillNadir) {
                 onProgress(0.98f, "Ritaglio il nero ai bordi")
                 val before = "${bitmap.width}×${bitmap.height}"
@@ -145,25 +161,43 @@ class PanoramaStitcher(
     /** Un livello della piramide di luminanza: i dati e la sua misura. */
     private class GrayLevel(val data: FloatArray, val width: Int, val height: Int)
 
-    private class Frame(val bitmap: Bitmap, val pixels: IntArray, val label: String) {
+    private class Frame(val bitmap: Bitmap, val label: String) {
         val width get() = bitmap.width
         val height get() = bitmap.height
 
+        private var pixelsCache: IntArray? = null
         private var grayCache: FloatArray? = null
         private var levelsCache: List<GrayLevel>? = null
 
+        /**
+         * I pixel come vettore, per il campionamento veloce della fusione.
+         *
+         * Il Bitmap tiene i suoi pixel in memoria nativa, fuori dal tetto che Android impone
+         * alla heap dell'app: lì possono stare tutti insieme. Questo vettore invece è heap
+         * Java, e per questo vive solo finché serve — un fotogramma alla volta.
+         */
+        val pixels: IntArray
+            get() = pixelsCache ?: IntArray(width * height).also {
+                bitmap.getPixels(it, 0, width, 0, 0, width, height)
+                pixelsCache = it
+            }
+
         /** La luminanza, calcolata una volta: l'allineamento lavora qui sopra. */
         val gray: FloatArray
-            get() = grayCache ?: FloatArray(pixels.size) { i ->
-                val c = pixels[i]
-                0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
-            }.also { grayCache = it }
+            get() = grayCache ?: run {
+                val source = pixels
+                FloatArray(source.size) { i ->
+                    val c = source[i]
+                    0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
+                }.also { grayCache = it }
+            }
 
         /**
-         * L'allineamento è finito: luminanza e piramide non servono più, e sono decine di
-         * megabyte a fotogramma che la fusione vuole per sé.
+         * Libera i vettori di heap Java. Il Bitmap resta: è lui la copia buona, in memoria
+         * nativa, e tutto qui dentro si ricostruisce da lui quando serve di nuovo.
          */
-        fun releaseAlignmentData() {
+        fun releaseWorkingData() {
+            pixelsCache = null
             grayCache = null
             levelsCache = null
         }
@@ -214,11 +248,11 @@ class PanoramaStitcher(
      * risultato è tempo speso per buttare via dettaglio subito dopo. Il ridimensionamento lo fa
      * il decodificatore, che salta i pixel invece di leggerli e scartarli.
      */
-    private fun loadFrames(shots: List<PanoramaShot>): List<Frame> = shots.map { shot ->
+    private fun loadFrames(shots: List<PanoramaShot>, workingLongSide: Int): List<Frame> = shots.map { shot ->
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(shot.file.absolutePath, bounds)
         val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSizeFor(bounds.outWidth, WORKING_LONG_SIDE)
+            inSampleSize = sampleSizeFor(bounds.outWidth, workingLongSide)
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         val decoded = BitmapFactory.decodeFile(shot.file.absolutePath, options)
@@ -227,8 +261,8 @@ class PanoramaStitcher(
         // 2000, non a 1600, e quel 25% in più di lato è il 56% in più di memoria — che
         // moltiplicato per cinque foto è la differenza fra unire e morire di memoria.
         val longSide = max(decoded.width, decoded.height)
-        val bitmap = if (longSide > WORKING_LONG_SIDE) {
-            val scale = WORKING_LONG_SIDE.toFloat() / longSide
+        val bitmap = if (longSide > workingLongSide) {
+            val scale = workingLongSide.toFloat() / longSide
             val scaled = Bitmap.createScaledBitmap(
                 decoded,
                 (decoded.width * scale).roundToInt().coerceAtLeast(1),
@@ -240,9 +274,7 @@ class PanoramaStitcher(
         } else {
             decoded
         }
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        Frame(bitmap, pixels, shot.label)
+        Frame(bitmap, shot.label)
     }
 
     private class Refinement(
@@ -353,6 +385,20 @@ class PanoramaStitcher(
                 panCorrectionDegrees = finalPan,
                 tiltCorrectionDegrees = finalTilt,
             )
+            // I fotogrammi ormai lontani non faranno più da vicini a nessuno: i loro vettori
+            // di lavoro si liberano, così una griglia grande non accumula piramidi.
+            for (past in 0 until index) {
+                val distance = angularDistance(
+                    placements[past].effectivePan,
+                    placements[past].effectiveTilt,
+                    placements[index].effectivePan,
+                    placements[index].effectiveTilt,
+                )
+                if (distance > 2f * max(lens.horizontalFovDegrees, lens.verticalFovDegrees)) {
+                    frames[past].releaseWorkingData()
+                }
+            }
+
             val magnitude = max(abs(finalPan), abs(finalTilt))
             worst = max(worst, magnitude)
             notes += "%s: %d punti di controllo, %d sopra l'%d%% · corretto %+.2f° / %+.2f° · concordanza %.0f%%".format(
@@ -738,6 +784,8 @@ class PanoramaStitcher(
                 "Cucio ${frame.label} (${index + 1}/${frames.size})",
             )
             pasteFrame(output, ownerWeight, frame, placements[index], gains[index], lens, canvas)
+            // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori si liberano.
+            frame.releaseWorkingData()
         }
         return output
     }
@@ -1060,8 +1108,8 @@ class PanoramaStitcher(
                 val m = projectToFrame(lon, lat, placements[index], lens)
                 val f = projectToFrame(lon, lat, placements[anchorIndex], lens)
                 if (!m.inside || !f.inside) return@forEach
-                movingSum += luma(sample(frames[index], m.x, m.y))
-                fixedSum += luma(sample(frames[anchorIndex], f.x, f.y))
+                movingSum += luma(frames[index].bitmap.getPixel(m.x.toInt(), m.y.toInt()))
+                fixedSum += luma(frames[anchorIndex].bitmap.getPixel(f.x.toInt(), f.y.toInt()))
                 counted++
             }
             gains[index] = if (counted < MIN_OVERLAP_SAMPLES) {
@@ -1200,6 +1248,10 @@ class PanoramaStitcher(
 
         /** Il ritaglio non mangia mai più di così: metà per dimensione resta sempre. */
         const val MIN_CROP_KEEP = 0.5f
+
+        /** Su un telefono con heap larga si lavora più fitti: qualità, non prudenza. */
+        const val GENEROUS_WORKING_LONG_SIDE = 2_400
+        const val GENEROUS_CANVAS_LONG_SIDE = 8_000
 
         /** Una riga con più buchi di così è già dentro il foro, non sul suo bordo. */
         const val MAX_EMPTY_FRACTION = 0.10f

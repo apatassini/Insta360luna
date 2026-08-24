@@ -1502,6 +1502,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private suspend fun shoot(mode: CaptureMode) {
         val pano = mode.cameraMode == CameraMode.PANORAMA
+        // Senza flusso la camera non chiude la cattura: si accende prima di chiedere lo scatto,
+        // non dopo aver scoperto che il file non c'è.
+        container.preview.ensureRunningForCapture()
         container.commands.takePicture(instaPano = pano)
             .onFailure { showMessage("Scatto non riuscito: ${it.message}") }
             .onSuccess {

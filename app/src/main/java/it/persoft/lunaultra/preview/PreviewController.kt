@@ -162,9 +162,64 @@ class PreviewController(
      * la rimette in moto. Misurato: flusso riavviato, un secondo dopo lo stato torna a riposo.
      * [start] da sola non basta, perché se l'anteprima risulta già accesa non fa niente.
      */
-    fun restart() {
-        stop()
+    suspend fun restart() {
+        stopAndAwait()
         start()
+    }
+
+    /**
+     * Il flusso deve essere acceso prima di scattare, e questa è la riga che lo garantisce.
+     *
+     * Non è una comodità dell'anteprima: su questa camera la cattura di una foto passa dalla
+     * stessa catena del flusso, e con il flusso fermo lo scatto non si chiude mai — la camera
+     * resta in `SINGLE_SHOOTING` e non salva niente, nemmeno una foto singola. Chi ha spento
+     * l'anteprima per risparmiare batteria si ritroverebbe una camera che non scatta più e
+     * nessuna spiegazione, quindi si riaccende da sé.
+     *
+     * Quello che conta è che il comando di avvio sia partito, non che l'app stia decodificando:
+     * i fotogrammi si contano solo mentre il mirino è a schermo, e da un'altra scheda resterebbe
+     * a zero anche con il flusso perfettamente acceso. Si aspetta quindi che il trasporto sia
+     * scelto e avviato, che è ciò che la camera vede.
+     */
+    suspend fun ensureRunningForCapture(timeoutMs: Long = CAPTURE_STREAM_WAIT_MS): Boolean {
+        if (_state.value.active && _state.value.source != PreviewSource.NESSUNA) return true
+        if (!_state.value.active) {
+            log.info(
+                "Riaccendo il flusso per poter scattare",
+                "Con il flusso fermo la camera non chiude la cattura e non salva il file.",
+            )
+            start()
+        }
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            val current = _state.value
+            if (!current.active) return false
+            if (current.source != PreviewSource.NESSUNA) {
+                // Il comando è partito; il primo keyframe arriva dopo, e alla camera non serve.
+                delay(STREAM_SETTLE_MS)
+                return true
+            }
+            delay(STREAM_WAIT_POLL_MS)
+        }
+        return false
+    }
+
+    /**
+     * Come [stop], ma aspettando che il comando di arresto sia partito davvero.
+     *
+     * Fermare e riavviare lasciando i due comandi liberi di sorpassarsi è come non riavviare:
+     * se l'arresto arriva dopo l'avvio, il flusso resta spento e la camera smette di salvare le
+     * foto senza che nessuno abbia chiesto niente.
+     */
+    private suspend fun stopAndAwait() {
+        job?.cancel()
+        job = null
+        decoder.release()
+        val wasVideo = _state.value.source == PreviewSource.VIDEO
+        _state.value = PreviewState()
+        if (wasVideo && session.state.value == it.persoft.lunaultra.camera.ConnectionState.CONNECTED) {
+            commands.stopLiveStream()
+        }
     }
 
     fun stop() {
@@ -259,5 +314,17 @@ class PreviewController(
         const val DIAGNOSTIC_THUMB_SIZE = 256
         const val DIAGNOSTIC_JPEG_QUALITY = 78
         const val DIAGNOSTIC_FRAME_WAIT_MS = 2_500L
+
+        /**
+         * Quanto aspettare il primo fotogramma prima di scattare lo stesso.
+         *
+         * Meglio scattare con il flusso incerto che non scattare: se poi la camera non chiude
+         * la cattura, chi ha chiesto lo scatto lo viene a sapere subito.
+         */
+        const val CAPTURE_STREAM_WAIT_MS = 4_000L
+        const val STREAM_WAIT_POLL_MS = 120L
+
+        /** Il respiro fra «flusso avviato» e lo scatto: il comando deve arrivare prima. */
+        const val STREAM_SETTLE_MS = 400L
     }
 }

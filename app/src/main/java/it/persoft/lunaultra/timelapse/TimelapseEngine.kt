@@ -396,6 +396,15 @@ class TimelapseEngine(
         // Sedici scatti, tre minuti e mezzo, zero file salvati; poi l'anteprima è ripartita e
         // un secondo dopo lo stato è tornato a riposo. La cattura di una foto passa dalla stessa
         // catena che tiene vivo il flusso: senza flusso, non si chiude.
+        // Il flusso deve essere acceso prima del primo scatto: senza, la camera entra in
+        // cattura e non ne esce, e la sequenza gira a vuoto dall'inizio alla fine.
+        if (!preview.ensureRunningForCapture()) {
+            log.warn(
+                "Il flusso dell'anteprima non è partito",
+                "Scatto lo stesso, ma se la camera non salva è questo il motivo.",
+            )
+        }
+
         log.info(
             "Modalità foto: $planned scatti, $shotsPerLeg per tratto",
             "Stima iniziale %s, alla cadenza di %.1f s per scatto.".format(
@@ -484,6 +493,7 @@ class TimelapseEngine(
                 // stato torna a riposo. Prima di rinunciare allo scatto successivo vale la pena
                 // provarlo, perché costa un secondo e l'alternativa è una sequenza vuota.
                 preview.restart()
+                preview.ensureRunningForCapture()
                 log.warn(
                     "Riavvio l'anteprima per sbloccare la camera",
                     "La cattura passa dalla stessa catena del flusso: riavviarlo la chiude.",

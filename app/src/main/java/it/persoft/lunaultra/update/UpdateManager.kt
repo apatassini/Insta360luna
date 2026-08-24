@@ -17,6 +17,8 @@ import java.security.MessageDigest
 data class DownloadedUpdate(
     val apk: File,
     val commitSha: String,
+    /** Quando la release è stata pubblicata: è la data che si mostra al posto del commit. */
+    val publishedAtMs: Long? = null,
 )
 
 /**
@@ -57,7 +59,7 @@ class UpdateManager(context: Context) {
                 if (!target.isFile || !digestMatches(target, release.sha256)) {
                     download(release.downloadUrl, target, release.sha256, progress)
                 }
-                DownloadedUpdate(target, release.commitSha)
+                DownloadedUpdate(target, release.commitSha, release.publishedAtMs)
             }
         }
 
@@ -137,6 +139,7 @@ class UpdateManager(context: Context) {
         val commitSha: String,
         val downloadUrl: String,
         val sha256: String?,
+        val publishedAtMs: Long? = null,
     )
 
     companion object {
@@ -193,7 +196,14 @@ class UpdateManager(context: Context) {
             val digest = apk["digest"]?.jsonPrimitive?.contentOrNull
                 ?.removePrefix("sha256:")
                 ?.takeIf { it.length == 64 }
-            return ReleaseInfo(commitSha = commit, downloadUrl = url, sha256 = digest)
+            val published = root["published_at"]?.jsonPrimitive?.contentOrNull
+                ?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
+            return ReleaseInfo(
+                commitSha = commit,
+                downloadUrl = url,
+                sha256 = digest,
+                publishedAtMs = published,
+            )
         }
     }
 }

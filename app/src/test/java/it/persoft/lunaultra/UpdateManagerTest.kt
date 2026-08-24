@@ -32,6 +32,31 @@ class UpdateManagerTest {
         assertEquals(digest, release.sha256)
     }
 
+    /** La data di pubblicazione è quella che l'app mostra al posto del commit. */
+    @Test
+    fun `la data di pubblicazione si legge e sopravvive quando manca`() {
+        val withDate = UpdateManager.parseRelease(
+            """
+            {
+              "target_commitish": "abc",
+              "published_at": "2026-08-24T19:55:06Z",
+              "assets": [{"name":"a.apk","browser_download_url":"https://x.test/a.apk"}]
+            }
+            """.trimIndent()
+        )
+        assertEquals(1787601306000L, withDate.publishedAtMs)
+
+        val withoutDate = UpdateManager.parseRelease(
+            """
+            {
+              "target_commitish": "abc",
+              "assets": [{"name":"a.apk","browser_download_url":"https://x.test/a.apk"}]
+            }
+            """.trimIndent()
+        )
+        assertEquals(null, withoutDate.publishedAtMs)
+    }
+
     /**
      * Il workflow pubblica su `apk-<branch>` con le barre sostituite da trattini. Se i due
      * calcoli divergono l'app non trova nulla e dice "app aggiornata" in buona fede: è

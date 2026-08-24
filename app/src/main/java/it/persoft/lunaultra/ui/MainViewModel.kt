@@ -426,7 +426,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runUpdateCheck(installer)
     }
 
-    private fun runUpdateCheck(onReadyToInstall: (File) -> Unit) {
+    private fun runUpdateCheck(onReadyToInstall: (File) -> Unit, attempt: Int = 1) {
         updateJob?.cancel()
         updateJob = viewModelScope.launch {
             val branch = settings.value.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
@@ -440,7 +440,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
                 .onSuccess { update ->
                     if (update != null) {
-                        _update.value = UpdateUiState.ReadyToInstall(branch, update.commitSha)
+                        _update.value = UpdateUiState.ReadyToInstall(branch, update.commitSha, update.publishedAtMs)
                         container.log.info(
                             "AGGIORNAMENTI · SCARICATO",
                             "Commit ${update.commitSha.take(12)} · ${update.apk.length() / 1024} KB. " +
@@ -451,9 +451,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _update.value = UpdateUiState.UpToDate(branch)
                     }
                 }
-                .onFailure {
-                    container.log.warn("Controllo aggiornamenti non riuscito: ${it.message}")
-                    _update.value = UpdateUiState.Failed(branch, it.message ?: "motivo sconosciuto")
+                .onFailure { error ->
+                    // La pubblicazione cancella e ricrea la release: chi controlla in quella
+                    // finestra trova il vuoto — 404, oppure la release senza ancora l'APK.
+                    // Non è un guasto, è un momento sbagliato: si riprova da soli fra poco.
+                    val transient = error is java.io.FileNotFoundException ||
+                        error.message?.contains("Nessun APK") == true
+                    if (transient && attempt < UPDATE_RETRY_ATTEMPTS) {
+                        container.log.info(
+                            "AGGIORNAMENTI",
+                            "La release di \"$branch\" è in ripubblicazione: riprovo fra ${UPDATE_RETRY_DELAY_MS / 1000} secondi.",
+                        )
+                        _update.value = UpdateUiState.Checking(branch)
+                        delay(UPDATE_RETRY_DELAY_MS)
+                        runUpdateCheck(onReadyToInstall, attempt + 1)
+                        return@launch
+                    }
+                    container.log.warn("Controllo aggiornamenti non riuscito: ${error.message}")
+                    _update.value = UpdateUiState.Failed(
+                        branch,
+                        if (transient) {
+                            "la release è in ripubblicazione: riprova fra un minuto"
+                        } else {
+                            error.message ?: "motivo sconosciuto"
+                        },
+                    )
                 }
         }
     }
@@ -2808,6 +2830,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Ogni quanto il diario delle posizioni annota dove sta il telefono, da connessi. */
         const val LOCATION_SAMPLE_MS = 5 * 60_000L
+
+        /** La ripubblicazione della release dura qualche minuto: si riprova, non si molla. */
+        const val UPDATE_RETRY_ATTEMPTS = 3
+        const val UPDATE_RETRY_DELAY_MS = 90_000L
 
         /**
          * Quanto il guardiano concede alla camera per scrivere uno scatto prima di dichiararla

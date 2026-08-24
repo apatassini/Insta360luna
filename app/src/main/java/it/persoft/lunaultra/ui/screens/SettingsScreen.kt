@@ -41,6 +41,7 @@ import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.BuildConfig
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.UpdateUiState
+import it.persoft.lunaultra.ui.buildDateLabel
 import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
@@ -424,7 +425,9 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             var branch by remember(settings.updateBranch) { mutableStateOf(settings.updateBranch) }
             val effective = settings.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                LabeledValue("Build installata", "${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_SHA.take(12)}")
+                // La data dice tutto quello che serve: «di stamattina» o «di tre giorni fa».
+                // Il commit resta nel log per chi sviluppa.
+                LabeledValue("Build installata", buildDateLabel(BuildConfig.BUILT_AT_MS))
                 LabeledValue("Branch controllato", effective)
                 OutlinedTextField(
                     value = branch,
@@ -468,7 +471,11 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         }
                     }
                     is UpdateUiState.ReadyToInstall ->
-                        LabeledValue("Stato", "scaricato ${state.commitSha.take(12)} · conferma l'installazione")
+                        LabeledValue(
+                            "Stato",
+                            state.publishedAtMs?.let { "scaricata la build del ${buildDateLabel(it)} · conferma l'installazione" }
+                                ?: "scaricata la build più recente · conferma l'installazione",
+                        )
                     is UpdateUiState.UpToDate -> LabeledValue("Stato", "già all'ultima build")
                     is UpdateUiState.Failed -> LabeledValue("Stato", state.reason, valueColor = Luna.Warn)
                     UpdateUiState.Idle -> Unit

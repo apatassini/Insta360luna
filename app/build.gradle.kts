@@ -35,6 +35,8 @@ android {
         versionName = "0.2.$buildNumber"
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
         buildConfigField("String", "GIT_BRANCH", "\"$gitBranch\"")
+        // L'ora della compilazione: nelle schermate si legge questa, non il commit.
+        buildConfigField("long", "BUILT_AT_MS", "${System.currentTimeMillis()}L")
     }
 
     /**

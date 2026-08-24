@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.camera.ConnectionState
 import it.persoft.lunaultra.timelapse.RunState
 import it.persoft.lunaultra.ui.UpdateUiState
+import it.persoft.lunaultra.ui.buildDateLabel
 import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.ui.components.GlassPanel
 import it.persoft.lunaultra.ui.components.HudIconButton
@@ -387,7 +388,11 @@ fun UpdateNotice(
             }
 
             is UpdateUiState.ReadyToInstall -> Text(
-                "Commit ${state.commitSha.take(12)}. Android chiede conferma per installare.",
+                buildString {
+                    val date = state.publishedAtMs?.let { buildDateLabel(it) }
+                    append(if (date != null) "Build del $date." else "Build nuova pronta.")
+                    append(" Android chiede conferma per installare.")
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.White,
             )

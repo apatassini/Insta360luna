@@ -24,9 +24,23 @@ sealed interface UpdateUiState {
         val percent: Int? get() = fraction?.let { (it * 100f).toInt() }
     }
 
-    data class ReadyToInstall(val branch: String, val commitSha: String) : UpdateUiState
+    data class ReadyToInstall(
+        val branch: String,
+        val commitSha: String,
+        /** Quando è stata pubblicata la build: è la data che si legge, non il commit. */
+        val publishedAtMs: Long? = null,
+    ) : UpdateUiState
 
     data class UpToDate(val branch: String) : UpdateUiState
 
     data class Failed(val branch: String, val reason: String) : UpdateUiState
 }
+
+/**
+ * «domenica 24 agosto, 09:55» — come si presenta una build a una persona.
+ *
+ * Il commit resta nei log per chi sviluppa; chi aggiorna vuole sapere quanto è fresca.
+ */
+fun buildDateLabel(timeMs: Long): String =
+    java.text.SimpleDateFormat("EEEE d MMMM, HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(timeMs))

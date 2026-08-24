@@ -17,6 +17,9 @@ import it.persoft.lunaultra.media.Jpeg
 import it.persoft.lunaultra.protocol.ProtoField
 import it.persoft.lunaultra.protocol.ProtoReader
 import it.persoft.lunaultra.protocol.Ucd2Frame
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filter
@@ -384,8 +387,8 @@ class LunaCommands(
     suspend fun takePictureConfirmed(
         instaPano: Boolean = false,
         outcomeTimeoutMs: Long = SHOT_OUTCOME_TIMEOUT_MS,
-    ): Result<ConfirmedShot> = kotlinx.coroutines.coroutineScope {
-        val outcome = kotlinx.coroutines.async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+    ): Result<ConfirmedShot> = coroutineScope {
+        val outcome = async(start = CoroutineStart.UNDISPATCHED) {
             withTimeoutOrNull(outcomeTimeoutMs) {
                 merge(
                     session.notifications

@@ -19,6 +19,13 @@ import it.persoft.lunaultra.protocol.ProtoReader
 import it.persoft.lunaultra.protocol.Ucd2Frame
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterNot
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
 private val CINEMATIC_FILTERS = setOf(
@@ -147,15 +154,34 @@ class LunaCommands(
      * Quindi si aspetta lo stato: la camera dichiara di stare catturando finché non ha finito.
      * Se non risponde o resta occupata oltre il tempo massimo si va avanti lo stesso — meglio
      * uno scatto perso che una sequenza che si pianta — e chi legge il log lo vede.
+     *
+     * L'attesa è in ascolto, non a domande. La camera annuncia da sé il ritorno a riposo con la
+     * notifica 8208, e lo fa nell'istante giusto: interrogarla ogni due decimi significava
+     * venticinque richieste per scatto — seicento in una panoramica — tutte mentre stava
+     * scrivendo un file da decine di megabyte. Il sondaggio resta al secondo, come rete di
+     * sicurezza per la notifica che non arriva.
      */
     suspend fun awaitCaptureIdle(timeoutMs: Long = CAPTURE_IDLE_TIMEOUT_MS): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val snapshot = fetchCaptureState()
-            if (snapshot != null && !LunaProtocolCodes.CaptureState.isBusy(snapshot.state)) return true
-            delay(CAPTURE_IDLE_POLL_MS)
+        if (isCaptureIdle()) return true
+        val announced = session.notifications
+            .filter { it.code == LunaProtocolCodes.NOTIFICATION_CURRENT_CAPTURE_STATUS }
+            .filterNot { LunaProtocolCodes.CaptureState.isBusy(parseCaptureStatus(it.payload, nested = false).state) }
+            .map { }
+        val polled = flow {
+            while (true) {
+                delay(CAPTURE_IDLE_POLL_MS)
+                if (isCaptureIdle()) emit(Unit)
+            }
         }
-        return false
+        return withTimeoutOrNull(timeoutMs) {
+            merge(announced, polled).first()
+            true
+        } ?: false
+    }
+
+    private suspend fun isCaptureIdle(): Boolean {
+        val snapshot = fetchCaptureState() ?: return false
+        return !LunaProtocolCodes.CaptureState.isBusy(snapshot.state)
     }
 
     private suspend fun fetchCaptureState(): CaptureSnapshot? =
@@ -539,7 +565,11 @@ class LunaCommands(
         private const val CAPTURE_IDLE_TIMEOUT_MS = 8_000L
 
         /** Ogni quanto si richiede lo stato mentre si aspetta: fitto ma non un martellamento. */
-        private const val CAPTURE_IDLE_POLL_MS = 200L
+        /**
+         * Il sondaggio di riserva. Un secondo, non due decimi: l'informazione arriva dalla
+         * notifica, questo serve solo a non restare appesi se quella si perde.
+         */
+        private const val CAPTURE_IDLE_POLL_MS = 1_000L
 
         /** L'elenco dei file su una scheda piena richiede più tempo di un comando qualsiasi. */
         private const val FILE_LIST_TIMEOUT_MS = 12_000L

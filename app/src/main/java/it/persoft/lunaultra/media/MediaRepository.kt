@@ -387,9 +387,16 @@ class MediaRepository(
             onProgress(1f)
             return@withContext Result.success(target)
         }
+        // Un secondo tentativo: sul Wi-Fi della camera una connessione che si chiude a metà
+        // capita, e riscaricare qualche megabyte costa molto meno che buttare via la panoramica
+        // di cui quel file fa parte.
         runCatching { downloadTo("http://$host$path", target, onProgress) }
+            .recoverCatching { first ->
+                log.warn("Scaricamento di $path non riuscito: ${first.message}", "Riprovo una volta.")
+                downloadTo("http://$host$path", target, onProgress)
+            }
             .onSuccess { pruneDownloads() }
-            .onFailure { log.warn("Scaricamento di $path non riuscito: ${it.message}") }
+            .onFailure { log.warn("Scaricamento di $path non riuscito nemmeno al secondo tentativo: ${it.message}") }
     }
 
     /** Scarica una risorsa in un file locale, passando da un file parziale. */
@@ -400,8 +407,20 @@ class MediaRepository(
         try {
             connection = open(url)
             val length = connection.contentLengthLong
-            connection.inputStream.use { input ->
+            val written = connection.inputStream.use { input ->
                 FileOutputStream(partial).use { output -> copy(input, output, length, onProgress) }
+            }
+            // Un flusso che finisce prima del previsto non è un errore per nessuno: il server
+            // ha chiuso, il lettore ha letto quello che c'era, e il file resta a metà. Chi lo
+            // apre dopo trova un JPEG illeggibile e non sa perché — è successo con una
+            // panoramica intera, buttata via per un file arrivato corto. Se i byte non tornano
+            // il parziale si butta subito, così il prossimo tentativo riscarica invece di
+            // riusare la spazzatura messa in cache.
+            if (length > 0 && written != length) {
+                partial.delete()
+                throw IllegalStateException(
+                    "scaricati $written byte su $length: la camera ha chiuso prima della fine",
+                )
             }
         } finally {
             connection?.disconnect()
@@ -567,7 +586,7 @@ class MediaRepository(
         return connection
     }
 
-    private fun copy(input: InputStream, output: OutputStream, total: Long, onProgress: (Float) -> Unit) {
+    private fun copy(input: InputStream, output: OutputStream, total: Long, onProgress: (Float) -> Unit): Long {
         val buffer = ByteArray(64 * 1024)
         var written = 0L
         var lastReported = 0f
@@ -587,6 +606,7 @@ class MediaRepository(
         }
         output.flush()
         onProgress(1f)
+        return written
     }
 
     /**

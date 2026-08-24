@@ -328,80 +328,100 @@ class TimelapseEngine(
         var missed = 0
         val startedAtMs = System.currentTimeMillis()
 
-        log.info(
-            "Modalità foto: $planned scatti, $shotsPerLeg per tratto",
-            "Stima iniziale %s, alla cadenza di %.1f s per scatto.".format(
-                formatSeconds(planned * NOMINAL_SHOT_SECONDS),
-                NOMINAL_SHOT_SECONDS,
-            ),
-        )
+        // L'anteprima e le foto si contendono la stessa camera. Mentre la sequenza scatta,
+        // l'anteprima non la guarda nessuno — il telefono sta su un treppiede o in tasca — e
+        // intanto la camera comprime un flusso HEVC che le toglie tempo e banda proprio mentre
+        // deve scrivere file da decine di megabyte. Si spegne per la durata della sequenza e si
+        // riaccende alla fine, se era accesa.
+        val previewWasActive = preview.state.value.active
+        if (previewWasActive) {
+            preview.stop()
+            log.info(
+                "Anteprima sospesa per la sequenza fotografica",
+                "Torna da sola alla fine: mentre scatta, la camera lavora per una cosa sola.",
+            )
+        }
+        try {
+            log.info(
+                "Modalità foto: $planned scatti, $shotsPerLeg per tratto",
+                "Stima iniziale %s, alla cadenza di %.1f s per scatto.".format(
+                    formatSeconds(planned * NOMINAL_SHOT_SECONDS),
+                    NOMINAL_SHOT_SECONDS,
+                ),
+            )
 
-        for (legIndex in 0 until sequence.legCount) {
-            val from = sequence.waypoints[legIndex]
-            val to = sequence.waypoints[legIndex + 1]
+            for (legIndex in 0 until sequence.legCount) {
+                val from = sequence.waypoints[legIndex]
+                val to = sequence.waypoints[legIndex + 1]
 
-            for (shot in 0 until shotsPerLeg) {
-                if (!currentCoroutineContext().isActive) return
-                // Il primo scatto di un tratto successivo al primo è già stato fatto.
-                if (shot == 0 && legIndex > 0) continue
+                for (shot in 0 until shotsPerLeg) {
+                    if (!currentCoroutineContext().isActive) return
+                    // Il primo scatto di un tratto successivo al primo è già stato fatto.
+                    if (shot == 0 && legIndex > 0) continue
 
-                val t = shot.toFloat() / (shotsPerLeg - 1)
-                val targetPan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation)
-                val targetTilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation)
+                    val t = shot.toFloat() / (shotsPerLeg - 1)
+                    val targetPan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation)
+                    val targetTilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation)
 
-                val done = taken + missed
-                val remaining = estimateRemaining(startedAtMs, done, planned)
-                _state.value = _state.value.copy(
-                    phase = RunPhase.RUNNING,
-                    legIndex = legIndex,
-                    legProgress = t,
-                    targetPan = targetPan,
-                    targetTilt = targetTilt,
-                    shotsTaken = taken,
-                    shotsPlanned = planned,
-                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
-                    secondsRemaining = remaining,
-                    shotsMissed = missed,
-                    message = "In posizione per lo scatto ${done + 1}/$planned",
+                    val done = taken + missed
+                    val remaining = estimateRemaining(startedAtMs, done, planned)
+                    _state.value = _state.value.copy(
+                        phase = RunPhase.RUNNING,
+                        legIndex = legIndex,
+                        legProgress = t,
+                        targetPan = targetPan,
+                        targetTilt = targetTilt,
+                        shotsTaken = taken,
+                        shotsPlanned = planned,
+                        elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                        secondsRemaining = remaining,
+                        shotsMissed = missed,
+                        message = "In posizione per lo scatto ${done + 1}/$planned",
+                    )
+
+                    // Fra fotografie conta ridurre il tempo morto: il dominante viaggia al 100%.
+                    // L'intervallo configurato resta il ritmo degli scatti, non la velocità del gimbal.
+                    gimbal.moveToPositionAtMaximum(targetPan, targetTilt)
+                        .getOrElse { throw IllegalStateException("Spostamento fotografico non riuscito: ${it.message}", it) }
+
+                    // Il gimbal deve essere davvero fermo prima dello scatto.
+                    delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
+
+                    _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
+                    val shot = shootOnce(done + 1, planned, targetPan, targetTilt)
+
+                    if (shot != null) taken++ else missed++
+                    _state.value = _state.value.copy(
+                        shotsTaken = taken,
+                        shotsMissed = missed,
+                        elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                        secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
+                        // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
+                        // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
+                        // fotogramma nel posto del successivo.
+                        shotAngles = _state.value.shotAngles + listOfNotNull(shot),
+                    )
+                }
+            }
+
+            val elapsed = (System.currentTimeMillis() - startedAtMs) / 1000f
+            _state.value = _state.value.copy(elapsedSeconds = elapsed, secondsRemaining = 0f)
+            if (missed > 0) {
+                log.warn(
+                    "$taken scatti su $planned in ${formatSeconds(elapsed)}",
+                    "$missed non sono riusciti nemmeno riprovando: l'unione avrà dei buchi.",
                 )
-
-                // Fra fotografie conta ridurre il tempo morto: il dominante viaggia al 100%.
-                // L'intervallo configurato resta il ritmo degli scatti, non la velocità del gimbal.
-                gimbal.moveToPositionAtMaximum(targetPan, targetTilt)
-                    .getOrElse { throw IllegalStateException("Spostamento fotografico non riuscito: ${it.message}", it) }
-
-                // Il gimbal deve essere davvero fermo prima dello scatto.
-                delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
-
-                _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
-                val shot = shootOnce(done + 1, planned, targetPan, targetTilt)
-
-                if (shot != null) taken++ else missed++
-                _state.value = _state.value.copy(
-                    shotsTaken = taken,
-                    shotsMissed = missed,
-                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
-                    secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
-                    // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
-                    // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
-                    // fotogramma nel posto del successivo.
-                    shotAngles = _state.value.shotAngles + listOfNotNull(shot),
+            } else {
+                log.info(
+                    "$taken scatti su $planned in ${formatSeconds(elapsed)}",
+                    "%.1f s per scatto.".format(if (taken > 0) elapsed / taken else 0f),
                 )
             }
-        }
-
-        val elapsed = (System.currentTimeMillis() - startedAtMs) / 1000f
-        _state.value = _state.value.copy(elapsedSeconds = elapsed, secondsRemaining = 0f)
-        if (missed > 0) {
-            log.warn(
-                "$taken scatti su $planned in ${formatSeconds(elapsed)}",
-                "$missed non sono riusciti nemmeno riprovando: l'unione avrà dei buchi.",
-            )
-        } else {
-            log.info(
-                "$taken scatti su $planned in ${formatSeconds(elapsed)}",
-                "%.1f s per scatto.".format(if (taken > 0) elapsed / taken else 0f),
-            )
+        } finally {
+            // Anche se la sequenza è stata interrotta: l'anteprima era accesa quando è
+            // cominciata e deve tornare accesa, altrimenti si resta davanti a uno schermo nero
+            // senza sapere perché.
+            if (previewWasActive) preview.start()
         }
     }
 

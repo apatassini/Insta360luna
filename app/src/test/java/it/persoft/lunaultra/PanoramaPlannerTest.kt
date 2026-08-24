@@ -39,7 +39,7 @@ class PanoramaPlannerTest {
 
         assertTrue(plan.columns >= 4)
         assertTrue(plan.rows >= 2)
-        assertEquals(plan.columns * plan.rows, plan.waypoints.size)
+        assertEquals(plan.columnsPerRow.sum(), plan.waypoints.size)
         assertTrue(plan.waypoints.all { it.generatedByPanoramaPlanner })
         assertTrue(plan.waypoints.all { it.pan in pan.minimumDeg..pan.maximumDeg })
         assertTrue(plan.waypoints.all { it.tilt in tilt.minimumDeg..tilt.maximumDeg })
@@ -112,4 +112,84 @@ class PanoramaPlannerTest {
         movingPulses = 24,
         endpointConfidencePercent = 90,
     )
+
+    /**
+     * Più ci si allontana dall'orizzonte, meno scatti servono per fare il giro.
+     *
+     * È il difetto misurato su una sferica vera: quattro file da sei scatti, e la fila a 88° di
+     * inclinazione inquadrava sei volte quasi lo stesso cielo. Un minuto di gimbal e sei file da
+     * unire, per un'informazione che sta in uno scatto solo — e con una sovrapposizione al 99%
+     * l'unione peggiora, non migliora.
+     *
+     * Il riferimento è l'orizzonte, non il basso della griglia: la corsa del tilt va da -57° a
+     * +120°, quindi la fila più fitta è quella che guarda dritto, non la prima.
+     */
+    @Test
+    fun `le file lontane dall'orizzonte hanno meno scatti`() {
+        val plan = PanoramaPlanner.plan(
+            centerPan = 89f,
+            centerTilt = 31.5f,
+            horizontalCoverage = 360f,
+            verticalCoverage = 180f,
+            overlapPercent = 20,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = limits(-57f, 235f, 48f),
+            tiltLimits = limits(-57f, 120f, 31f),
+        ).getOrThrow()
+
+        val counts = plan.columnsPerRow
+        assertEquals(plan.rows, counts.size)
+        val tilts = plan.waypoints.map { it.tilt }.distinct().sorted()
+        assertEquals(tilts.size, counts.size)
+        // Ordinate per distanza dall'orizzonte, le file non possono che accorciarsi.
+        val byDistance = tilts.zip(counts).sortedBy { (tilt, _) -> kotlin.math.abs(tilt) }
+        assertTrue(
+            "Allontanandosi dall'orizzonte le file dovrebbero stringersi, invece sono $byDistance",
+            byDistance.map { it.second }.zipWithNext().all { (near, far) -> far <= near },
+        )
+        assertTrue("La fila più inclinata dovrebbe essere la più corta", counts.last() < counts.max())
+        assertEquals(counts.sum(), plan.waypoints.size)
+        assertTrue("Il piano dovrebbe risparmiare scatti", plan.shotsSavedAtPoles > 0)
+        assertTrue(plan.totalShots < plan.columns * plan.rows)
+    }
+
+    /** Vicino allo zenit uno scatto copre tutto il giro: di più è tempo buttato. */
+    @Test
+    fun `alla verticale basta uno scatto per fila`() {
+        val plan = PanoramaPlanner.plan(
+            centerPan = 89f,
+            centerTilt = 31.5f,
+            horizontalCoverage = 360f,
+            verticalCoverage = 180f,
+            overlapPercent = 20,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = limits(-57f, 235f, 48f),
+            tiltLimits = limits(-57f, 120f, 31f),
+        ).getOrThrow()
+
+        val topTilt = plan.waypoints.maxOf { it.tilt }
+        assertTrue("La fila più alta è a $topTilt gradi", topTilt > 80f)
+        assertEquals(1, plan.waypoints.count { it.tilt == topTilt })
+    }
+
+    /** All'orizzonte non si stringe niente: il conto resta quello della griglia piena. */
+    @Test
+    fun `una panoramica orizzontale non perde scatti`() {
+        val plan = PanoramaPlanner.plan(
+            centerPan = 60f,
+            centerTilt = 0f,
+            horizontalCoverage = 270f,
+            verticalCoverage = 0f,
+            overlapPercent = 30,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = pan,
+            tiltLimits = tilt,
+        ).getOrThrow()
+
+        assertEquals(0, plan.shotsSavedAtPoles)
+        assertEquals(listOf(plan.columns), plan.columnsPerRow)
+    }
 }

@@ -271,8 +271,8 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                         modifier = Modifier.weight(1f),
                     )
                     MetricTile(
-                        value = "${current.columns}×${current.rows}",
-                        caption = "colonne × righe",
+                        value = current.columnsPerRow.joinToString("·"),
+                        caption = "scatti per fila",
                         modifier = Modifier.weight(1f),
                     )
                     MetricTile(
@@ -285,7 +285,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                 // lasciano immaginare: la forma della panoramica e quanto si sovrappongono i
                 // fotogrammi. Una sovrapposizione troppo magra si vede prima di scattare.
                 PanoramaGridPreview(
-                    columns = current.columns,
+                    columnsPerRow = current.columnsPerRow,
                     rows = current.rows,
                     frameWidthFraction = (current.fieldOfView.horizontalDegrees / realHorizontal)
                         .coerceIn(0.05f, 1f),
@@ -383,7 +383,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
  */
 @Composable
 private fun PanoramaGridPreview(
-    columns: Int,
+    columnsPerRow: List<Int>,
     rows: Int,
     frameWidthFraction: Float,
     frameHeightFraction: Float,
@@ -403,6 +403,9 @@ private fun PanoramaGridPreview(
         val spanY = size.height - frameHeight
         for (row in 0 until rows) {
             val top = if (rows <= 1) spanY / 2f else spanY * row / (rows - 1)
+            // Le file alte hanno meno fotogrammi, e più larghi in gradi di pan: il disegno lo
+            // mostra com'è, perché è la differenza fra una griglia e quello che si scatta.
+            val columns = columnsPerRow.getOrElse(row) { 1 }
             for (column in 0 until columns) {
                 val left = if (columns <= 1) spanX / 2f else spanX * column / (columns - 1)
                 drawRect(

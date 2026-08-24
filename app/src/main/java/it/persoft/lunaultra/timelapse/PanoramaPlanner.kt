@@ -4,7 +4,9 @@ import it.persoft.lunaultra.data.GimbalAxisLimits
 import kotlinx.serialization.Serializable
 import kotlin.math.PI
 import kotlin.math.atan
+import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.sqrt
 import kotlin.math.tan
 
@@ -64,8 +66,18 @@ data class PanoramaPlan(
     val horizontalCenterSpan: Float,
     val verticalCenterSpan: Float,
     val warning: String? = null,
+    /**
+     * Quanti scatti ha ogni fila, dal basso verso l'alto.
+     *
+     * Non sono tutte uguali: più ci si alza e meno scatti servono per fare il giro. [columns] è
+     * la fila più fitta, quella che decide la larghezza della griglia; il conto vero è la somma.
+     */
+    val columnsPerRow: List<Int> = List(rows) { columns },
 ) {
-    val totalShots: Int get() = columns * rows
+    val totalShots: Int get() = columnsPerRow.sum()
+
+    /** Quanti scatti si sono risparmiati stringendo le file alte. */
+    val shotsSavedAtPoles: Int get() = columns * rows - totalShots
 }
 
 object PanoramaPlanner {
@@ -119,11 +131,16 @@ object PanoramaPlanner {
 
         val columns = shotCount(requestedHorizontal, fov.horizontalDegrees, overlap)
         val rows = if (requestedVertical <= 0f) 1 else shotCount(requestedVertical, fov.verticalDegrees, overlap)
-        val pans = positions(startPan, endPan, columns)
         val tilts = positions(startTilt, endTilt, rows)
+        val columnsPerRow = tilts.map { tilt ->
+            columnsForRow(tilt, requestedHorizontal, fov.horizontalDegrees, overlap).coerceAtMost(columns)
+        }
         val points = buildList {
             tilts.forEachIndexed { row, tilt ->
-                val rowPans = if (row % 2 == 0) pans else pans.asReversed()
+                val count = columnsPerRow[row]
+                val rowPans = positions(startPan, endPan, count).let {
+                    if (row % 2 == 0) it else it.asReversed()
+                }
                 rowPans.forEachIndexed { column, pan ->
                     add(
                         Waypoint(
@@ -146,6 +163,7 @@ object PanoramaPlanner {
                 fieldOfView = fov,
                 horizontalCenterSpan = horizontalCenterSpan,
                 verticalCenterSpan = verticalCenterSpan,
+                columnsPerRow = columnsPerRow,
             ),
         )
     }
@@ -167,8 +185,41 @@ object PanoramaPlanner {
         return (steps + 1).coerceAtLeast(1)
     }
 
+    /**
+     * Quanti scatti servono alla fila inclinata di [tiltDegrees], che sono meno che in basso.
+     *
+     * Il pan è una rotazione attorno alla verticale, e più si guarda in alto meno serve girare
+     * per spostare l'inquadratura: a 60° di inclinazione un fotogramma copre il doppio dei gradi
+     * di pan che copre all'orizzonte, e vicino allo zenit ne copre tutto il giro. È la ragione
+     * per cui i meridiani si stringono verso il polo, ed è geometria, non un'approssimazione:
+     * la larghezza in pan di un fotogramma è il suo campo visivo diviso il coseno
+     * dell'inclinazione.
+     *
+     * Senza questo conto una panoramica sferica scattava sei foto a 88° di inclinazione, e le sei
+     * inquadravano quasi la stessa cosa: un minuto buttato per sei volte lo stesso cielo, con
+     * l'aggravante che una sovrapposizione al 99% non aiuta l'unione, la confonde.
+     *
+     * Il coseno è limitato al minimo: allo zenit esatto varrebbe zero e la divisione non
+     * esisterebbe, mentre uno scatto solo lì basta e avanza.
+     */
+    private fun columnsForRow(
+        tiltDegrees: Float,
+        coverage: Float,
+        frameFov: Float,
+        overlap: Float,
+    ): Int {
+        val cosine = cos(abs(tiltDegrees) * PI / 180.0).toFloat().coerceAtLeast(MIN_ROW_COSINE)
+        val panWidth = (frameFov / cosine).coerceAtMost(FULL_TURN_DEGREES)
+        return shotCount(coverage, panWidth, overlap)
+    }
+
     /** Un resto sotto questa frazione di passo non vale uno scatto in più. */
     private const val RESIDUAL_TOLERANCE = 0.1f
+
+    /** Sotto questo coseno un fotogramma copre comunque tutto il giro: è il polo. */
+    private const val MIN_ROW_COSINE = 0.02f
+
+    private const val FULL_TURN_DEGREES = 360f
 
     private fun positions(start: Float, end: Float, count: Int): List<Float> {
         if (count <= 1) return listOf((start + end) / 2f)

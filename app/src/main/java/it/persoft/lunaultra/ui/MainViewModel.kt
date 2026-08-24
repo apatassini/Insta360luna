@@ -1078,7 +1078,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         plan.fieldOfView.verticalDegrees,
                     ))
                     appendLine("Sovrapposizione: ${seq.panoramaOverlapPercent}%")
-                    append("Griglia: ${plan.columns} × ${plan.rows} · ${plan.totalShots} scatti")
+                    appendLine("Griglia: ${plan.columns} × ${plan.rows} · ${plan.totalShots} scatti")
+                    append("Scatti per fila: ${plan.columnsPerRow.joinToString("·")}")
+                    if (plan.shotsSavedAtPoles > 0) {
+                        append(
+                            " (${plan.shotsSavedAtPoles} risparmiati in alto: lassù un fotogramma " +
+                                "copre molti più gradi di pan)",
+                        )
+                    }
                 },
             )
             _panoramaPlan.value = plan

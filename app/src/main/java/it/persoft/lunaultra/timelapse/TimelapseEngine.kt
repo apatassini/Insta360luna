@@ -27,8 +27,19 @@ import kotlin.math.sign
 
 enum class RunPhase { IDLE, PREPARING, RUNNING, STOPPING, COMPLETED, ABORTED }
 
-/** L'orientamento di uno scatto, come lo aveva chiesto il piano. */
-data class ShotAngle(val panDegrees: Float, val tiltDegrees: Float)
+/**
+ * L'orientamento di uno scatto, come lo aveva chiesto il piano, e il file che ne è uscito.
+ *
+ * [uri] arriva dalla risposta della camera allo scatto, che porta il percorso del file appena
+ * scritto. Quando c'è, unire la panoramica non richiede di indovinare niente: si sa quale foto
+ * sta a quale angolo. Manca sui firmware che rispondono a mani vuote, e allora si torna a
+ * confrontare l'elenco dei file prima e dopo.
+ */
+data class ShotAngle(
+    val panDegrees: Float,
+    val tiltDegrees: Float,
+    val uri: String? = null,
+)
 
 data class RunState(
     val phase: RunPhase = RunPhase.IDLE,
@@ -363,9 +374,9 @@ class TimelapseEngine(
                 delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
 
                 _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
-                val stored = shootOnce(done + 1, planned, targetPan, targetTilt)
+                val shot = shootOnce(done + 1, planned, targetPan, targetTilt)
 
-                if (stored) taken++ else missed++
+                if (shot != null) taken++ else missed++
                 _state.value = _state.value.copy(
                     shotsTaken = taken,
                     shotsMissed = missed,
@@ -374,11 +385,7 @@ class TimelapseEngine(
                     // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
                     // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
                     // fotogramma nel posto del successivo.
-                    shotAngles = if (stored) {
-                        _state.value.shotAngles + ShotAngle(targetPan, targetTilt)
-                    } else {
-                        _state.value.shotAngles
-                    },
+                    shotAngles = _state.value.shotAngles + listOfNotNull(shot),
                 )
             }
         }
@@ -417,25 +424,34 @@ class TimelapseEngine(
         planned: Int,
         panDegrees: Float,
         tiltDegrees: Float,
-    ): Boolean {
+    ): ShotAngle? {
         repeat(SHOT_ATTEMPTS) { attempt ->
-            if (!currentCoroutineContext().isActive) return false
-            val retry = attempt > 0
-            if (retry) {
+            if (!currentCoroutineContext().isActive) return null
+            if (attempt > 0) {
                 _state.value = _state.value.copy(message = "Riprovo lo scatto $number/$planned")
                 log.warn("Scatto $number: riprovo")
                 delay(SHOT_RETRY_DELAY_MS)
             }
 
             var accepted = false
+            var uri: String? = null
             commands.takePicture()
-                .onSuccess { accepted = true }
+                .onSuccess {
+                    accepted = true
+                    uri = it
+                }
                 .onFailure { log.warn("Scatto $number non riuscito: ${it.message}") }
             if (!accepted) return@repeat
 
-            if (commands.awaitCaptureIdle()) {
-                log.info("Scatto $number/$planned a %.1f° / %.1f°".format(panDegrees, tiltDegrees))
-                return true
+            // La risposta arriva a file scritto e ne porta il percorso: se c'è, lo scatto è
+            // finito e si sa anche come si chiama. Senza percorso resta da controllare che la
+            // camera non stia ancora salvando.
+            if (uri != null || commands.awaitCaptureIdle()) {
+                log.info(
+                    "Scatto $number/$planned a %.1f° / %.1f°".format(panDegrees, tiltDegrees),
+                    uri?.let { "File: $it" },
+                )
+                return ShotAngle(panDegrees, tiltDegrees, uri)
             }
             log.warn(
                 "Scatto $number: la camera è rimasta occupata",
@@ -446,7 +462,7 @@ class TimelapseEngine(
             "Scatto $number/$planned saltato",
             "A %.1f° / %.1f° non c'è foto: l'unione avrà un buco lì.".format(panDegrees, tiltDegrees),
         )
-        return false
+        return null
     }
 
     /**

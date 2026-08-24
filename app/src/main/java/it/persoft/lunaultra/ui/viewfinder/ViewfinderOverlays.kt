@@ -152,6 +152,7 @@ fun RunCard(
     mode: CaptureMode,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
+    saving: Boolean = false,
 ) {
     GlassPanel(modifier = modifier.width(300.dp), contentPadding = 12.dp, verticalSpacing = 8.dp) {
         Row(
@@ -202,8 +203,16 @@ fun RunCard(
             )
         }
 
-        run.message?.let {
-            Text(text = it, style = MaterialTheme.typography.labelSmall, color = Luna.OnSurfaceDim)
+        // «Sta salvando» lo dice la camera, non lo deduce l'app: la notifica 8202 racconta
+        // otturatore, compressione e scrittura sulla scheda. È la risposta alla domanda che
+        // viene guardando una sequenza che sembra ferma — non è ferma, sta scrivendo.
+        val note = if (saving) "La camera sta salvando lo scatto" else run.message
+        note?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (saving) Luna.Accent else Luna.OnSurfaceDim,
+            )
         }
 
         Button(

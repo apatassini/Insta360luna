@@ -88,6 +88,19 @@ Comandi usati dall'app, tutti con numero noto:
 | 30 | `GET_MINI_THUMBNAIL` | miniatura di un file |
 | 226 / `0x00E2` | `GIMBAL_CONTROL` | vettore continuo pan/tilt e stop |
 
+Due cose che la camera dice sullo scatto e che l'app adesso ascolta:
+
+* **la risposta a `TAKE_PICTURE` porta il file appena scritto.** `TakePictureResponse { Photo
+  image = 1 }`, `Photo { string uri = 1; uint64 file_size = 2 }`: arriva a scrittura finita e
+  dice come si chiama la foto. È quello che serve per unire una panoramica senza indovinare
+  niente — prima i file si accoppiavano agli angoli confrontando l'elenco prima e dopo, e uno
+  scatto perso faceva slittare tutto di una posizione;
+* **la notifica `8202` racconta lo scatto mentre avviene.**
+  `NotificationTakePictureStateUpdate { TakePictureState state = 1 }` con
+  `SHUTTER = 0, COMPRESS = 1, WRITE_FILE = 2`. È la camera che dichiara di stare salvando, ed è
+  il motivo per cui a volte non risponde subito: una sequenza fotografica troppo fitta le
+  chiedeva lo scatto successivo mentre scriveva il precedente, e quello andava perso.
+
 ### Gimbal Luna Ultra
 
 Il corpo del comando è `08 01 12 <len> <assi>`. L'app converte la levetta UI nel sistema della
@@ -762,7 +775,9 @@ Il protocollo non l'ho ricostruito io. Questa app sta sulle spalle di:
   8302 osservato sia il metodo dell'oracolo sugli errori.
 * **[RigacciOrg/insta360-wifi-api](https://github.com/RigacciOrg/insta360-wifi-api)** (GPLv3)
   — l'estrazione dei `.proto`, l'enum `MessageCode` con i 164 codici noti e i numeri di campo di
-  `Options`, `BatteryStatus`, `CameraCaptureStatus`, `TimelapseOptions`.
+  `Options`, `BatteryStatus`, `CameraCaptureStatus`, `TimelapseOptions`, e i due messaggi dello
+  scatto: `TakePictureResponse`/`Photo` con l'`uri` del file e
+  `NotificationTakePictureStateUpdate` con i suoi tre stati.
   Da lì viene anche lo **schema del protocollo della Luna Ultra** con i numeri delle
   sotto-modalità, di `PanoAspect` e dei `FunctionMode`: misurati su questa camera, non dedotti.
 * **[diamondfsd/luna-ai-cut](https://github.com/diamondfsd/luna-ai-cut)** — l'estrazione da cui

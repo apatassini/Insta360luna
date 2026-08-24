@@ -32,19 +32,21 @@ sealed interface StitchUiState {
 /**
  * Dagli scatti appena fatti alla panoramica unita nella galleria del telefono.
  *
- * Il pezzo scomodo è il primo: la camera non dice come ha chiamato il file che ha appena
- * salvato. La risposta al comando di scatto è vuota, e nessuna notifica porta il nome. Quindi
- * l'accoppiamento fra angoli e file si fa per esclusione: si guarda l'elenco dei file prima di
- * cominciare, lo si riguarda alla fine, e i nuovi arrivati sono gli scatti della panoramica,
- * nell'ordine in cui la camera li ha creati — che è l'ordine in cui li ha scattati.
+ * Il pezzo scomodo è il primo: sapere quale foto sta a quale angolo.
  *
- * È un ragionamento che regge finché nessun altro scatta sulla stessa camera nel frattempo, ed
- * è una condizione che vale sempre: la camera accetta una sola connessione di controllo per
- * volta, quindi mentre la panoramica gira nessun altro può darle ordini.
+ * La strada buona è quella diretta. La risposta della camera al comando di scatto porta il
+ * percorso del file appena scritto — `TakePictureResponse { Photo image = 1 }`, `Photo { string
+ * uri = 1 }` — quindi ogni angolo si porta dietro il nome della sua foto, e non c'è niente da
+ * indovinare: se la camera ne perde qualcuna, gli angoli rimasti restano accoppiati ai file
+ * giusti invece di slittare tutti di una posizione.
  *
- * Se i file nuovi non sono tanti quanti gli scatti, l'unione non parte. Meglio dirlo che unire
- * la foto sbagliata al posto giusto: un fotogramma fuori ordine non produce una panoramica
- * storta, ne produce una senza senso.
+ * Quando quel percorso non arriva si torna al ripiego: si guarda l'elenco dei file prima di
+ * cominciare, lo si riguarda alla fine, e i nuovi arrivati sono gli scatti della panoramica
+ * nell'ordine in cui la camera li ha creati. Regge finché nessun altro scatta sulla stessa
+ * camera nel frattempo — e non può succedere, perché la camera accetta una sola connessione di
+ * controllo per volta — ma richiede che i file nuovi siano tanti quanti gli scatti. Se non lo
+ * sono, l'unione non parte: meglio dirlo che unire la foto sbagliata al posto giusto, perché un
+ * fotogramma fuori ordine non produce una panoramica storta, ne produce una senza senso.
  */
 class PanoramaStitchJob(
     private val context: Context,
@@ -61,24 +63,21 @@ class PanoramaStitchJob(
         onProgress: (Float, String) -> Unit,
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
-            val fresh = newPhotos(before, after)
             require(angles.size >= 2) { "La panoramica ha prodotto meno di due scatti" }
-            require(fresh.size == angles.size) {
-                "Trovate ${fresh.size} foto nuove per ${angles.size} scatti: non so quale sta dove"
-            }
+            val paired = pairByUri(after, angles) ?: pairByArrival(before, after, angles)
 
-            onProgress(0f, "Scarico ${fresh.size} scatti")
-            val shots = fresh.mapIndexed { index, item ->
+            onProgress(0f, "Scarico ${paired.size} scatti")
+            val shots = paired.mapIndexed { index, (item, angle) ->
                 val file = media.cache(item) { fraction ->
                     onProgress(
-                        DOWNLOAD_SHARE * (index + fraction) / fresh.size,
-                        "Scarico lo scatto ${index + 1} di ${fresh.size}",
+                        DOWNLOAD_SHARE * (index + fraction) / paired.size,
+                        "Scarico lo scatto ${index + 1} di ${paired.size}",
                     )
                 }.getOrElse { throw IllegalStateException("Scaricamento di ${item.name} non riuscito: ${it.message}") }
                 PanoramaShot(
                     file = file,
-                    panDegrees = angles[index].panDegrees,
-                    tiltDegrees = angles[index].tiltDegrees,
+                    panDegrees = angle.panDegrees,
+                    tiltDegrees = angle.tiltDegrees,
                     label = "Scatto ${index + 1}",
                 )
             }
@@ -119,19 +118,56 @@ class PanoramaStitchJob(
     }
 
     /**
-     * I file comparsi sulla camera fra prima e dopo, nell'ordine in cui li ha creati.
+     * L'accoppiamento buono: ogni angolo con il file che la camera ha detto di aver scritto.
+     *
+     * Vale solo se tutti gli angoli hanno un percorso e tutti i percorsi trovano un file
+     * nell'elenco: mezzo accoppiamento è peggio di nessuno, perché sui restanti bisognerebbe
+     * comunque indovinare, e a quel punto tanto vale indovinare su tutti con un criterio solo.
+     *
+     * Il confronto è sul nome del file, non sul percorso intero: la camera nomina la cartella a
+     * modo suo nella risposta allo scatto e a modo suo nell'elenco dei file, e i due modi non
+     * sempre coincidono. Il nome invece è quello e basta.
+     */
+    private fun pairByUri(
+        after: List<MediaItem>,
+        angles: List<ShotAngle>,
+    ): List<Pair<MediaItem, ShotAngle>>? {
+        if (angles.any { it.uri.isNullOrBlank() }) return null
+        val byName = after.filterNot { it.isVideo }.associateBy { it.name }
+        val paired = angles.map { angle ->
+            val name = angle.uri.orEmpty().substringAfterLast('/')
+            val item = byName[name] ?: return null
+            item to angle
+        }
+        log.info(
+            "Unione: ${paired.size} scatti accoppiati per nome",
+            "La camera ha detto lei quale file ha scritto a ogni angolo.",
+        )
+        return paired
+    }
+
+    /**
+     * Il ripiego: i file comparsi sulla camera fra prima e dopo, nell'ordine in cui li ha creati.
      *
      * L'ordine conta quanto l'insieme: gli angoli sono in ordine di scatto, e i file vanno
      * accoppiati con quelli. L'ora dello scatto è il criterio, con il nome a decidere i pari —
      * i nomi della camera contengono l'orario al secondo, quindi due scatti dentro lo stesso
      * secondo restano comunque nell'ordine giusto.
      */
-    private fun newPhotos(before: List<MediaItem>, after: List<MediaItem>): List<MediaItem> {
+    private fun pairByArrival(
+        before: List<MediaItem>,
+        after: List<MediaItem>,
+        angles: List<ShotAngle>,
+    ): List<Pair<MediaItem, ShotAngle>> {
         val known = before.map { it.path }.toSet()
-        return after
+        val fresh = after
             .filterNot { it.isVideo }
             .filterNot { it.path in known }
             .sortedWith(compareBy({ it.takenAtMs }, { it.name }))
+        require(fresh.size == angles.size) {
+            "Trovate ${fresh.size} foto nuove per ${angles.size} scatti: non so quale sta dove"
+        }
+        return fresh.zip(angles)
     }
 
     /**

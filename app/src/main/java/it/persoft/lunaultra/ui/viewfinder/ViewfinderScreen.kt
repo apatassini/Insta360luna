@@ -69,6 +69,7 @@ fun ViewfinderScreen(
     val status by viewModel.status.collectAsState()
     val preview by viewModel.preview.collectAsState()
     val sequence by viewModel.sequence.collectAsState()
+    val cameraSaving by viewModel.cameraSaving.collectAsState()
     val run by viewModel.runState.collectAsState()
     val ptz by viewModel.ptz.collectAsState()
     val moving by viewModel.gimbalMoving.collectAsState()
@@ -290,6 +291,7 @@ fun ViewfinderScreen(
                 RunCard(
                     run = run,
                     mode = captureMode,
+                    saving = cameraSaving,
                     onStop = viewModel::emergencyStop,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
                 )
@@ -451,7 +453,7 @@ fun ViewfinderScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (run.running) {
-                RunCard(run = run, mode = captureMode, onStop = viewModel::emergencyStop)
+                RunCard(run = run, mode = captureMode, saving = cameraSaving, onStop = viewModel::emergencyStop)
             }
             StitchCard(state = stitch, onDismiss = viewModel::clearStitchState)
         }

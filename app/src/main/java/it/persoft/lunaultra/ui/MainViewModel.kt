@@ -9,6 +9,7 @@ import it.persoft.lunaultra.camera.CameraMode
 import it.persoft.lunaultra.camera.CameraStatus
 import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
+import it.persoft.lunaultra.camera.takePictureStateFrom
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
 import it.persoft.lunaultra.data.PhotoSettings
@@ -283,6 +284,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (previous != RunPhase.COMPLETED && state.phase == RunPhase.COMPLETED) {
                     stitchPanoramaIfRequested(state.shotAngles)
                 }
+                // L'ultimo scatto non ha un seguito che spenga l'avviso: la notifica dice
+                // «scrittura» e poi la camera tace, quindi lo spegne la fine della corsa.
+                if (!state.running) _cameraSaving.value = false
                 previous = state.phase
             }
         }
@@ -588,6 +592,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.session.notifications.collect { frame ->
                 container.commands.statusFromNotification(frame)?.let {
                     _status.value = _status.value.mergedWith(it)
+                }
+                // La camera dice cosa sta facendo mentre scatta. Il momento che interessa è la
+                // scrittura sulla scheda: è lì che non risponde, ed è il motivo per cui una
+                // sequenza troppo fitta perdeva scatti senza che si capisse perché.
+                takePictureStateFrom(frame)?.let { state ->
+                    container.log.debug("Scatto: ${LunaProtocolCodes.TakePictureState.name(state)}")
+                    _cameraSaving.value = state == LunaProtocolCodes.TakePictureState.COMPRESS ||
+                        state == LunaProtocolCodes.TakePictureState.WRITE_FILE
                 }
                 if (
                     settings.value.gimbal.useExperimentalPtzPosition &&
@@ -1125,6 +1137,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Pausa fra una lettura e l'altra: la camera salva una foto in poco più di un secondo. */
     private val FILE_SETTLE_DELAY_MS = 1_500L
 
+    /**
+     * La camera sta comprimendo o scrivendo il file, e lo dice lei (notifica 8202).
+     *
+     * Serve a spiegare l'attesa invece di lasciarla senza motivo: fra uno scatto e il successivo
+     * di una sequenza non è l'app che ci mette, è la scheda.
+     */
+    private val _cameraSaving = MutableStateFlow(false)
+    val cameraSaving: StateFlow<Boolean> = _cameraSaving
+
     /** Stato dell'unione automatica, per il pannello della panoramica. */
     private val _stitchState = MutableStateFlow<StitchUiState>(StitchUiState.Idle)
     val stitchState: StateFlow<StitchUiState> = _stitchState
@@ -1175,17 +1196,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * stesso numero, oppure finché scade il tempo: a quel punto quello che c'è è quello che c'è,
      * e chi legge il messaggio lo sa.
      */
-    private suspend fun awaitSettledFileList(baseline: Int): Result<List<MediaItem>> {
+    private suspend fun awaitSettledFileList(
+        baseline: Int,
+        expected: Set<String>,
+    ): Result<List<MediaItem>> {
         var previous = -1
         var latest: List<MediaItem> = emptyList()
         repeat(FILE_SETTLE_ATTEMPTS) { attempt ->
             delay(FILE_SETTLE_DELAY_MS)
             val listed = container.media.list().getOrElse { return Result.failure(it) }
             latest = listed
+            // Quando la camera ha detto come si chiamano le foto, non c'è niente da aspettare
+            // oltre: appena ci sono tutte l'elenco è quello buono, senza dover stare a vedere
+            // se il conto smette di crescere.
+            if (expected.isNotEmpty() && listed.mapTo(mutableSetOf()) { it.name }.containsAll(expected)) {
+                return Result.success(listed)
+            }
             val fresh = listed.size - baseline
             _stitchState.value = StitchUiState.Working(
                 0f,
-                "Aspetto che la camera finisca di salvare · $fresh file nuovi",
+                if (expected.isEmpty()) {
+                    "Aspetto che la camera finisca di salvare · $fresh file nuovi"
+                } else {
+                    val found = listed.count { it.name in expected }
+                    "Aspetto che la camera finisca di salvare · $found di ${expected.size}"
+                },
             )
             if (listed.size == previous && attempt > 0) return Result.success(listed)
             previous = listed.size
@@ -1213,7 +1248,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // finita la sequenza vuol dire contarne meno di quanti ce ne sono, e l'unione si
             // rifiuta di partire perché angoli e file non tornano. Si aspetta che il conto
             // smetta di crescere, che è il solo modo di sapere che ha finito davvero.
-            val after = awaitSettledFileList(before.size).getOrElse {
+            val expected = shots.mapNotNull { it.uri?.substringAfterLast('/') }
+                .takeIf { it.size == shots.size }
+                .orEmpty()
+                .toSet()
+            val after = awaitSettledFileList(before.size, expected).getOrElse {
                 _stitchState.value = StitchUiState.Failed("Elenco dei file non disponibile: ${it.message}")
                 return@launch
             }

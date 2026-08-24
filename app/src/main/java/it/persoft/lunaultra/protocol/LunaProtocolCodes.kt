@@ -50,6 +50,14 @@ object LunaProtocolCodes {
     const val NOTIFICATION_STORAGE_UPDATE = 8198
     const val NOTIFICATION_STORAGE_FULL = 8199
     const val NOTIFICATION_CAPTURE_STOPPED = 8201
+
+    /**
+     * `CAMERA_NOTIFICATION_TAKE_PICTURE_STATE_UPDATE`: la camera racconta lo scatto mentre lo fa.
+     *
+     * È la notifica che dice perché per qualche secondo non risponde: sta comprimendo, o sta
+     * scrivendo il file. Corpo: `NotificationTakePictureStateUpdate { TakePictureState state = 1 }`.
+     */
+    const val NOTIFICATION_TAKE_PICTURE_STATE = 8202
     const val NOTIFICATION_CURRENT_CAPTURE_STATUS = 8208
     const val NOTIFICATION_TIMELAPSE_STATUS_UPDATE = 8210
     /** Conferma del livello hardware del gimbal: field 2 = 1 (lento), 2 (medio), 3 (veloce). */
@@ -68,6 +76,26 @@ object LunaProtocolCodes {
 
     /** Blocco `PHONE_REQUEST_*`: dichiarato ma mai popolato dall'estrazione. */
     const val PHONE_REQUEST_BEGIN = 4096
+
+    /**
+     * Valori di `NotificationTakePictureStateUpdate.TakePictureState`.
+     *
+     * I tre tempi di uno scatto, nell'ordine: l'otturatore, la compressione, la scrittura sulla
+     * scheda. Non c'è un quarto valore per «finito»: lo scatto è finito quando arriva la
+     * risposta al comando, che la camera manda a file scritto.
+     */
+    object TakePictureState {
+        const val SHUTTER = 0
+        const val COMPRESS = 1
+        const val WRITE_FILE = 2
+
+        fun name(state: Int): String = when (state) {
+            SHUTTER -> "otturatore"
+            COMPRESS -> "compressione"
+            WRITE_FILE -> "scrittura sulla scheda"
+            else -> "#$state"
+        }
+    }
 
     /** Codici di `insta360.messages.Error.ErrorCode`. */
     object ErrorCode {
@@ -319,6 +347,18 @@ object LunaProtocolCodes {
         const val STATE = 1
         const val CAPTURE_TIME = 2
         const val CAPTURE_NUMS = 3
+    }
+
+    /**
+     * Numeri di campo di `TakePictureResponse` e `Photo`.
+     *
+     * `TakePictureResponse { Photo image = 1; repeated Photo aeb_images = 2; repeated Photo
+     * burst_images = 3 }`, `Photo { string uri = 1; uint64 file_size = 2; bytes s_thumbnail = 3 }`.
+     */
+    object PhotoField {
+        const val IMAGE = 1
+        const val URI = 1
+        const val FILE_SIZE = 2
     }
 
     /** Valori di `insta360.messages.CaptureMode`. */

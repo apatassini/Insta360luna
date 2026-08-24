@@ -10,6 +10,7 @@ import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.BatteryField
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.CaptureStatusField
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.OptionType
+import it.persoft.lunaultra.protocol.LunaProtocolCodes.PhotoField
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.OptionsField
 import it.persoft.lunaultra.protocol.LunaProtocolCodes.StorageField
 import it.persoft.lunaultra.media.Jpeg
@@ -310,12 +311,12 @@ class LunaCommands(
      * il bracketing di esposizione, ed è quello che partiva finché qui si passava per sbaglio
      * la costante di `CaptureMode`.
      */
-    suspend fun takePicture(instaPano: Boolean = false): Result<Unit> =
+    suspend fun takePicture(instaPano: Boolean = false): Result<String?> =
         session.request(
             LunaProtocolCodes.TAKE_PICTURE,
             LunaMessages.takePicture(LunaProtocolCodes.TakePictureMode.NORMAL, instaPano),
             timeoutMs = PHOTO_TIMEOUT_MS,
-        ).map { }
+        ).map { frame -> photoUriFromResponse(frame.payload) }
 
     // ---- Media sulla camera ----
 
@@ -550,3 +551,34 @@ class LunaCommands(
         private const val DELETE_TIMEOUT_MS = 20_000L
     }
 }
+
+/**
+ * Il percorso della foto appena scritta, dalla risposta allo scatto.
+ *
+ * `TakePictureResponse { Photo image = 1 }` e `Photo { string uri = 1 }`: la camera dice come ha
+ * chiamato il file. È l'informazione che mancava per unire una panoramica — finora i file si
+ * indovinavano confrontando l'elenco prima e dopo, e bastava uno scatto perso perché
+ * l'accoppiamento fra angoli e foto slittasse tutto di una posizione.
+ *
+ * Può mancare: su una raffica la camera riempie `burst_images` invece di `image`, e non tutti i
+ * firmware rispondono allo stesso modo. Chi la usa deve saper fare anche senza.
+ */
+fun photoUriFromResponse(payload: ByteArray): String? =
+    ProtoReader(payload).stringOrNull(PhotoField.IMAGE, PhotoField.URI)?.takeIf { it.isNotBlank() }
+
+/**
+ * Lo stato dello scatto in corso, dalla notifica 8202.
+ *
+ * È la camera che dice cosa sta facendo: otturatore, compressione, scrittura sulla scheda. Il
+ * terzo è il motivo per cui a volte non risponde subito, e spiega l'attesa fra uno scatto e il
+ * successivo invece di lasciarla senza spiegazione.
+ *
+ * Il campo manca quando lo stato è `SHUTTER`: in proto3 uno zero non viaggia. Un corpo vuoto su
+ * questo codice vuol dire quindi otturatore, non «sconosciuto».
+ */
+fun takePictureStateFrom(frame: Ucd2Frame): Int? =
+    if (frame.code == LunaProtocolCodes.NOTIFICATION_TAKE_PICTURE_STATE) {
+        ProtoReader(frame.payload).intOrNull(1) ?: LunaProtocolCodes.TakePictureState.SHUTTER
+    } else {
+        null
+    }

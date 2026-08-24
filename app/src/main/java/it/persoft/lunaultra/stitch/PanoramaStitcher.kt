@@ -77,6 +77,14 @@ class PanoramaStitcher(
         horizontalFovDegrees: Float,
         /** Riempi il buco sotto: serve agli scatti sferici, dove il gimbal non arriva al nadir. */
         fillNadir: Boolean = false,
+        /**
+         * Ricerca larga: gli angoli dati sono un'ipotesi, non una misura.
+         *
+         * È il caso dell'unione manuale, dove il passo fra le foto è tirato a indovinare: la
+         * finestra di ricerca copre quasi tutto il campo visivo invece dei gradi di deriva di
+         * un gimbal calibrato. Costa di più, e per le foto fatte a mano è l'unico modo.
+         */
+        wideSearch: Boolean = false,
     ): Result<StitchOutcome> = withContext(Dispatchers.Default) {
         runCatching {
             require(shots.size >= 2) { "Servono almeno due scatti per unire una panoramica" }
@@ -110,12 +118,12 @@ class PanoramaStitcher(
             )
 
             onProgress(0.10f, "Allineo i fotogrammi")
-            val refinement = refine(frames, placements, lens, canvas)
+            val refinement = refine(frames, placements, lens, canvas, wideSearch)
             placements = refinement.placements
             frames.forEach { it.releaseWorkingData() }
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
-            var bitmap = compose(frames, placements, lens, canvas)
+            var bitmap = compose(frames, placements, lens, canvas, refinement.aligned)
             val patchedRows = if (fillNadir) {
                 onProgress(0.97f, "Chiudo il buco sotto")
                 fillNadirHole(bitmap)
@@ -281,6 +289,8 @@ class PanoramaStitcher(
         val placements: List<FramePlacement>,
         val notes: List<String>,
         val worstCorrection: Float,
+        /** Chi è stato allineato davvero: chi no, ha una posizione di fiducia, non misurata. */
+        val aligned: BooleanArray,
     )
 
     /**
@@ -300,9 +310,12 @@ class PanoramaStitcher(
         initial: List<FramePlacement>,
         lens: PinholeLens,
         canvas: PanoramaCanvas,
+        wideSearch: Boolean,
     ): Refinement {
         val placements = initial.toMutableList()
         val notes = mutableListOf<String>()
+        val aligned = BooleanArray(frames.size)
+        aligned[0] = true
         var worst = 0f
 
         for (index in 1 until frames.size) {
@@ -333,6 +346,7 @@ class PanoramaStitcher(
                     movingPlacement = placements[index],
                     fixedPlacement = placements[anchor],
                     lens = lens,
+                    wideSearch = wideSearch,
                 )
             }
             if (results.isEmpty()) {
@@ -381,6 +395,7 @@ class PanoramaStitcher(
                 finalTilt += trimmedMean(kept.map { it[1] })
             }
 
+            aligned[index] = true
             placements[index] = placements[index].copy(
                 panCorrectionDegrees = finalPan,
                 tiltCorrectionDegrees = finalTilt,
@@ -411,7 +426,7 @@ class PanoramaStitcher(
                 offset.confidence * 100f,
             )
         }
-        return Refinement(placements, notes, worst)
+        return Refinement(placements, notes, worst, aligned)
     }
 
     private class ControlPointTally(val candidates: Int, val kept: List<FloatArray>)
@@ -607,26 +622,47 @@ class PanoramaStitcher(
         movingPlacement: FramePlacement,
         fixedPlacement: FramePlacement,
         lens: PinholeLens,
+        wideSearch: Boolean,
     ): Offset? {
-        // Le direzioni campione: punti del fotogramma fermo che cadono anche nel mobile.
+        // Con la ricerca larga il vero combaciamento può stare ovunque: si tengono tutti i
+        // punti del fermo, e sarà ogni candidato a dire quali cadono nel mobile. Con gli
+        // angoli misurati, invece, la previsione è affidabile e filtra da subito.
         val directions = ArrayList<FloatArray>()
         var y = REG_SAMPLE_STEP / 2
         while (y < fixed.height) {
             var x = REG_SAMPLE_STEP / 2
             while (x < fixed.width) {
                 val world = frameToWorld(x.toFloat(), y.toFloat(), fixedPlacement, lens)
-                val predicted = projectToFrame(world[0], world[1], movingPlacement, lens)
-                if (predicted.inside) directions += floatArrayOf(world[0], world[1], x.toFloat(), y.toFloat())
+                val keep = wideSearch ||
+                    projectToFrame(world[0], world[1], movingPlacement, lens).inside
+                if (keep) directions += floatArrayOf(world[0], world[1], x.toFloat(), y.toFloat())
                 x += REG_SAMPLE_STEP
             }
             y += REG_SAMPLE_STEP
         }
         if (directions.size < REG_MIN_SAMPLES) return null
 
+        // La finestra della prima passata: la deriva di un gimbal calibrato, oppure — a mano
+        // libera — quasi tutto il campo visivo, perché il passo vero nessuno lo sa.
+        val coarsePan = if (wideSearch) min(60f, lens.horizontalFovDegrees * 0.75f) else MAX_SEARCH_DEGREES * 2f
+        val coarseTilt = if (wideSearch) 20f else MAX_SEARCH_DEGREES * 2f
+        val maxPan = coarsePan + 2f
+        val maxTilt = coarseTilt + 2f
+        val schedule = listOf(
+            floatArrayOf(3f, coarsePan, coarseTilt, if (wideSearch) 1.2f else 0.8f),
+            floatArrayOf(2f, 1.2f, 1.2f, 0.3f),
+            floatArrayOf(1f, 0.4f, 0.4f, 0.12f),
+            floatArrayOf(0f, 0.12f, 0.12f, 0.05f),
+        )
+
         var dPan = 0f
         var dTilt = 0f
         var confidence = -1f
-        SEARCH_SCHEDULE.forEach { (levelIndex, range, step) ->
+        schedule.forEach { spec ->
+            val levelIndex = spec[0].toInt()
+            val rangePan = spec[1]
+            val rangeTilt = spec[2]
+            val step = spec[3]
             val fixedLevel = fixed.grayLevels[min(levelIndex, fixed.grayLevels.size - 1)]
             val movingLevel = moving.grayLevels[min(levelIndex, moving.grayLevels.size - 1)]
             val fixedScale = fixedLevel.width.toFloat() / fixed.width
@@ -645,12 +681,12 @@ class PanoramaStitcher(
             var bestPan = dPan
             var bestTilt = dTilt
             var bestNcc = -2f
-            var cp = -range
-            while (cp <= range + 1e-3f) {
-                var ct = -range
-                while (ct <= range + 1e-3f) {
-                    val candPan = (dPan + cp).coerceIn(-MAX_SEARCH_DEGREES * 2f, MAX_SEARCH_DEGREES * 2f)
-                    val candTilt = (dTilt + ct).coerceIn(-MAX_SEARCH_DEGREES * 2f, MAX_SEARCH_DEGREES * 2f)
+            var cp = -rangePan
+            while (cp <= rangePan + 1e-3f) {
+                var ct = -rangeTilt
+                while (ct <= rangeTilt + 1e-3f) {
+                    val candPan = (dPan + cp).coerceIn(-maxPan, maxPan)
+                    val candTilt = (dTilt + ct).coerceIn(-maxTilt, maxTilt)
                     val candidate = movingPlacement.copy(
                         panCorrectionDegrees = candPan,
                         tiltCorrectionDegrees = candTilt,
@@ -767,11 +803,12 @@ class PanoramaStitcher(
         placements: List<FramePlacement>,
         lens: PinholeLens,
         canvas: PanoramaCanvas,
+        aligned: BooleanArray,
     ): Bitmap {
         val output = Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
         // Nero, non trasparente: un JPEG non ha trasparenza e diventerebbe bianco.
         output.eraseColor(0xFF000000.toInt())
-        val gains = exposureGains(frames, placements, lens, canvas)
+        val gains = exposureGains(frames, placements, lens, canvas, aligned)
 
         // Chi possiede ogni pixel della tela, quantificato: il peso della sfumatura del
         // fotogramma che l'ha dipinto. Serve a decidere le maschere dei fotogrammi successivi.
@@ -1161,9 +1198,15 @@ class PanoramaStitcher(
         placements: List<FramePlacement>,
         lens: PinholeLens,
         canvas: PanoramaCanvas,
+        aligned: BooleanArray,
     ): FloatArray {
         val gains = FloatArray(frames.size) { 1f }
         for (index in 1 until frames.size) {
+            // Il pareggio di colore ha senso solo su una sovrapposizione vera: su un
+            // fotogramma non allineato confronterebbe due pezzi di mondo diversi e
+            // inventerebbe un guadagno — i colori falsati della prova a mano venivano da qui.
+            if (!aligned[index]) continue
+
             val anchorIndex = (0 until index).minByOrNull {
                 angularDistance(
                     placements[it].effectivePan,
@@ -1193,7 +1236,11 @@ class PanoramaStitcher(
             gains[index] = if (counted < MIN_OVERLAP_SAMPLES) {
                 gains[anchorIndex]
             } else {
-                gains[anchorIndex] * exposureGain(fixedSum / counted, movingSum / counted)
+                // Il tetto vale anche sulla catena: ogni anello è limitato, ma i limiti si
+                // moltiplicano, e dieci fotogrammi possono scurire l'ultimo del trenta per
+                // cento un passo alla volta.
+                (gains[anchorIndex] * exposureGain(fixedSum / counted, movingSum / counted))
+                    .coerceIn(MIN_CHAIN_GAIN, MAX_CHAIN_GAIN)
             }
         }
         return gains
@@ -1295,17 +1342,6 @@ class PanoramaStitcher(
         /** Un ritaglio quasi uniforme non ha niente da correlare. */
         const val CONTROL_MIN_VARIANCE = 40f
 
-        /**
-         * La tabella della ricerca: livello della piramide, semiampiezza della finestra in
-         * gradi, passo. Dalla nebbia al dettaglio: al livello sfocato la finestra copre tutto
-         * l'errore possibile del gimbal, all'ultimo si rifinisce di un ventesimo di grado.
-         */
-        val SEARCH_SCHEDULE = listOf(
-            Triple(3, MAX_SEARCH_DEGREES * 2f, 0.8f),
-            Triple(2, 1.2f, 0.3f),
-            Triple(1, 0.4f, 0.12f),
-            Triple(0, 0.12f, 0.05f),
-        )
 
         /**
          * Il ritaglio di cucitura sborda dal campo del fotogramma di questo margine: le
@@ -1328,6 +1364,10 @@ class PanoramaStitcher(
         const val MIN_CROP_KEEP = 0.5f
 
         /** Su un telefono con heap larga si lavora più fitti: qualità, non prudenza. */
+        /** La catena dei guadagni non può allontanarsi più di così dal fotogramma di partenza. */
+        const val MIN_CHAIN_GAIN = 0.75f
+        const val MAX_CHAIN_GAIN = 1.35f
+
         const val GENEROUS_WORKING_LONG_SIDE = 2_400
         const val GENEROUS_CANVAS_LONG_SIDE = 8_000
 

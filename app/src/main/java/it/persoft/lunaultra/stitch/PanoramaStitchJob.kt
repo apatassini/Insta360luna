@@ -122,7 +122,7 @@ class PanoramaStitchJob(
                 "${files.size} foto nell'ordine dato · passo assunto %.1f° (FOV %.1f°, sovrapposizione $overlapPercent%%)"
                     .format(stepDegrees, horizontalFovDegrees),
             )
-            stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, onProgress = onProgress)
+            stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, wideSearch = true, onProgress = onProgress)
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
     }
 
@@ -131,10 +131,19 @@ class PanoramaStitchJob(
         shots: List<PanoramaShot>,
         horizontalFovDegrees: Float,
         fillNadir: Boolean,
+        wideSearch: Boolean = false,
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
         val stitcher = PanoramaStitcher(onProgress)
-        val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir).getOrThrow()
+        val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir, wideSearch).getOrThrow()
+        val unaligned = outcome.report.refinements.count { it.contains("resta dov'era") }
+        if (unaligned > 0) {
+            log.warn(
+                "GIUNZIONI NON ALLINEATE",
+                "$unaligned foto non hanno trovato un combaciamento affidabile e sono rimaste " +
+                    "alla posizione ipotizzata: lì la panoramica è incollata a secco.",
+            )
+        }
         val name = save(outcome.bitmap)
         outcome.bitmap.recycle()
 

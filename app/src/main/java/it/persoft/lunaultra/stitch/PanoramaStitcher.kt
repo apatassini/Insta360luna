@@ -274,20 +274,227 @@ class PanoramaStitcher(
                 results.maxByOrNull { it.confidence }!!
             }
 
-            placements[index] = placements[index].copy(
+            // La rifinitura finale la fanno i punti di controllo: con il piazzamento globale
+            // già trovato dalla piramide, ogni punto cerca solo in un raggio piccolo — più
+            // piccolo del passo di una foglia — e la foglia sbagliata non è più raggiungibile.
+            val corrected = placements[index].copy(
                 panCorrectionDegrees = offset.panDegrees,
                 tiltCorrectionDegrees = offset.tiltDegrees,
             )
-            val magnitude = max(abs(offset.panDegrees), abs(offset.tiltDegrees))
+            var candidates = 0
+            val kept = mutableListOf<FloatArray>()
+            anchors.forEach { anchor ->
+                val tally = controlPoints(
+                    moving = frames[index],
+                    fixed = frames[anchor],
+                    movingPlacement = corrected,
+                    fixedPlacement = placements[anchor],
+                    lens = lens,
+                )
+                candidates += tally.candidates
+                kept += tally.kept
+            }
+            var finalPan = offset.panDegrees
+            var finalTilt = offset.tiltDegrees
+            if (kept.size >= CONTROL_MIN_KEPT) {
+                finalPan += trimmedMean(kept.map { it[0] })
+                finalTilt += trimmedMean(kept.map { it[1] })
+            }
+
+            placements[index] = placements[index].copy(
+                panCorrectionDegrees = finalPan,
+                tiltCorrectionDegrees = finalTilt,
+            )
+            val magnitude = max(abs(finalPan), abs(finalTilt))
             worst = max(worst, magnitude)
-            notes += "%s: corretto %+.2f° / %+.2f° · concordanza %.0f%%".format(
+            notes += "%s: %d punti di controllo, %d sopra l'%d%% · corretto %+.2f° / %+.2f° · concordanza %.0f%%".format(
                 frames[index].label,
-                offset.panDegrees,
-                offset.tiltDegrees,
+                candidates,
+                kept.size,
+                (CONTROL_KEEP_NCC * 100).toInt(),
+                finalPan,
+                finalTilt,
                 offset.confidence * 100f,
             )
         }
         return Refinement(placements, notes, worst)
+    }
+
+    private class ControlPointTally(val candidates: Int, val kept: List<FloatArray>)
+
+    /**
+     * I punti di controllo fra due fotogrammi, alla maniera di Autopano: tanti, e filtrati
+     * per qualità.
+     *
+     * Nel fotogramma fermo si scelgono almeno centocinquanta dettagli con carattere in
+     * entrambe le direzioni, sparsi su tutta la sovrapposizione. Ognuno si va a ritrovare
+     * nell'altro fotogramma per correlazione piena, in un raggio piccolo attorno a dove il
+     * piazzamento globale lo prevede. Si tengono solo i ritrovamenti sopra la soglia di
+     * qualità: un punto sotto l'ottanta per cento non è un punto di controllo, è un'opinione.
+     * Ogni superstite porta il suo residuo in gradi, e la media potata dei residui è la
+     * rifinitura.
+     */
+    private fun controlPoints(
+        moving: Frame,
+        fixed: Frame,
+        movingPlacement: FramePlacement,
+        fixedPlacement: FramePlacement,
+        lens: PinholeLens,
+    ): ControlPointTally {
+        val gray = fixed.gray
+        val margin = CONTROL_PATCH_RADIUS + 2
+        val searchPx = (lens.focalPixels * CONTROL_SEARCH_DEGREES.toRadians()).coerceAtLeast(6f)
+
+        // Prima i candidati: il punto con più carattere in ogni cella della sovrapposizione.
+        // Il passo della griglia si stringe finché i candidati non bastano.
+        var step = CONTROL_GRID_STEP
+        var picked: List<IntArray> = emptyList()
+        while (true) {
+            val found = mutableListOf<IntArray>()
+            var cy = margin
+            while (cy < fixed.height - margin - step) {
+                var cx = margin
+                while (cx < fixed.width - margin - step) {
+                    var bestScore = 0f
+                    var bestX = -1
+                    var bestY = -1
+                    var yy = cy
+                    while (yy < cy + step) {
+                        var xx = cx
+                        while (xx < cx + step) {
+                            val i = yy * fixed.width + xx
+                            val dx = abs(gray[i + 2] - gray[i - 2])
+                            val dy = abs(gray[i + 2 * fixed.width] - gray[i - 2 * fixed.width])
+                            val score = min(dx, dy)
+                            if (score > bestScore) {
+                                bestScore = score
+                                bestX = xx
+                                bestY = yy
+                            }
+                            xx += 2
+                        }
+                        yy += 2
+                    }
+                    if (bestScore >= CONTROL_MIN_TEXTURE && bestX >= 0) {
+                        val world = frameToWorld(bestX.toFloat(), bestY.toFloat(), fixedPlacement, lens)
+                        if (projectToFrame(world[0], world[1], movingPlacement, lens).inside) {
+                            found += intArrayOf(bestX, bestY)
+                        }
+                    }
+                    cx += step
+                }
+                cy += step
+            }
+            picked = found
+            if (found.size >= CONTROL_MIN_CANDIDATES || step <= CONTROL_MIN_GRID_STEP) break
+            step = (step * 2) / 3
+        }
+
+        val kept = mutableListOf<FloatArray>()
+        for (candidate in picked.take(CONTROL_MAX_CANDIDATES)) {
+            val world = frameToWorld(candidate[0].toFloat(), candidate[1].toFloat(), fixedPlacement, lens)
+            val predicted = projectToFrame(world[0], world[1], movingPlacement, lens)
+            if (!predicted.inside) continue
+            val found = matchControlPoint(
+                template = gray, templateWidth = fixed.width,
+                sourceX = candidate[0], sourceY = candidate[1],
+                target = moving.gray, targetWidth = moving.width, targetHeight = moving.height,
+                centerX = predicted.x, centerY = predicted.y,
+                radiusPx = searchPx,
+            ) ?: continue
+            val worldFound = frameToWorld(found[0], found[1], movingPlacement, lens)
+            kept += floatArrayOf(
+                wrapDegrees(world[0] - worldFound[0]),
+                world[1] - worldFound[1],
+            )
+        }
+        return ControlPointTally(picked.size, kept)
+    }
+
+    /**
+     * Ritrova un ritaglio nel fotogramma mobile, e risponde solo se la qualità supera la
+     * soglia. Correlazione a media e varianza tolte, ricerca piena pixel per pixel: il raggio
+     * è piccolo e la completezza costa poco.
+     */
+    private fun matchControlPoint(
+        template: FloatArray,
+        templateWidth: Int,
+        sourceX: Int,
+        sourceY: Int,
+        target: FloatArray,
+        targetWidth: Int,
+        targetHeight: Int,
+        centerX: Float,
+        centerY: Float,
+        radiusPx: Float,
+    ): FloatArray? {
+        val r = CONTROL_PATCH_RADIUS
+        val side = 2 * r + 1
+        val patch = FloatArray(side * side)
+        var mean = 0f
+        for (dy in -r..r) {
+            for (dx in -r..r) {
+                val v = template[(sourceY + dy) * templateWidth + sourceX + dx]
+                patch[(dy + r) * side + dx + r] = v
+                mean += v
+            }
+        }
+        mean /= patch.size
+        var norm = 0f
+        for (i in patch.indices) {
+            patch[i] -= mean
+            norm += patch[i] * patch[i]
+        }
+        if (norm < CONTROL_MIN_VARIANCE) return null
+
+        val minX = (centerX - radiusPx).toInt().coerceAtLeast(r)
+        val maxX = (centerX + radiusPx).toInt().coerceAtMost(targetWidth - 1 - r)
+        val minY = (centerY - radiusPx).toInt().coerceAtLeast(r)
+        val maxY = (centerY + radiusPx).toInt().coerceAtMost(targetHeight - 1 - r)
+        if (minX > maxX || minY > maxY) return null
+
+        var bestX = -1
+        var bestY = -1
+        var best = -1f
+        for (py in minY..maxY) {
+            for (px in minX..maxX) {
+                var sum = 0f
+                for (dy in -r..r) {
+                    val rowBase = (py + dy) * targetWidth + px
+                    for (dx in -r..r) sum += target[rowBase + dx]
+                }
+                val targetMean = sum / patch.size
+                var cross = 0f
+                var targetNorm = 0f
+                for (dy in -r..r) {
+                    val rowBase = (py + dy) * targetWidth + px
+                    val patchBase = (dy + r) * side + r
+                    for (dx in -r..r) {
+                        val d = target[rowBase + dx] - targetMean
+                        cross += d * patch[patchBase + dx]
+                        targetNorm += d * d
+                    }
+                }
+                if (targetNorm < CONTROL_MIN_VARIANCE) continue
+                val ncc = cross / sqrt(targetNorm * norm)
+                if (ncc > best) {
+                    best = ncc
+                    bestX = px
+                    bestY = py
+                }
+            }
+        }
+        if (bestX < 0 || best < CONTROL_KEEP_NCC) return null
+        return floatArrayOf(bestX.toFloat(), bestY.toFloat())
+    }
+
+    /** La media dei residui senza le code: il dieci per cento più estremo per lato non vota. */
+    private fun trimmedMean(values: List<Float>): Float {
+        if (values.isEmpty()) return 0f
+        val sorted = values.sorted()
+        val trim = sorted.size / 10
+        val slice = sorted.subList(trim, sorted.size - trim)
+        return if (slice.isEmpty()) sorted[sorted.size / 2] else slice.average().toFloat()
     }
 
     private class Offset(val panDegrees: Float, val tiltDegrees: Float, val confidence: Float)
@@ -889,6 +1096,36 @@ class PanoramaStitcher(
 
         /** Due vicini che suggeriscono correzioni più lontane di così sono in disaccordo. */
         const val ANCHOR_AGREEMENT_DEGREES = 0.8f
+
+        // ---- Punti di controllo (la rifinitura, e il metro della qualità) ----
+
+        /** Quanti punti di controllo generare come minimo fra due fotogrammi. */
+        const val CONTROL_MIN_CANDIDATES = 150
+
+        /** Oltre questo tetto il costo cresce e la statistica no. */
+        const val CONTROL_MAX_CANDIDATES = 260
+
+        /** Si tengono solo i punti sopra questa qualità: sotto, è un'opinione. */
+        const val CONTROL_KEEP_NCC = 0.80f
+
+        /** Sotto questi superstiti la rifinitura non si applica e resta la piramide. */
+        const val CONTROL_MIN_KEPT = 12
+
+        /** La cella di partenza della griglia dei candidati; si stringe se i punti non bastano. */
+        const val CONTROL_GRID_STEP = 40
+        const val CONTROL_MIN_GRID_STEP = 14
+
+        /** Mezzo lato del ritaglio confrontato: 13×13 pixel. */
+        const val CONTROL_PATCH_RADIUS = 6
+
+        /** Raggio di ricerca attorno alla previsione: sotto il passo di una foglia di palma. */
+        const val CONTROL_SEARCH_DEGREES = 0.7f
+
+        /** Sotto questo gradiente in entrambe le direzioni non è un angolo, è una superficie. */
+        const val CONTROL_MIN_TEXTURE = 5f
+
+        /** Un ritaglio quasi uniforme non ha niente da correlare. */
+        const val CONTROL_MIN_VARIANCE = 40f
 
         /**
          * La tabella della ricerca: livello della piramide, semiampiezza della finestra in

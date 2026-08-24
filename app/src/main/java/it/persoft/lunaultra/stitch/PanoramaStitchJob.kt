@@ -130,16 +130,21 @@ class PanoramaStitchJob(
             require(angles.size >= 2) { "La panoramica ha prodotto meno di due scatti" }
             val paired = pairByUri(after, angles) ?: pairByArrival(before, after, angles)
             val dir = jobDirFor(panoramaId)
+            // Tutto il lavoro sporco — file parziale, riscrittura EXIF — avviene in una
+            // cartella privata dell'app: in DCIM Android nega i nomi non-media (il «.part»
+            // dello scaricamento falliva con EPERM) e anche i file d'appoggio dell'EXIF.
+            // Nella cartella pubblica arriva una sola copia, già finita, col suo nome .jpg.
+            val workshop = File(context.cacheDir, "panojob").apply { mkdirs() }
             val files = paired.mapIndexed { index, (item, angle) ->
-                val target = File(dir, item.name)
-                media.downloadInto(item, target) { fraction ->
+                val draft = File(workshop, item.name)
+                media.downloadInto(item, draft) { fraction ->
                     onProgress(
                         (index + fraction) / paired.size,
                         "Scarico lo scatto ${index + 1} di ${paired.size}",
                     )
                 }.getOrElse { throw IllegalStateException("Scaricamento di ${item.name} non riuscito: ${it.message}") }
                 PanoTags.write(
-                    target,
+                    draft,
                     PanoTag(
                         panoramaId = panoramaId,
                         index = index + 1,
@@ -149,8 +154,27 @@ class PanoramaStitchJob(
                         fovDegrees = horizontalFovDegrees,
                     ),
                 )
-                locations?.stampFile(target, item.takenAtMs)
-                target
+                locations?.stampFile(draft, item.takenAtMs)
+                val target = File(dir, item.name)
+                val stored = runCatching {
+                    draft.inputStream().use { input ->
+                        FileOutputStream(target).use { output -> input.copyTo(output) }
+                    }
+                    check(target.length() == draft.length()) {
+                        "copia incompleta (${target.length()} su ${draft.length()} byte)"
+                    }
+                    target
+                }.getOrElse { denied ->
+                    // Anche la copia col nome buono può essere negata da qualche Android:
+                    // allora il job vive nella memoria dell'app. Meno in vista, ma vive.
+                    log.warn("Copia di ${item.name} in ${dir.path} negata: ${denied.message}", "Uso la memoria dell'app.")
+                    runCatching { target.delete() }
+                    val privateDir = File(context.getExternalFilesDir(null), "$JOB_FOLDER/$panoramaId")
+                        .apply { mkdirs() }
+                    draft.copyTo(File(privateDir, item.name), overwrite = true)
+                }
+                draft.delete()
+                stored
             }
             MediaScannerConnection.scanFile(
                 context,

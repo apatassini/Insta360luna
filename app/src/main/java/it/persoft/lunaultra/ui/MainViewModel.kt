@@ -9,6 +9,7 @@ import it.persoft.lunaultra.camera.CameraMode
 import it.persoft.lunaultra.camera.CameraStatus
 import it.persoft.lunaultra.camera.CodeProbe
 import it.persoft.lunaultra.camera.ConnectionState
+import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.camera.takePictureStateFrom
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.GimbalSettings
@@ -1790,13 +1791,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Senza flusso la camera non chiude la cattura: si accende prima di chiedere lo
         // scatto, non dopo aver scoperto che il file non c'è.
         container.preview.ensureRunningForCapture()
-        container.commands.takePicture(instaPano = pano)
-            .onFailure { showMessage("Scatto non riuscito: ${it.message}") }
-            .onSuccess {
-                showMessage(if (pano) "Panoramica in corso" else "Scatto eseguito")
-                markGalleryStale()
-                watchCaptureCompletion()
+        // La camera può dire «non ora» (notifica 8201, di solito perché sta ancora
+        // scrivendo): non è un guasto, è un momento sbagliato. Si riprova da soli, a
+        // distanza crescente, e si molla solo dopo aver insistito davvero.
+        repeat(SHOT_REFUSED_ATTEMPTS) { attempt ->
+            val outcome = container.commands.takePictureConfirmed(instaPano = pano)
+                .getOrElse {
+                    showMessage("Scatto non riuscito: ${it.message}")
+                    return
+                }
+                .outcome
+            when (outcome) {
+                is LunaCommands.ShotOutcome.Refused -> {
+                    val last = attempt == SHOT_REFUSED_ATTEMPTS - 1
+                    container.log.warn(
+                        "La camera ha rifiutato lo scatto (${outcome.reason()})",
+                        if (last) "Mi arrendo dopo $SHOT_REFUSED_ATTEMPTS tentativi." else "Riprovo da solo fra poco.",
+                    )
+                    if (last) {
+                        showMessage("La camera rifiuta lo scatto (${outcome.reason()}): riprova fra qualche secondo")
+                        return
+                    }
+                    showMessage("La camera è ${outcome.reason()}: riprovo…")
+                    delay(SHOT_REFUSED_RETRY_MS * (attempt + 1))
+                }
+
+                // Accettato — o nessun verdetto, e allora si fa come prima: il guardiano
+                // dei file dirà se lo scatto esiste davvero.
+                else -> {
+                    showMessage(if (pano) "Panoramica in corso" else "Scatto eseguito")
+                    markGalleryStale()
+                    watchCaptureCompletion()
+                    return
+                }
             }
+        }
     }
 
     private var captureWatchJob: Job? = null
@@ -2834,6 +2863,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         /** La ripubblicazione della release dura qualche minuto: si riprova, non si molla. */
         const val UPDATE_RETRY_ATTEMPTS = 3
         const val UPDATE_RETRY_DELAY_MS = 90_000L
+
+        /**
+         * Quante volte si insiste su uno scatto che la camera rifiuta (8201), e la base
+         * dell'attesa fra un tentativo e l'altro (cresce: 3, 6, 9… secondi). Dal vivo un
+         * rifiuto è durato quaranta secondi: cinque tentativi coprono quella scena.
+         */
+        const val SHOT_REFUSED_ATTEMPTS = 5
+        const val SHOT_REFUSED_RETRY_MS = 3_000L
 
         /**
          * Quanto il guardiano concede alla camera per scrivere uno scatto prima di dichiararla

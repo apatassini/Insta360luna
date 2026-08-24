@@ -344,6 +344,80 @@ class LunaCommands(
             timeoutMs = PHOTO_TIMEOUT_MS,
         ).map { frame -> photoUriFromResponse(frame.payload) }
 
+    /** Cosa ha fatto davvero la camera dopo un comando di scatto. */
+    sealed interface ShotOutcome {
+        /** Lo stato è passato a «scattando»: l'otturatore lavora. */
+        data object Accepted : ShotOutcome
+
+        /** È arrivata la notifica 8201 senza mai scattare: la camera ha detto «non ora». */
+        data class Refused(val errorCode: Int) : ShotOutcome {
+            fun reason(): String = when (errorCode) {
+                1 -> "scheda piena"
+                2 -> "occupata"
+                4 -> "scheda lenta"
+                7 -> "batteria scarica"
+                9 -> "surriscaldata"
+                else -> "codice $errorCode"
+            }
+        }
+
+        /** Nessun segnale nel tempo dato: non si sa, e chi chiama decide come trattarlo. */
+        data object Silent : ShotOutcome
+    }
+
+    /**
+     * Scatta e aspetta la risposta *vera*: accettato o rifiutato.
+     *
+     * Questo firmware risponde 200 a tutto, anche a uno scatto che non farà mai. La verità
+     * arriva un attimo dopo, per notifica: o lo stato passa a «scattando» (8208 con stato
+     * occupato), o arriva `CAPTURE_STOPPED` (8201) con un codice d'errore — è successo dal
+     * vivo: quattro scatti di fila rifiutati con codice 2 mentre la camera digeriva qualcosa,
+     * e l'app diceva «scatto eseguito» a vuoto.
+     *
+     * L'ascolto parte *prima* di inviare il comando: le notifiche arrivano anche nello stesso
+     * millisecondo della risposta, e un ascoltatore in ritardo le perde (il flusso non ha
+     * replay).
+     */
+    /** Il verdetto e, quando la camera lo dice, il percorso del file che scriverà. */
+    data class ConfirmedShot(val outcome: ShotOutcome, val uri: String?)
+
+    suspend fun takePictureConfirmed(
+        instaPano: Boolean = false,
+        outcomeTimeoutMs: Long = SHOT_OUTCOME_TIMEOUT_MS,
+    ): Result<ConfirmedShot> = kotlinx.coroutines.coroutineScope {
+        val outcome = kotlinx.coroutines.async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            withTimeoutOrNull(outcomeTimeoutMs) {
+                merge(
+                    session.notifications
+                        .filter { it.code == LunaProtocolCodes.NOTIFICATION_CURRENT_CAPTURE_STATUS }
+                        .filter {
+                            LunaProtocolCodes.CaptureState.isBusy(parseCaptureStatus(it.payload, nested = false).state)
+                        }
+                        .map { ShotOutcome.Accepted as ShotOutcome },
+                    session.notifications
+                        .filter { it.code == LunaProtocolCodes.NOTIFICATION_CAPTURE_STOPPED }
+                        .map { ShotOutcome.Refused(ProtoReader(it.payload).intOrNull(1) ?: 0) as ShotOutcome },
+                    // Rete di sicurezza: se la notifica si perde, lo stato interrogato decide.
+                    flow {
+                        while (true) {
+                            delay(CAPTURE_IDLE_POLL_MS)
+                            val state = fetchCaptureState()?.state
+                            if (state != null && LunaProtocolCodes.CaptureState.isBusy(state)) {
+                                emit(ShotOutcome.Accepted as ShotOutcome)
+                            }
+                        }
+                    },
+                ).first()
+            } ?: ShotOutcome.Silent
+        }
+        val sent = takePicture(instaPano)
+        sent.exceptionOrNull()?.let { error ->
+            outcome.cancel()
+            return@coroutineScope Result.failure(error)
+        }
+        Result.success(ConfirmedShot(outcome.await(), sent.getOrNull()))
+    }
+
     /**
      * L'esposizione con cui la camera scatterà: il dato di pre-scatto.
      *
@@ -612,6 +686,13 @@ class LunaCommands(
 
         /** Uno scatto può richiedere più tempo di un comando qualsiasi: HDR, posa lunga, salvataggio. */
         private const val PHOTO_TIMEOUT_MS = 15_000L
+
+        /**
+         * Quanto si aspetta il verdetto vero di uno scatto. Dal vivo il rifiuto (8201) e
+         * l'accettazione (stato occupato) arrivano entro un decimo di secondo dalla risposta:
+         * due secondi bastano, e la rete di sicurezza a sondaggio copre la notifica persa.
+         */
+        private const val SHOT_OUTCOME_TIMEOUT_MS = 2_000L
 
         /** Quanto si aspetta che la camera finisca di salvare prima di muovere il gimbal. */
         private const val CAPTURE_IDLE_TIMEOUT_MS = 8_000L

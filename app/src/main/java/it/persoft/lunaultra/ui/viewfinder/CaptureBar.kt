@@ -126,7 +126,10 @@ fun CaptureBar(
                 .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+            // I gruppi stanno centrati nelle loro metà, non incollati ai bordi: con tre
+            // pulsanti a sinistra e due a destra, l'ancoraggio ai lati lasciava un buco
+            // storto accanto allo scatto e la fila sembrava sbilanciata a sinistra.
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 LeftSlot(
                     guided = selected.usesSequence,
                     waypointCount = waypointCount,
@@ -146,7 +149,7 @@ fun CaptureBar(
             )
             Row(
                 modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 HudIconButton(

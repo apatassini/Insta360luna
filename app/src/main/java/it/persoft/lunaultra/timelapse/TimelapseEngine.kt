@@ -575,16 +575,32 @@ class TimelapseEngine(
                 log.warn("Scatto $number: riprovo")
                 delay(SHOT_RETRY_DELAY_MS)
             }
-            var fired: FiredShot? = null
-            commands.takePicture()
-                .onSuccess { fired = FiredShot(it) }
-                .onFailure { log.warn("Scatto $number non riuscito: ${it.message}") }
-            fired?.let {
-                log.info(
-                    "Scatto $number/$planned a %.1f° / %.1f°".format(target.pan, target.tilt),
-                    it.uri?.let { uri -> "File: $uri" },
-                )
-                return it
+            // La risposta 200 non dice niente: il verdetto vero è la notifica. Un rifiuto
+            // (8201, di solito «occupata») qui non è la fine: si aspetta che la camera
+            // torni libera e si riprova, perché uno scatto saltato è un buco nell'unione.
+            val confirmed = commands.takePictureConfirmed()
+                .getOrElse {
+                    log.warn("Scatto $number non riuscito: ${it.message}")
+                    null
+                }
+            when (val outcome = confirmed?.outcome) {
+                is LunaCommands.ShotOutcome.Refused -> {
+                    log.warn(
+                        "Scatto $number rifiutato dalla camera (${outcome.reason()})",
+                        "Aspetto che si liberi e riprovo.",
+                    )
+                    commands.awaitCaptureIdle()
+                }
+
+                is LunaCommands.ShotOutcome.Accepted, is LunaCommands.ShotOutcome.Silent -> {
+                    log.info(
+                        "Scatto $number/$planned a %.1f° / %.1f°".format(target.pan, target.tilt),
+                        confirmed.uri?.let { uri -> "File: $uri" },
+                    )
+                    return FiredShot(confirmed.uri)
+                }
+
+                null -> Unit
             }
         }
         log.warn(

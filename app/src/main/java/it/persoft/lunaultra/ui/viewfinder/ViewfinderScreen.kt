@@ -465,13 +465,16 @@ fun ViewfinderScreen(
         // panoramica da ventiquattro scatti dura due minuti, e per due minuti chi guarda deve
         // sapere a che punto è e poter fermare. Sotto, l'esito dell'unione — che è la cosa che
         // può andare storta *dopo* che gli scatti sono riusciti, e che finiva solo nel log.
-        // Appoggiate a destra: a sinistra ci sono i distintivi di scheda e batteria, e le
-        // carte ci finivano sopra.
+        // A destra dei distintivi di scheda e batteria, mai sopra: la colonna parte dopo lo
+        // spazio che i distintivi occupano davvero — «175,3 GB» è largo — e le carte si
+        // stringono per starci, invece di fidarsi di una larghezza fissa che non bastava.
         Column(
             modifier = Modifier
                 .align(Alignment.TopEnd)
+                .fillMaxWidth()
                 .padding(
                     top = topInset + if (chromeVisible) TopBandHeight + 8.dp else 12.dp,
+                    start = StatColumnReservedWidth,
                     end = 12.dp,
                 ),
             horizontalAlignment = Alignment.End,
@@ -517,6 +520,12 @@ private fun infoPillText(
     CaptureMode.FOTO, CaptureMode.VIDEO, CaptureMode.PURE_VIDEO,
     CaptureMode.SLOW_MOTION, CaptureMode.PANORAMA, CaptureMode.PANORAMICA_APP -> null
 }
+
+/**
+ * Quanto spazio riservano in orizzontale i distintivi di stato in alto a sinistra: il più
+ * largo è quello della scheda («175,3 GB»). Le carte di avanzamento partono da qui in poi.
+ */
+private val StatColumnReservedWidth = 132.dp
 
 private fun trim(value: Float): String =
     if (value == value.toInt().toFloat()) value.toInt().toString() else "%.1f".format(value)

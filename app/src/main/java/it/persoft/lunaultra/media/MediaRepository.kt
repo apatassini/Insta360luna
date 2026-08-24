@@ -17,7 +17,6 @@ import it.persoft.lunaultra.camera.LunaCommands
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.SocketBinder
-import it.persoft.lunaultra.protocol.Hex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.withPermit
@@ -182,11 +181,31 @@ class MediaRepository(
 
         // L'ordine conta più delle strategie stesse: prima quella che risponde in un secondo,
         // dopo quella che può far scadere un'attesa.
-        val bytes = fromExifThumbnail(item)
-            ?: fromCameraThumbnail(item)
-            ?: fromVideoProxy(item)
-            ?: fromFullFile(item)
-        val bitmap = bytes?.let { decodeBytes(it, THUMBNAIL_SIZE) }
+        //
+        // La rotazione: l'anteprima incorporata nell'EXIF e la miniatura della camera sono
+        // JPEG nudi, senza il tag di orientamento — quello vive nell'intestazione del file
+        // originale. Per questo la miniatura usciva sdraiata anche quando la foto grande era
+        // dritta: la rotazione va presa da lì e applicata qui. Le vie che passano dal file
+        // intero, invece, escono già ruotate e non vanno toccate due volte.
+        val header = if (item.isVideo) null else readPrefix(item.displayUrl(host), EXIF_PREFIX_BYTES)
+        val headerExif = header?.let {
+            runCatching { ExifInterface(java.io.ByteArrayInputStream(it)) }.getOrNull()
+        }
+        val orientation = headerExif?.getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL,
+        ) ?: ExifInterface.ORIENTATION_NORMAL
+
+        var needsRotation = true
+        var bytes = exifThumbnail(item, headerExif) ?: fromCameraThumbnail(item)
+        if (bytes == null) {
+            needsRotation = false
+            bytes = fromVideoProxy(item) ?: fromFullFile(item)
+        }
+        var bitmap = bytes?.let { decodeBytes(it, THUMBNAIL_SIZE) }
+        if (bitmap != null && needsRotation) {
+            bitmap = applyOrientationValue(bitmap, orientation)
+        }
         if (bitmap == null) {
             withoutThumbnail.add(item.path)
             return@withContext null
@@ -272,22 +291,14 @@ class MediaRepository(
      * ignora l'intestazione: si apre la richiesta normale, si leggono i primi mezzo megabyte e
      * si chiude. Funziona con qualunque server, e quello che non si legge non si scarica.
      */
-    private fun fromExifThumbnail(item: MediaItem): ByteArray? {
+    private fun exifThumbnail(item: MediaItem, headerExif: ExifInterface?): ByteArray? {
         if (item.isVideo) return null
-        val prefix = readPrefix(item.displayUrl(host), EXIF_PREFIX_BYTES) ?: return null
-        val thumbnail = try {
-            ExifInterface(java.io.ByteArrayInputStream(prefix)).thumbnailBytes
-        } catch (e: Exception) {
-            null
-        }
-        if (thumbnail == null && exifReports < DIAGNOSTIC_REPORTS) {
+        val thumbnail = runCatching { headerExif?.thumbnailBytes }.getOrNull()
+        if (thumbnail == null && headerExif != null && exifReports < DIAGNOSTIC_REPORTS) {
             exifReports++
-            // Detto una volta sola e con i numeri in mano: senza, «non si vedono le anteprime»
-            // resta indistinguibile da «la camera non risponde».
-            log.warn(
-                "Nessuna anteprima EXIF in ${item.name}: letti ${prefix.size} byte, " +
-                    "inizio ${Hex.encode(prefix.copyOfRange(0, minOf(8, prefix.size)))}"
-            )
+            // Detto una volta sola: senza, «non si vedono le anteprime» resta indistinguibile
+            // da «la camera non risponde».
+            log.warn("Nessuna anteprima EXIF in ${item.name}")
         }
         return thumbnail
     }
@@ -557,7 +568,9 @@ class MediaRepository(
 
     fun localFile(path: String): File = File(filesDir, path.replace('/', '_'))
 
-    private fun thumbFile(item: MediaItem): File = File(thumbsDir, item.path.replace('/', '_') + ".jpg")
+    // Il suffisso di versione invalida le miniature salvate prima della rotazione EXIF:
+    // erano sdraiate su disco, e nessuna correzione al volo le avrebbe raddrizzate.
+    private fun thumbFile(item: MediaItem): File = File(thumbsDir, item.path.replace('/', '_') + "-r2.jpg")
 
     /** Nuovo tentativo per le miniature che erano fallite: lo chiede chi preme «Aggiorna». */
     fun retryThumbnails() {
@@ -699,11 +712,17 @@ class MediaRepository(
  * miniatura e l'anteprima escono sdraiate — e l'unione riceverebbe fotogrammi coricati, che è
  * anche peggio.
  */
-internal fun applyExifOrientation(bitmap: android.graphics.Bitmap, exif: androidx.exifinterface.media.ExifInterface): android.graphics.Bitmap {
-    val orientation = exif.getAttributeInt(
-        androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
-        androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL,
+internal fun applyExifOrientation(bitmap: android.graphics.Bitmap, exif: androidx.exifinterface.media.ExifInterface): android.graphics.Bitmap =
+    applyOrientationValue(
+        bitmap,
+        exif.getAttributeInt(
+            androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL,
+        ),
     )
+
+/** Come sopra, ma con il valore dell'orientamento già in mano (letto da un altro file). */
+internal fun applyOrientationValue(bitmap: android.graphics.Bitmap, orientation: Int): android.graphics.Bitmap {
     val matrix = android.graphics.Matrix()
     when (orientation) {
         androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)

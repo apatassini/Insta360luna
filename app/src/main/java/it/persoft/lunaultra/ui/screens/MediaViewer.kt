@@ -98,6 +98,9 @@ fun MediaViewer(
     ImmersiveWhileOpen()
 
     var chromeVisible by remember { mutableStateOf(true) }
+    // Il video parte da solo e si comanda col tocco: al centro pausa/riparte, ai lati si
+    // cambia file. Il pulsante nero in mezzo alla scena era l'unica cosa che si vedeva.
+    var videoPlaying by remember(item.path) { mutableStateOf(true) }
     var scale by remember(item.path) { mutableFloatStateOf(1f) }
     var offset by remember(item.path) { mutableStateOf(Offset.Zero) }
     val sphere = remember(item.path) { SphereState() }
@@ -155,6 +158,7 @@ fun MediaViewer(
                         !moved -> when {
                             down.position.x < width * EDGE_FRACTION -> onStep(-1)
                             down.position.x > width * (1f - EDGE_FRACTION) -> onStep(1)
+                            item.isVideo -> videoPlaying = !videoPlaying
                             else -> chromeVisible = !chromeVisible
                         }
 
@@ -188,7 +192,7 @@ fun MediaViewer(
                     },
             )
 
-            state.videoFile != null -> VideoPlayer(path = state.videoFile)
+            state.videoFile != null -> VideoPlayer(path = state.videoFile, playing = videoPlaying)
 
             state.loading -> Column(
                 modifier = Modifier.fillMaxSize(),
@@ -340,8 +344,7 @@ private fun ImmersiveWhileOpen() {
 }
 
 @Composable
-private fun VideoPlayer(path: String) {
-    var playing by remember { mutableStateOf(true) }
+private fun VideoPlayer(path: String, playing: Boolean) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -358,12 +361,6 @@ private fun VideoPlayer(path: String) {
                 if (playing && !view.isPlaying) view.start()
                 if (!playing && view.isPlaying) view.pause()
             },
-        )
-        HudIconButton(
-            icon = if (playing) LunaIcons.Stop else LunaIcons.Play,
-            contentDescription = if (playing) "Pausa" else "Riproduci",
-            onClick = { playing = !playing },
-            size = 56.dp,
         )
     }
 }

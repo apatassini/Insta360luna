@@ -51,12 +51,24 @@ data class RunState(
      * mentre si scatta e accoppiarli in ordine con i file nuovi trovati alla fine.
      */
     val shotAngles: List<ShotAngle> = emptyList(),
+    /**
+     * Secondi che mancano alla fine, misurati e non calcolati.
+     *
+     * Il tempo di uno scatto non si conosce prima: dipende da quanto lontano è il punto
+     * successivo e da quanto ci mette la camera a scrivere il file. Si stima quindi sulla media
+     * degli scatti già fatti, e finché non ce n'è nessuno vale la cadenza nota della camera.
+     */
+    val secondsRemaining: Float? = null,
+    /** Scatti che la camera non ha eseguito: la panoramica avrà un buco lì. */
+    val shotsMissed: Int = 0,
 ) {
     val running: Boolean get() = phase == RunPhase.PREPARING || phase == RunPhase.RUNNING || phase == RunPhase.STOPPING
     val overallProgress: Float
         get() = when {
+            // Anche uno scatto perso è un passo fatto: la barra segue il percorso, non il
+            // raccolto, altrimenti si ferma proprio quando qualcosa va storto.
             mode == ShootingMode.FOTO && shotsPlanned > 0 ->
-                (shotsTaken.toFloat() / shotsPlanned).coerceIn(0f, 1f)
+                ((shotsTaken + shotsMissed).toFloat() / shotsPlanned).coerceIn(0f, 1f)
 
             totalSeconds > 0f -> (elapsedSeconds / totalSeconds).coerceIn(0f, 1f)
             else -> 0f
@@ -301,15 +313,21 @@ class TimelapseEngine(
     private suspend fun runPhotos(sequence: TimelapseSequence) {
         val shotsPerLeg = sequence.effectiveShotsPerLeg()
         val planned = sequence.totalShots()
-        val durations = sequence.legDurations()
         var taken = 0
+        var missed = 0
+        val startedAtMs = System.currentTimeMillis()
 
-        log.info("Modalità foto: $planned scatti, $shotsPerLeg per tratto")
+        log.info(
+            "Modalità foto: $planned scatti, $shotsPerLeg per tratto",
+            "Stima iniziale %s, alla cadenza di %.1f s per scatto.".format(
+                formatSeconds(planned * NOMINAL_SHOT_SECONDS),
+                NOMINAL_SHOT_SECONDS,
+            ),
+        )
 
         for (legIndex in 0 until sequence.legCount) {
             val from = sequence.waypoints[legIndex]
             val to = sequence.waypoints[legIndex + 1]
-            val moveSeconds = durations[legIndex] / (shotsPerLeg - 1)
 
             for (shot in 0 until shotsPerLeg) {
                 if (!currentCoroutineContext().isActive) return
@@ -320,6 +338,8 @@ class TimelapseEngine(
                 val targetPan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation)
                 val targetTilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation)
 
+                val done = taken + missed
+                val remaining = estimateRemaining(startedAtMs, done, planned)
                 _state.value = _state.value.copy(
                     phase = RunPhase.RUNNING,
                     legIndex = legIndex,
@@ -328,7 +348,10 @@ class TimelapseEngine(
                     targetTilt = targetTilt,
                     shotsTaken = taken,
                     shotsPlanned = planned,
-                    message = "In posizione per lo scatto ${taken + 1}/$planned",
+                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                    secondsRemaining = remaining,
+                    shotsMissed = missed,
+                    message = "In posizione per lo scatto ${done + 1}/$planned",
                 )
 
                 // Fra fotografie conta ridurre il tempo morto: il dominante viaggia al 100%.
@@ -339,30 +362,15 @@ class TimelapseEngine(
                 // Il gimbal deve essere davvero fermo prima dello scatto.
                 delay((sequence.settleSeconds * 1000).toLong().coerceAtLeast(0L))
 
-                _state.value = _state.value.copy(message = "Scatto ${taken + 1}/$planned")
-                var stored = false
-                commands.takePicture()
-                    .onSuccess {
-                        stored = true
-                        log.info("Scatto ${taken + 1}/$planned a %.1f° / %.1f°".format(targetPan, targetTilt))
-                    }
-                    .onFailure { log.warn("Scatto ${taken + 1} non riuscito: ${it.message}") }
+                _state.value = _state.value.copy(message = "Scatto ${done + 1}/$planned")
+                val stored = shootOnce(done + 1, planned, targetPan, targetTilt)
 
-                // Il comando risponde appena la camera lo accetta, non quando il file è sulla
-                // scheda: fra le due cose passa più di un secondo su una foto da otto megapixel.
-                // Andare avanti sulla risposta significa chiedere lo scatto successivo mentre il
-                // precedente si sta ancora scrivendo, e la camera lo lascia cadere senza dirlo.
-                if (stored && !commands.awaitCaptureIdle()) {
-                    log.warn(
-                        "Scatto ${taken + 1}: la camera è rimasta occupata",
-                        "Vado avanti lo stesso, ma questo scatto potrebbe non essere stato salvato.",
-                    )
-                }
-
-                taken++
+                if (stored) taken++ else missed++
                 _state.value = _state.value.copy(
                     shotsTaken = taken,
-                    elapsedSeconds = taken * (moveSeconds + sequence.settleSeconds),
+                    shotsMissed = missed,
+                    elapsedSeconds = (System.currentTimeMillis() - startedAtMs) / 1000f,
+                    secondsRemaining = estimateRemaining(startedAtMs, taken + missed, planned),
                     // Solo gli scatti riusciti: un angolo senza foto sfaserebbe
                     // l'accoppiamento fra angoli e file, e l'unione metterebbe ogni
                     // fotogramma nel posto del successivo.
@@ -374,6 +382,89 @@ class TimelapseEngine(
                 )
             }
         }
+
+        val elapsed = (System.currentTimeMillis() - startedAtMs) / 1000f
+        _state.value = _state.value.copy(elapsedSeconds = elapsed, secondsRemaining = 0f)
+        if (missed > 0) {
+            log.warn(
+                "$taken scatti su $planned in ${formatSeconds(elapsed)}",
+                "$missed non sono riusciti nemmeno riprovando: l'unione avrà dei buchi.",
+            )
+        } else {
+            log.info(
+                "$taken scatti su $planned in ${formatSeconds(elapsed)}",
+                "%.1f s per scatto.".format(if (taken > 0) elapsed / taken else 0f),
+            )
+        }
+    }
+
+    /**
+     * Uno scatto, con un secondo tentativo se la camera lo lascia cadere.
+     *
+     * La camera accetta il comando e risponde subito, ma il file lo scrive dopo: fra le due cose
+     * passa più di un secondo. Chi va avanti sulla risposta chiede lo scatto successivo mentre il
+     * precedente si sta ancora salvando, e la camera lo perde senza dirlo — in una panoramica di
+     * 23 scatti se ne erano salvati 13, e le foto rimaste non erano più accoppiabili agli angoli.
+     *
+     * Il ritmo che la camera regge è noto: otto scatti in venti secondi, cioè uno ogni due secondi
+     * e mezzo. Non è quindi un limite da rispettare aspettando a vuoto, è un limite da rispettare
+     * aspettando *la camera*: si aspetta che torni libera, e appena lo è si riparte. Se non lo
+     * torna entro il tempo massimo, o se il comando non ha risposta, si riprova una volta sola —
+     * un buco in mezzo a una panoramica costa più di due secondi persi.
+     */
+    private suspend fun shootOnce(
+        number: Int,
+        planned: Int,
+        panDegrees: Float,
+        tiltDegrees: Float,
+    ): Boolean {
+        repeat(SHOT_ATTEMPTS) { attempt ->
+            if (!currentCoroutineContext().isActive) return false
+            val retry = attempt > 0
+            if (retry) {
+                _state.value = _state.value.copy(message = "Riprovo lo scatto $number/$planned")
+                log.warn("Scatto $number: riprovo")
+                delay(SHOT_RETRY_DELAY_MS)
+            }
+
+            var accepted = false
+            commands.takePicture()
+                .onSuccess { accepted = true }
+                .onFailure { log.warn("Scatto $number non riuscito: ${it.message}") }
+            if (!accepted) return@repeat
+
+            if (commands.awaitCaptureIdle()) {
+                log.info("Scatto $number/$planned a %.1f° / %.1f°".format(panDegrees, tiltDegrees))
+                return true
+            }
+            log.warn(
+                "Scatto $number: la camera è rimasta occupata",
+                "Il file potrebbe non essere stato salvato.",
+            )
+        }
+        log.warn(
+            "Scatto $number/$planned saltato",
+            "A %.1f° / %.1f° non c'è foto: l'unione avrà un buco lì.".format(panDegrees, tiltDegrees),
+        )
+        return false
+    }
+
+    /**
+     * Quanto manca, sulla media di quello che è già successo.
+     *
+     * Prima del primo scatto non c'è media, e vale la cadenza nota della camera; dopo, il tempo
+     * vero comprende già gli spostamenti e le attese, quindi è una stima migliore di qualunque
+     * calcolo fatto sui gradi.
+     */
+    private fun estimateRemaining(startedAtMs: Long, done: Int, planned: Int): Float {
+        val left = (planned - done).coerceAtLeast(0)
+        if (left == 0) return 0f
+        val perShot = if (done > 0) {
+            (System.currentTimeMillis() - startedAtMs) / 1000f / done
+        } else {
+            NOMINAL_SHOT_SECONDS
+        }
+        return left * perShot
     }
 
     /** Avvicinamento progressivo a una posizione, con il gimbal fermato all'arrivo. */
@@ -621,6 +712,19 @@ class TimelapseEngine(
     }
 
     private companion object {
+        /**
+         * Il ritmo che la camera regge davvero: otto scatti in venti secondi.
+         *
+         * È una misura fatta sulla camera, non una scelta. Serve solo a dire quanto manca prima
+         * che ci sia uno scatto vero su cui fare la media: il ritmo effettivo lo detta la camera,
+         * che viene aspettata scatto per scatto.
+         */
+        const val NOMINAL_SHOT_SECONDS = 2.5f
+
+        /** Uno scatto perso lascia un buco nell'unione: vale un secondo tentativo, non di più. */
+        const val SHOT_ATTEMPTS = 2
+        const val SHOT_RETRY_DELAY_MS = 700L
+
         const val MOVE_TICK_HZ = 10
         const val MIN_APPROACH_SECONDS = 1f
         const val PRE_RECORD_SETTLE_MS = 500L
@@ -642,4 +746,10 @@ class TimelapseEngine(
         const val MIN_CORRECTION_PULSE_MS = 160L
         const val MAX_CORRECTION_PULSE_MS = 600L
     }
+}
+
+/** Secondi in forma leggibile: sotto il minuto i secondi, sopra minuti e secondi. */
+private fun formatSeconds(seconds: Float): String {
+    val total = seconds.roundToInt().coerceAtLeast(0)
+    return if (total < 60) "${total}s" else "%d:%02d".format(total / 60, total % 60)
 }

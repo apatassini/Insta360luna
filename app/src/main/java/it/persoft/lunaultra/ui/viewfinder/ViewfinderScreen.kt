@@ -186,9 +186,24 @@ fun ViewfinderScreen(
                     modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp),
                 )
 
-                // In panoramica la pastiglia è la scelta fra sferica e 2:1: è l'unica
-                // impostazione che cambia il risultato dello scatto, e si tocca lì.
-                if (captureMode.hasPanoAspect) {
+                // Questa riga dice cosa succede premendo lo scatto: è l'informazione che
+                // cambia il risultato, e si tocca per andare dove si cambia.
+                if (captureMode.plansPanorama) {
+                    // La panoramica dell'app parte da qui, quindi da qui si deve leggere *quale*
+                    // parte: tutta la corsa oppure i gradi scelti.
+                    InfoPill(
+                        text = if (sequence.panoramaSpherical) {
+                            "sferica"
+                        } else {
+                            "${sequence.panoramaHorizontalDegrees.roundToInt()}°"
+                        },
+                        icon = LunaIcons.Panorama,
+                        color = captureMode.color,
+                        onClick = { onOpenPanel(Panel.PANORAMA) },
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 70.dp),
+                    )
+                } else if (captureMode.hasPanoAspect) {
+                    // Nella panoramica della camera l'unica scelta è fra sferica e 2:1.
                     val spherical = settings.panoAspect == LunaProtocolCodes.PanoAspect.SPHERE_360
                     InfoPill(
                         text = if (spherical) "sferica 360°" else "panorama 2:1",
@@ -471,8 +486,9 @@ private fun infoPillText(
     CaptureMode.SEQUENZA_FOTO -> "attesa ${trim(settleSeconds)} s"
     CaptureMode.TIMELAPSE, CaptureMode.SEQUENZA_TL -> "intervallo ${trim(intervalSeconds)} s"
     CaptureMode.SEQUENZA_VIDEO -> "durata ${totalSeconds.roundToInt()} s"
+    // La panoramica dell'app ha una pastiglia sua, scritta dove si legge cosa partirà.
     CaptureMode.FOTO, CaptureMode.VIDEO, CaptureMode.PURE_VIDEO,
-    CaptureMode.SLOW_MOTION, CaptureMode.PANORAMA -> null
+    CaptureMode.SLOW_MOTION, CaptureMode.PANORAMA, CaptureMode.PANORAMICA_APP -> null
 }
 
 private fun trim(value: Float): String =

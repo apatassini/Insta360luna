@@ -188,6 +188,20 @@ fun RunCard(
             color = Luna.OnSurfaceDim,
         )
 
+        // Quanto manca e cosa non è riuscito: le due cose che si vogliono sapere guardando
+        // la camera lavorare, senza dover andare a leggere il log.
+        run.secondsRemaining?.takeIf { it > 0f }?.let { remaining ->
+            Text(
+                text = buildString {
+                    append("Mancano ${formatPathSeconds(remaining)}")
+                    if (run.shotsMissed == 1) append("  ·  1 scatto perso")
+                    if (run.shotsMissed > 1) append("  ·  ${run.shotsMissed} scatti persi")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (run.shotsMissed > 0) Luna.Warn else Luna.OnSurfaceDim,
+            )
+        }
+
         run.message?.let {
             Text(text = it, style = MaterialTheme.typography.labelSmall, color = Luna.OnSurfaceDim)
         }

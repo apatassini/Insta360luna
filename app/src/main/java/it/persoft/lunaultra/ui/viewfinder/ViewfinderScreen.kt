@@ -82,6 +82,7 @@ fun ViewfinderScreen(
     val photoCountdown by viewModel.photoCountdownSeconds.collectAsState()
     val calibration by viewModel.gimbalCalibration.collectAsState()
     val stitch by viewModel.stitchState.collectAsState()
+    val panoJobs by viewModel.panoJobs.collectAsState()
 
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var gridVisible by rememberSaveable { mutableStateOf(false) }
@@ -89,6 +90,7 @@ fun ViewfinderScreen(
     var modeSheetOpen by remember { mutableStateOf(false) }
     var photoSheetOpen by remember { mutableStateOf(false) }
     var videoSheetOpen by remember { mutableStateOf(false) }
+    var jobsSheetOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(captureMode) {
         if (!captureMode.cameraMode.isPhoto) photoSheetOpen = false
@@ -172,6 +174,7 @@ fun ViewfinderScreen(
                                 modeSheetOpen -> modeSheetOpen = false
                                 photoSheetOpen -> photoSheetOpen = false
                                 videoSheetOpen -> videoSheetOpen = false
+                                jobsSheetOpen -> jobsSheetOpen = false
                                 !chromeVisible -> chromeVisible = true
                                 else -> Unit
                             }
@@ -291,16 +294,6 @@ fun ViewfinderScreen(
                 )
             }
 
-            if (run.running) {
-                RunCard(
-                    run = run,
-                    mode = captureMode,
-                    saving = cameraSaving,
-                    onStop = viewModel::emergencyStop,
-                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
-                )
-            }
-
             if (photoCountdown > 0) {
                 PhotoCountdown(photoCountdown, modifier = Modifier.align(Alignment.Center))
             }
@@ -316,6 +309,22 @@ fun ViewfinderScreen(
                     onExposureBias = viewModel::setPhotoExposureBias,
                     onWhiteBalance = viewModel::setPhotoWhiteBalance,
                     onClose = { photoSheetOpen = false },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                )
+            }
+
+            if (jobsSheetOpen && chromeVisible) {
+                PanoJobsSheet(
+                    jobs = panoJobs.jobs,
+                    busy = stitch is it.persoft.lunaultra.stitch.StitchUiState.Working,
+                    onRun = {
+                        jobsSheetOpen = false
+                        viewModel.runPanoJob(it)
+                    },
+                    onCancel = viewModel::cancelPanoJob,
+                    onClose = { jobsSheetOpen = false },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
@@ -416,10 +425,16 @@ fun ViewfinderScreen(
                             modeSheetOpen = false
                         }
                     },
-                    onOpenAutomations = { onOpenPanel(Panel.SEQUENCE) },
+                    onOpenJobs = {
+                        jobsSheetOpen = !jobsSheetOpen
+                        photoSheetOpen = false
+                        videoSheetOpen = false
+                        modeSheetOpen = false
+                    },
                     onOpenGallery = { onOpenPanel(Panel.GALLERY) },
                     vertical = landscape,
                     latestThumb = latestThumb,
+                    pendingJobs = panoJobs.jobs.size,
                 )
             }
 
@@ -450,11 +465,16 @@ fun ViewfinderScreen(
         // panoramica da ventiquattro scatti dura due minuti, e per due minuti chi guarda deve
         // sapere a che punto è e poter fermare. Sotto, l'esito dell'unione — che è la cosa che
         // può andare storta *dopo* che gli scatti sono riusciti, e che finiva solo nel log.
+        // Appoggiate a destra: a sinistra ci sono i distintivi di scheda e batteria, e le
+        // carte ci finivano sopra.
         Column(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = topInset + if (chromeVisible) TopBandHeight + 8.dp else 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .align(Alignment.TopEnd)
+                .padding(
+                    top = topInset + if (chromeVisible) TopBandHeight + 8.dp else 12.dp,
+                    end = 12.dp,
+                ),
+            horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (run.running) {

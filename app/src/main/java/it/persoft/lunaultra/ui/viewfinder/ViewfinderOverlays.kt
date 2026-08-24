@@ -59,7 +59,7 @@ fun StitchCard(
     if (state is StitchUiState.Idle) return
     val accent = when (state) {
         is StitchUiState.Failed -> Luna.Rec
-        is StitchUiState.Done -> Luna.Ok
+        is StitchUiState.Done, is StitchUiState.Queued -> Luna.Ok
         else -> Luna.Multi
     }
     GlassPanel(
@@ -77,6 +77,7 @@ fun StitchCard(
                 imageVector = when (state) {
                     is StitchUiState.Failed -> LunaIcons.Warning
                     is StitchUiState.Done -> LunaIcons.Check
+                    is StitchUiState.Queued -> LunaIcons.Jobs
                     else -> LunaIcons.Panorama
                 },
                 contentDescription = null,
@@ -87,6 +88,7 @@ fun StitchCard(
                 text = when (state) {
                     is StitchUiState.Failed -> "PANORAMICA NON UNITA"
                     is StitchUiState.Done -> "PANORAMICA UNITA"
+                    is StitchUiState.Queued -> "PANORAMICA IN CODA"
                     else -> "UNISCO LE FOTO"
                 },
                 style = MaterialTheme.typography.labelLarge,
@@ -118,6 +120,13 @@ fun StitchCard(
             is StitchUiState.Done -> Text(
                 text = "${state.fileName} · ${state.report.canvasWidth}×${state.report.canvasHeight} px " +
                     "· in DCIM › Luna Ultra",
+                style = MaterialTheme.typography.bodySmall,
+                color = Luna.OnSurfaceDim,
+            )
+
+            is StitchUiState.Queued -> Text(
+                text = "${state.count} scatti al sicuro sul telefono. Unisci quando vuoi, " +
+                    "dalla scheda dei lavori in basso a destra.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Luna.OnSurfaceDim,
             )

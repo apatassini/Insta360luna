@@ -65,11 +65,12 @@ fun CaptureBar(
     onCaptureWaypoint: () -> Unit,
     onRemoveLastWaypoint: () -> Unit,
     onOpenCameraSettings: () -> Unit,
-    onOpenAutomations: () -> Unit,
+    onOpenJobs: () -> Unit,
     onOpenGallery: () -> Unit,
     vertical: Boolean,
     modifier: Modifier = Modifier,
     latestThumb: android.graphics.Bitmap? = null,
+    pendingJobs: Int = 0,
 ) {
     if (vertical) {
         Column(
@@ -98,12 +99,13 @@ fun CaptureBar(
                     size = 36.dp,
                 )
                 HudIconButton(
-                    icon = LunaIcons.Sequence,
-                    contentDescription = "Automazioni del gimbal",
-                    onClick = onOpenAutomations,
+                    icon = LunaIcons.Jobs,
+                    contentDescription = "Panoramiche da unire",
+                    onClick = onOpenJobs,
                     size = 36.dp,
-                    selected = selected.usesSequence,
-                    activeColor = Luna.Path,
+                    badge = pendingJobs.takeIf { it > 0 }?.toString(),
+                    selected = pendingJobs > 0,
+                    activeColor = Luna.Pano,
                 )
             }
             ShutterButton(
@@ -153,13 +155,17 @@ fun CaptureBar(
                     onClick = onOpenCameraSettings,
                     size = 42.dp,
                 )
+                // Qui prima c'era un doppione del pulsante del percorso, che vive già nella
+                // pastiglia centrale: al suo posto la scheda dei lavori — le panoramiche
+                // scattate che aspettano di essere unite.
                 HudIconButton(
-                    icon = LunaIcons.Sequence,
-                    contentDescription = "Automazioni del gimbal",
-                    onClick = onOpenAutomations,
+                    icon = LunaIcons.Jobs,
+                    contentDescription = "Panoramiche da unire",
+                    onClick = onOpenJobs,
                     size = 42.dp,
-                    selected = selected.usesSequence,
-                    activeColor = Luna.Path,
+                    badge = pendingJobs.takeIf { it > 0 }?.toString(),
+                    selected = pendingJobs > 0,
+                    activeColor = Luna.Pano,
                 )
             }
         }

@@ -18,6 +18,8 @@ import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
+import it.persoft.lunaultra.stitch.PanoJob
+import it.persoft.lunaultra.stitch.PanoJobList
 import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.stitch.sphericalCoverage
 import it.persoft.lunaultra.preview.PreviewState
@@ -293,6 +295,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var photoCountdownJob: Job? = null
 
     private var pollJob: Job? = null
+
+    /** Il campionatore del diario delle posizioni: gira solo mentre si è connessi. */
+    private var locationJob: Job? = null
     private var viewerJob: Job? = null
     private var prefetchJob: Job? = null
     private var warmJob: Job? = null
@@ -338,6 +343,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         container.media.list().onSuccess { noteNewestPhoto(it) }
                     }
                     stitchPanoramaIfRequested(state.shotAngles)
+                    returnGimbalAfterPanorama()
                 }
                 // L'ultimo scatto non ha un seguito che spenga l'avviso: la notifica dice
                 // «scrittura» e poi la camera tace, quindi lo spegne la fine della corsa.
@@ -554,6 +560,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             connectionState.collect { state ->
                 pollJob?.cancel()
+                locationJob?.cancel()
                 when (state) {
                     ConnectionState.CONNECTED -> {
                         reconnectAttempts = 0
@@ -582,6 +589,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         _status.value = _status.value.mergedWith(it)
                                         syncRecordingClock()
                                     }
+                            }
+                        }
+                        // Finché si è connessi si sta fotografando: il diario annota dove,
+                        // così le copie scaricate ricevono le coordinate negli EXIF.
+                        locationJob = viewModelScope.launch {
+                            while (isActive) {
+                                container.locationDiary.sample()
+                                delay(LOCATION_SAMPLE_MS)
                             }
                         }
                     }
@@ -1227,6 +1242,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var filesBeforePanorama: List<MediaItem> = emptyList()
     private var stitchJob: Job? = null
 
+    /** Dove guardava il gimbal prima della panoramica: a corsa finita ci si torna. */
+    private var panoramaReturnPosition: Pair<Float, Float>? = null
+
+    /**
+     * Riporta il gimbal all'inquadratura di prima della panoramica.
+     *
+     * Una panoramica finisce sempre nell'ultimo angolo del giro, che non è mai quello che
+     * interessa: chi aveva inquadrato una scena se la ritrova, senza dover ricomporre a mano.
+     * Vale solo per le corse del pianificatore — le sequenze disegnate a mano finiscono dove
+     * il loro autore ha deciso che finiscano.
+     */
+    private fun returnGimbalAfterPanorama() {
+        val target = panoramaReturnPosition ?: return
+        panoramaReturnPosition = null
+        if (!sequence.value.waypoints.all { it.generatedByPanoramaPlanner }) return
+        viewModelScope.launch {
+            container.gimbal.moveToPositionAtMaximum(target.first, target.second)
+                .onSuccess {
+                    container.log.info(
+                        "Gimbal tornato all'inquadratura di partenza (%.1f° / %.1f°)"
+                            .format(target.first, target.second),
+                    )
+                }
+                .onFailure {
+                    container.log.warn("Ritorno all'inquadratura di partenza non riuscito: ${it.message}")
+                }
+        }
+    }
+
     /** Chiude la carta dell'unione: l'errore resta finché non lo si è letto. */
     fun clearStitchState() {
         _stitchState.value = StitchUiState.Idle
@@ -1253,6 +1297,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         createPanoramaPlan()
         if (sequence.value.waypoints.size < 2) return
         _stitchState.value = StitchUiState.Idle
+        // Dove sta guardando adesso: a panoramica finita si torna qui, perché chi ha
+        // inquadrato una scena non vuole ritrovarsi il gimbal puntato nell'ultimo angolo.
+        panoramaReturnPosition = ptz.value.pan to ptz.value.tilt
         viewModelScope.launch {
             filesBeforePanorama = if (sequence.value.autoStitchPanorama) {
                 container.media.list().getOrElse { emptyList() }
@@ -1402,11 +1449,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Unisce gli scatti appena finiti, se erano di una panoramica e l'unione è accesa.
+     * Mette in coda gli scatti appena finiti, se erano di una panoramica e l'opzione è accesa.
      *
-     * Viene chiamata quando la corsa passa a completata. Il campo visivo è quello dell'obiettivo
-     * con cui si è scattato — zoom e rapporto attuali — perché è quello che decide come vanno
-     * deformati i fotogrammi per rimetterli sulla sfera.
+     * Non unisce più subito: scarica gli scatti in `DCIM › Luna Ultra › Panoramiche`, li marca
+     * con il passaporto EXIF, e registra un job. Unire sono minuti di calcolo e possono
+     * aspettare la sera; scaricare no, va fatto finché la camera è a portata di Wi-Fi. Chi
+     * scatta riprende subito a fare altro, e i job si lanciano dalla scheda in basso a destra.
      */
     private fun stitchPanoramaIfRequested(shots: List<ShotAngle>) {
         val seq = sequence.value
@@ -1415,12 +1463,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (stitchJob?.isActive == true) return
         val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, seq.panoramaAspect)
         val before = filesBeforePanorama
+        val spherical = seq.panoramaSpherical
         stitchJob = viewModelScope.launch {
             _stitchState.value = StitchUiState.Working(0f, "Aspetto che la camera finisca di salvare")
             // La camera scrive i file dopo aver risposto allo scatto: chiedere l'elenco appena
-            // finita la sequenza vuol dire contarne meno di quanti ce ne sono, e l'unione si
-            // rifiuta di partire perché angoli e file non tornano. Si aspetta che il conto
-            // smetta di crescere, che è il solo modo di sapere che ha finito davvero.
+            // finita la sequenza vuol dire contarne meno di quanti ce ne sono. Si aspetta che
+            // il conto smetta di crescere, che è il solo modo di sapere che ha finito davvero.
             val expected = shots.mapNotNull { it.uri?.substringAfterLast('/') }
                 .takeIf { it.size == shots.size }
                 .orEmpty()
@@ -1429,23 +1477,94 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _stitchState.value = StitchUiState.Failed("Elenco dei file non disponibile: ${it.message}")
                 return@launch
             }
-            container.stitchJob.run(
+            val panoramaId = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+            container.stitchJob.collectForJob(
                 before = before,
                 after = after,
                 angles = shots,
                 horizontalFovDegrees = fov.horizontalDegrees,
-                fillNadir = seq.panoramaSpherical,
+                panoramaId = panoramaId,
                 onProgress = { fraction, message ->
                     _stitchState.value = StitchUiState.Working(fraction, message)
                 },
-            ).onSuccess {
-                _stitchState.value = it
-                showMessage("Panoramica unita: ${it.fileName}")
+            ).onSuccess { files ->
+                container.panoJobStore.update { list ->
+                    list.copy(
+                        jobs = list.jobs + PanoJob(
+                            id = panoramaId,
+                            createdAtMs = System.currentTimeMillis(),
+                            files = files.map { it.absolutePath },
+                            fovDegrees = fov.horizontalDegrees,
+                            spherical = spherical,
+                        ),
+                    )
+                }
+                _stitchState.value = StitchUiState.Queued(panoramaId, files.size)
+                showMessage("Panoramica in coda: ${files.size} scatti al sicuro sul telefono")
             }.onFailure {
-                _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita")
-                showMessage("Panoramica non unita: ${it.message}")
+                _stitchState.value = StitchUiState.Failed(it.message ?: "scaricamento non riuscito")
+                showMessage("Panoramica non messa in coda: ${it.message}")
             }
         }
+    }
+
+    /** I lavori in attesa, per la scheda dei job nel mirino. */
+    val panoJobs: StateFlow<PanoJobList> = container.panoJobStore.state
+
+    /**
+     * Lancia l'unione di un job: la parte lenta, quando lo decide chi ha scattato.
+     *
+     * Le foto portano il passaporto EXIF, quindi ordine e angoli sono esatti. Solo se tutto
+     * va a buon fine gli scatti temporanei si cancellano e il job sparisce; un'unione fallita
+     * lascia tutto com'era, pronta per riprovare.
+     */
+    fun runPanoJob(job: PanoJob) {
+        if (stitchJob?.isActive == true) {
+            showMessage("Un'unione è già in corso")
+            return
+        }
+        stitchJob = viewModelScope.launch {
+            val files = job.files.map { java.io.File(it) }.filter { it.exists() && it.length() > 0 }
+            if (files.size < 2) {
+                _stitchState.value = StitchUiState.Failed(
+                    "Del job restano ${files.size} foto su ${job.files.size}: non si può unire. " +
+                        "Se le hai spostate, riportale in DCIM › Luna Ultra › Panoramiche.",
+                )
+                return@launch
+            }
+            _stitchState.value = StitchUiState.Working(0f, "Unisco le ${files.size} foto del job")
+            container.stitchJob.runOnFiles(
+                files = files,
+                horizontalFovDegrees = job.fovDegrees,
+                overlapPercent = sequence.value.panoramaOverlapPercent,
+                fillNadir = job.spherical,
+                shotAtMs = job.createdAtMs,
+                onProgress = { fraction, message ->
+                    _stitchState.value = StitchUiState.Working(fraction, message)
+                },
+            ).onSuccess { done ->
+                // Solo a panoramica salvata: via gli scatti temporanei, via il job.
+                withContext(Dispatchers.IO) {
+                    container.stitchJob.discardJobFiles(files.map { it.absolutePath })
+                }
+                container.panoJobStore.update { list ->
+                    list.copy(jobs = list.jobs.filterNot { it.id == job.id })
+                }
+                _stitchState.value = done
+                showMessage("Panoramica unita: ${done.fileName}")
+            }.onFailure {
+                _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita")
+            }
+        }
+    }
+
+    /** Annulla un job: sparisce dall'elenco, le foto restano dove sono. */
+    fun cancelPanoJob(job: PanoJob) {
+        container.panoJobStore.update { list ->
+            list.copy(jobs = list.jobs.filterNot { it.id == job.id })
+        }
+        showMessage("Job annullato: le foto restano in DCIM › Luna Ultra › Panoramiche")
     }
 
     fun setStartHoldSeconds(seconds: Float) =
@@ -2686,6 +2805,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val STATUS_POLL_MS = 3_000L
+
+        /** Ogni quanto il diario delle posizioni annota dove sta il telefono, da connessi. */
+        const val LOCATION_SAMPLE_MS = 5 * 60_000L
 
         /**
          * Quanto il guardiano concede alla camera per scrivere uno scatto prima di dichiararla

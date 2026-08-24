@@ -29,6 +29,9 @@ sealed interface StitchUiState {
     data class Working(val fraction: Float, val message: String) : StitchUiState
     data class Done(val fileName: String, val report: StitchReport) : StitchUiState
     data class Failed(val reason: String) : StitchUiState
+
+    /** Scatti scaricati e messi da parte: l'unione partirà quando la si lancia dai job. */
+    data class Queued(val jobId: String, val count: Int) : StitchUiState
 }
 
 /**
@@ -54,6 +57,7 @@ class PanoramaStitchJob(
     private val context: Context,
     private val media: MediaRepository,
     private val log: EventLog,
+    private val locations: it.persoft.lunaultra.media.LocationDiary? = null,
 ) {
 
     suspend fun run(
@@ -107,6 +111,97 @@ class PanoramaStitchJob(
     }
 
     /**
+     * Scarica e marca gli scatti di una panoramica appena fatta, senza unirli: il job aspetta.
+     *
+     * L'unione sono minuti di calcolo e può aspettare la sera; lo scaricamento no, va fatto
+     * finché la camera è lì. Gli scatti finiscono in `DCIM › Luna Ultra › Panoramiche/<id>`,
+     * ognuno con il passaporto negli EXIF (id, ordine, angoli esatti): da quel momento il job
+     * si unisce da solo quando lo si lancia, anche dopo un riavvio dell'app.
+     */
+    suspend fun collectForJob(
+        before: List<MediaItem>,
+        after: List<MediaItem>,
+        angles: List<ShotAngle>,
+        horizontalFovDegrees: Float,
+        panoramaId: String,
+        onProgress: (Float, String) -> Unit,
+    ): Result<List<File>> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(angles.size >= 2) { "La panoramica ha prodotto meno di due scatti" }
+            val paired = pairByUri(after, angles) ?: pairByArrival(before, after, angles)
+            val dir = jobDirFor(panoramaId)
+            val files = paired.mapIndexed { index, (item, angle) ->
+                val target = File(dir, item.name)
+                media.downloadInto(item, target) { fraction ->
+                    onProgress(
+                        (index + fraction) / paired.size,
+                        "Scarico lo scatto ${index + 1} di ${paired.size}",
+                    )
+                }.getOrElse { throw IllegalStateException("Scaricamento di ${item.name} non riuscito: ${it.message}") }
+                PanoTags.write(
+                    target,
+                    PanoTag(
+                        panoramaId = panoramaId,
+                        index = index + 1,
+                        count = paired.size,
+                        panDegrees = angle.panDegrees,
+                        tiltDegrees = angle.tiltDegrees,
+                        fovDegrees = horizontalFovDegrees,
+                    ),
+                )
+                locations?.stampFile(target, item.takenAtMs)
+                target
+            }
+            MediaScannerConnection.scanFile(
+                context,
+                files.map { it.absolutePath }.toTypedArray(),
+                null,
+                null,
+            )
+            log.info(
+                "PANORAMICA MESSA IN CODA",
+                "${files.size} scatti in ${dir.path}. L'unione parte dalla scheda dei job, quando si vuole.",
+            )
+            files
+        }.onFailure { log.warn("PANORAMICA NON MESSA IN CODA", it.message) }
+    }
+
+    /**
+     * La cartella degli scatti di un job: visibile e fuori dalla cache, perché deve durare.
+     *
+     * Prima scelta `DCIM › Luna Ultra › Panoramiche/<id>` — dove l'utente la vede e la
+     * ritrova. Su Android 10, l'unica versione che nega la scrittura diretta in DCIM, si
+     * ripiega sulla memoria esterna dell'app: il job funziona uguale, solo meno in vista.
+     */
+    private fun jobDirFor(panoramaId: String): File {
+        val public = File(
+            File(Environment.getExternalStoragePublicDirectory(GALLERY_ROOT), GALLERY_FOLDER),
+            "$JOB_FOLDER/$panoramaId",
+        )
+        if (public.isDirectory || public.mkdirs()) return public
+        val fallback = File(context.getExternalFilesDir(null), "$JOB_FOLDER/$panoramaId")
+        fallback.mkdirs()
+        log.warn("Cartella pubblica dei job non scrivibile: uso ${fallback.path}")
+        return fallback
+    }
+
+    /**
+     * Butta via gli scatti temporanei di un job riuscito, e la loro cartella se resta vuota.
+     *
+     * Si chiama solo a panoramica salvata: finché l'unione non è andata a buon fine gli
+     * scatti non si toccano, e un job annullato li lascia dove sono.
+     */
+    fun discardJobFiles(paths: List<String>) {
+        val files = paths.map(::File)
+        files.forEach { runCatching { it.delete() } }
+        files.mapNotNull { it.parentFile }.distinct().forEach { dir ->
+            if (dir.list()?.isEmpty() == true) runCatching { dir.delete() }
+        }
+        // La galleria di sistema va avvisata: senza, mostrerebbe miniature di file spariti.
+        MediaScannerConnection.scanFile(context, paths.toTypedArray(), null, null)
+    }
+
+    /**
      * Unisce dei file già sul telefono, nell'ordine dato, come una fila orizzontale.
      *
      * È il banco di prova dell'unione: si lavora sugli scatti che ci sono già, senza rifare la
@@ -119,6 +214,8 @@ class PanoramaStitchJob(
         files: List<File>,
         horizontalFovDegrees: Float,
         overlapPercent: Int,
+        fillNadir: Boolean = false,
+        shotAtMs: Long = System.currentTimeMillis(),
         onProgress: (Float, String) -> Unit,
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
@@ -145,7 +242,7 @@ class PanoramaStitchJob(
                     "Panorama ${ordered.first().second!!.panoramaId}: ${shots.size} foto con angoli " +
                         "esatti dai tag EXIF. Niente ipotesi, ricerca stretta.",
                 )
-                return@runCatching stitchAndSave(shots, fov, fillNadir = false, onProgress = onProgress)
+                return@runCatching stitchAndSave(shots, fov, fillNadir = fillNadir, shotAtMs = shotAtMs, onProgress = onProgress)
             }
 
             val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
@@ -163,7 +260,7 @@ class PanoramaStitchJob(
                 "${files.size} foto nell'ordine dato · passo assunto %.1f° (FOV %.1f°, sovrapposizione $overlapPercent%%)"
                     .format(stepDegrees, horizontalFovDegrees),
             )
-            stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, wideSearch = true, onProgress = onProgress)
+            stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, wideSearch = true, shotAtMs = shotAtMs, onProgress = onProgress)
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
     }
 
@@ -173,6 +270,7 @@ class PanoramaStitchJob(
         horizontalFovDegrees: Float,
         fillNadir: Boolean,
         wideSearch: Boolean = false,
+        shotAtMs: Long = System.currentTimeMillis(),
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
         val stitcher = PanoramaStitcher(onProgress)
@@ -185,7 +283,7 @@ class PanoramaStitchJob(
                     "alla posizione ipotizzata: lì la panoramica è incollata a secco.",
             )
         }
-        val name = save(outcome.bitmap)
+        val name = save(outcome.bitmap, shotAtMs)
         outcome.bitmap.recycle()
 
         log.info(
@@ -280,19 +378,19 @@ class PanoramaStitchJob(
      * Finisce in DCIM › Luna Ultra, la stessa cartella dove vanno le foto scaricate dalla
      * camera: la panoramica unita e gli scatti che l'hanno generata stanno insieme.
      */
-    private fun save(bitmap: Bitmap): String {
+    private fun save(bitmap: Bitmap, shotAtMs: Long): String {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ITALY).format(Date())
         val name = "Panorama_Luna_$stamp.jpg"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            saveToMediaStore(name, bitmap)
+            saveToMediaStore(name, bitmap, shotAtMs)
         } else {
-            saveToPublicDirectory(name, bitmap)
+            saveToPublicDirectory(name, bitmap, shotAtMs)
         }
         return name
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    private fun saveToMediaStore(name: String, bitmap: Bitmap) {
+    private fun saveToMediaStore(name: String, bitmap: Bitmap, shotAtMs: Long) {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -308,16 +406,27 @@ class PanoramaStitchJob(
             requireNotNull(output) { "Non riesco a scrivere nella galleria" }
             bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, output)
         }
+        // La panoramica eredita le coordinate del momento in cui è stata *scattata*:
+        // il job può girare giorni dopo, ma il posto è quello degli scatti.
+        locations?.let { diary ->
+            runCatching {
+                resolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
+                    val exif = androidx.exifinterface.media.ExifInterface(descriptor.fileDescriptor)
+                    if (diary.stamp(exif, shotAtMs)) exif.saveAttributes()
+                }
+            }
+        }
         values.clear()
         values.put(MediaStore.Images.Media.IS_PENDING, 0)
         resolver.update(uri, values, null, null)
     }
 
-    private fun saveToPublicDirectory(name: String, bitmap: Bitmap) {
+    private fun saveToPublicDirectory(name: String, bitmap: Bitmap, shotAtMs: Long) {
         val root = Environment.getExternalStoragePublicDirectory(GALLERY_ROOT)
         val directory = File(root, GALLERY_FOLDER).apply { mkdirs() }
         val target = File(directory, name)
         FileOutputStream(target).use { bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
+        locations?.stampFile(target, shotAtMs)
         // Prima di Android 10 un file appena scritto non compare finché qualcuno non lo
         // segnala: senza questa riga la panoramica esisterebbe ma la galleria non la vedrebbe.
         MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), arrayOf("image/jpeg"), null)

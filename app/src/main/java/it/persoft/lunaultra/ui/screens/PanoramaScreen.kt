@@ -354,9 +354,10 @@ fun PanoramaScreen(viewModel: MainViewModel) {
             )
 
             ToggleRow(
-                title = "Unisci da sola alla fine",
-                subtitle = "Scarica gli scatti, li rimette sulla sfera secondo l'obiettivo, " +
-                    "sfuma le giunzioni e salva la panoramica nella galleria del telefono.",
+                title = "Prepara il lavoro di unione alla fine",
+                subtitle = "Scarica gli scatti in DCIM › Luna Ultra › Panoramiche con angoli e " +
+                    "ordine scritti negli EXIF, e mette l'unione in coda: la lanci quando " +
+                    "vuoi dalla scheda dei lavori nel mirino, anche a fine giornata.",
                 checked = sequence.autoStitchPanorama,
                 onCheckedChange = viewModel::setAutoStitchPanorama,
             )
@@ -400,6 +401,19 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                     }
                     LabeledValue("Salvata come", state.fileName, valueColor = Luna.Ok)
                     Hint("La trovi in DCIM › Luna Ultra, nella galleria del telefono.")
+                }
+
+                is StitchUiState.Queued -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "PANORAMICA IN CODA",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Luna.Ok,
+                    )
+                    Text(
+                        "${state.count} scatti al sicuro sul telefono, con angoli e ordine negli EXIF.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Hint("Lancia l'unione quando vuoi dalla scheda dei lavori nel mirino.")
                 }
 
                 is StitchUiState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

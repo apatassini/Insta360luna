@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Panorama
+import androidx.compose.material.icons.filled.PendingActions
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -75,6 +76,9 @@ object LunaIcons {
     val MotionTimelapse: ImageVector = Icons.Filled.Timer
     val MotionVideo: ImageVector = Icons.Filled.Route
     val Panorama: ImageVector = Icons.Filled.Panorama
+
+    /** I lavori in attesa: le panoramiche scattate e non ancora unite. */
+    val Jobs: ImageVector = Icons.Filled.PendingActions
 
     // stato camera
     val Battery: ImageVector = Icons.Filled.BatteryFull

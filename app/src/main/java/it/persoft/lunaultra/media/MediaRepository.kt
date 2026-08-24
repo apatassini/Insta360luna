@@ -69,6 +69,7 @@ class MediaRepository(
     private val settings: StateFlow<AppSettings>,
     private val binder: SocketBinder?,
     private val log: EventLog,
+    private val locations: LocationDiary? = null,
 ) {
 
     private val appContext = context.applicationContext
@@ -202,10 +203,13 @@ class MediaRepository(
 
         var needsRotation = true
         var bytes = exifThumbnail(item, headerExif) ?: fromCameraThumbnail(item)
-            ?: fromExtraThumbnail(item)
         if (bytes == null) {
+            // Dall'anteprima grezza in giù niente rotazione. Quella del canale extra il
+            // firmware la salva già dritta, orientata come la foto si guarda: applicarle
+            // anche la rotazione EXIF dell'originale raddrizzava le orizzontali (rotazione
+            // nulla) e coricava le verticali (rotazione fatta due volte).
             needsRotation = false
-            bytes = fromVideoProxy(item) ?: fromFullFile(item)
+            bytes = fromExtraThumbnail(item) ?: fromVideoProxy(item) ?: fromFullFile(item)
         }
         var bitmap = bytes?.let { decodeBytes(it, THUMBNAIL_SIZE) }
         if (bitmap != null && needsRotation) {
@@ -493,6 +497,30 @@ class MediaRepository(
             .onFailure { log.warn("Scaricamento di $path non riuscito nemmeno al secondo tentativo: ${it.message}") }
     }
 
+    /**
+     * Scarica un file della camera in un percorso scelto dal chiamante.
+     *
+     * Serve ai job delle panoramiche: gli scatti finiscono in una cartella visibile e
+     * duratura, non nella cache, perché devono aspettare — anche giorni — che qualcuno
+     * decida di unirli.
+     */
+    suspend fun downloadInto(
+        item: MediaItem,
+        target: File,
+        onProgress: (Float) -> Unit = {},
+    ): Result<File> = withContext(Dispatchers.IO) {
+        if (target.exists() && target.length() > 0) {
+            onProgress(1f)
+            return@withContext Result.success(target)
+        }
+        val url = item.displayUrl(host)
+        runCatching { downloadTo(url, target, onProgress) }
+            .recoverCatching { first ->
+                log.warn("Scaricamento di ${item.name} non riuscito: ${first.message}", "Riprovo una volta.")
+                downloadTo(url, target, onProgress)
+            }
+    }
+
     /** Scarica una risorsa in un file locale, passando da un file parziale. */
     private fun downloadTo(url: String, target: File, onProgress: (Float) -> Unit = {}): File {
         filesDir.mkdirs()
@@ -587,7 +615,11 @@ class MediaRepository(
                 } else {
                     writeToPublicDirectory(item) { output -> copy(stream, output, length, onProgress) }
                 }
-                log.info("Salvato ${item.name} nella galleria del telefono")
+                val gps = embedGps(uri, item)
+                log.info(
+                    "Salvato ${item.name} nella galleria del telefono" +
+                        if (gps) " · con le coordinate del diario" else "",
+                )
                 uri
             } finally {
                 connection?.disconnect()
@@ -621,6 +653,34 @@ class MediaRepository(
         return uri
     }
 
+    /**
+     * Le coordinate del diario entrano nella copia appena scritta, se il formato le regge.
+     *
+     * Solo i JPEG: il DNG non si riscrive senza corromperlo e i video non hanno EXIF. La
+     * posizione è quella annotata più vicina all'ora dello scatto, non a quella dello
+     * scaricamento: una foto scaricata la sera riceve le coordinate della spiaggia, non del
+     * divano. Se il diario non ha niente di abbastanza vicino, meglio nessuna coordinata di
+     * una sbagliata.
+     */
+    private fun embedGps(uri: Uri, item: MediaItem): Boolean {
+        val diary = locations ?: return false
+        if (item.isVideo || item.extension !in setOf("jpg", "jpeg")) return false
+        return runCatching {
+            if (uri.scheme == "file") {
+                return@runCatching diary.stampFile(File(uri.path!!), item.takenAtMs)
+            }
+            appContext.contentResolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
+                val exif = ExifInterface(descriptor.fileDescriptor)
+                if (!diary.stamp(exif, item.takenAtMs)) return@use false
+                exif.saveAttributes()
+                true
+            } ?: false
+        }.getOrElse {
+            log.warn("GPS non scritto in ${item.name}: ${it.message}")
+            false
+        }
+    }
+
     /** Prima di Android 10 la galleria è una cartella, e va segnalata allo scanner dei media. */
     private fun writeToPublicDirectory(item: MediaItem, write: (OutputStream) -> Unit): Uri {
         val root = Environment.getExternalStoragePublicDirectory(GALLERY_ROOT)
@@ -635,9 +695,10 @@ class MediaRepository(
 
     fun localFile(path: String): File = File(filesDir, path.replace('/', '_'))
 
-    // Il suffisso di versione invalida le miniature salvate prima della rotazione EXIF:
-    // erano sdraiate su disco, e nessuna correzione al volo le avrebbe raddrizzate.
-    private fun thumbFile(item: MediaItem): File = File(thumbsDir, item.path.replace('/', '_') + "-r2.jpg")
+    // Il suffisso di versione invalida le miniature salvate con una rotazione sbagliata:
+    // erano storte su disco, e nessuna correzione al volo le avrebbe raddrizzate.
+    // r3: le anteprime del canale extra arrivano già dritte e non vanno ruotate.
+    private fun thumbFile(item: MediaItem): File = File(thumbsDir, item.path.replace('/', '_') + "-r3.jpg")
 
     /** Nuovo tentativo per le miniature che erano fallite: lo chiede chi preme «Aggiorna». */
     fun retryThumbnails() {

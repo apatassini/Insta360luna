@@ -12,7 +12,10 @@ import it.persoft.lunaultra.gimbal.GimbalCalibrator
 import it.persoft.lunaultra.gimbal.GimbalLimitMonitor
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.CameraWriteProbe
+import it.persoft.lunaultra.media.LocationDiary
 import it.persoft.lunaultra.media.MediaRepository
+import it.persoft.lunaultra.media.PositionLog
+import it.persoft.lunaultra.stitch.PanoJobList
 import it.persoft.lunaultra.stitch.PanoramaStitchJob
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.net.TcpClient
@@ -68,18 +71,38 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val gimbalLimits = GimbalLimitMonitor(session.notifications, scope)
     val calibrator = GimbalCalibrator(gimbal, gimbalLimits, preview, calibrationStore, log, scope)
     val engine = TimelapseEngine(commands, gimbal, preview, settingsStore.state, calibrationStore.state, log, scope)
-    val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log)
+
+    /** Dove stava il telefono e quando: le coordinate da scrivere negli EXIF delle copie. */
+    val positionStore = JsonFileStore(
+        file = File(appContext.filesDir, "positions.json"),
+        serializer = PositionLog.serializer(),
+        default = PositionLog(),
+        scope = scope,
+    )
+    val locationDiary = LocationDiary(appContext, positionStore, log)
+
+    val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log, locationDiary)
 
     /** Risponde alla domanda «si può scrivere sulla scheda della camera?» provandoci. */
     val writeProbe = CameraWriteProbe(wifiBinder, log)
 
     /** Dagli scatti di una panoramica alla panoramica unita nella galleria del telefono. */
-    val stitchJob = PanoramaStitchJob(appContext, media, log)
+    val stitchJob = PanoramaStitchJob(appContext, media, log, locationDiary)
+
+    /** Le panoramiche scattate e non ancora unite: scaricate, marcate, in attesa del via. */
+    val panoJobStore = JsonFileStore(
+        file = File(appContext.filesDir, "pano_jobs.json"),
+        serializer = PanoJobList.serializer(),
+        default = PanoJobList(),
+        scope = scope,
+    )
 
     suspend fun load() {
         settingsStore.load()
         sequenceStore.load()
         calibrationStore.load()
         favoritesStore.load()
+        panoJobStore.load()
+        positionStore.load()
     }
 }

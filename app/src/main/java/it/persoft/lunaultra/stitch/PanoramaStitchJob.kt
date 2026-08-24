@@ -433,6 +433,9 @@ class PanoramaStitchJob(
     }
 
     private companion object {
+        /** La sottocartella degli scatti in attesa: separa i job dalle foto scaricate. */
+        const val JOB_FOLDER = "Panoramiche"
+
         /** Quanta parte dell'avanzamento è scaricamento: il resto è l'unione vera. */
         const val DOWNLOAD_SHARE = 0.35f
 

@@ -159,8 +159,9 @@ fun ViewfinderScreen(
             GridOverlay(modifier = Modifier.fillMaxSize().then(areaPadding))
         }
 
-        // Il tocco sull'immagine mostra e nasconde le fasce: sta sotto ai comandi, quindi
-        // premere un pulsante non le fa sparire.
+        // Il tocco singolo chiude la maschera aperta, e basta: capitava di sfiorare lo
+        // schermo e ritrovarsi la foto a tutto schermo senza capire perché. Lo schermo
+        // intero è una scelta, e si fa con il doppio tocco.
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -171,9 +172,11 @@ fun ViewfinderScreen(
                                 modeSheetOpen -> modeSheetOpen = false
                                 photoSheetOpen -> photoSheetOpen = false
                                 videoSheetOpen -> videoSheetOpen = false
-                                else -> chromeVisible = !chromeVisible
+                                !chromeVisible -> chromeVisible = true
+                                else -> Unit
                             }
                         },
+                        onDoubleTap = { chromeVisible = !chromeVisible },
                     )
                 },
         )

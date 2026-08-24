@@ -99,6 +99,8 @@ fun VideoControlsSheet(
     )
 
     GlassPanel(
+        // Opaca: quando questa maschera è aperta si guarda lei, non quello che c'è sotto.
+        background = it.persoft.lunaultra.ui.theme.Luna.Surface,
         modifier = modifier.fillMaxWidth().widthIn(max = 460.dp),
         contentPadding = 12.dp,
         verticalSpacing = 8.dp,

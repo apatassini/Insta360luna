@@ -97,14 +97,31 @@ class PanoramaStitcher(
             onProgress(0.10f, "Allineo i fotogrammi")
             val refinement = refine(frames, placements, lens, canvas)
             placements = refinement.placements
+            frames.forEach { it.releaseAlignmentData() }
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
-            val bitmap = compose(frames, placements, lens, canvas)
+            var bitmap = compose(frames, placements, lens, canvas)
             val patchedRows = if (fillNadir) {
                 onProgress(0.97f, "Chiudo il buco sotto")
                 fillNadirHole(bitmap)
             } else {
                 0
+            }
+
+            // I bordi neri non sono la panoramica: sono la tela rettangolare attorno a una
+            // copertura che non lo è. Si ritagliano, tranne che sulla sferica: lì la tela 2:1
+            // È il formato, e chi la guarda a 360° la vuole intera.
+            val notes = refinement.notes.toMutableList()
+            if (!fillNadir) {
+                onProgress(0.98f, "Ritaglio il nero ai bordi")
+                val before = "${bitmap.width}×${bitmap.height}"
+                bitmap = cropBlackEdges(
+                    bitmap,
+                    allowColumns = canvas.horizontalDegrees < PanoramaCanvas.FULL_TURN_DEGREES - 0.5f,
+                )
+                if ("${bitmap.width}×${bitmap.height}" != before) {
+                    notes += "Ritaglio: da $before a ${bitmap.width}×${bitmap.height}, via il nero ai bordi"
+                }
             }
 
             frames.forEach { it.bitmap.recycle() }
@@ -113,11 +130,11 @@ class PanoramaStitcher(
                 bitmap = bitmap,
                 report = StitchReport(
                     frames = frames.size,
-                    canvasWidth = canvas.width,
-                    canvasHeight = canvas.height,
+                    canvasWidth = bitmap.width,
+                    canvasHeight = bitmap.height,
                     coverageHorizontalDegrees = canvas.horizontalDegrees,
                     coverageVerticalDegrees = canvas.verticalDegrees,
-                    refinements = refinement.notes,
+                    refinements = notes,
                     worstCorrectionDegrees = refinement.worstCorrection,
                     nadirPatchRows = patchedRows,
                 ),
@@ -132,12 +149,23 @@ class PanoramaStitcher(
         val width get() = bitmap.width
         val height get() = bitmap.height
 
+        private var grayCache: FloatArray? = null
+        private var levelsCache: List<GrayLevel>? = null
+
         /** La luminanza, calcolata una volta: l'allineamento lavora qui sopra. */
-        val gray: FloatArray by lazy {
-            FloatArray(pixels.size) { i ->
+        val gray: FloatArray
+            get() = grayCache ?: FloatArray(pixels.size) { i ->
                 val c = pixels[i]
                 0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
-            }
+            }.also { grayCache = it }
+
+        /**
+         * L'allineamento è finito: luminanza e piramide non servono più, e sono decine di
+         * megabyte a fotogramma che la fusione vuole per sé.
+         */
+        fun releaseAlignmentData() {
+            grayCache = null
+            levelsCache = null
         }
 
         /**
@@ -149,7 +177,10 @@ class PanoramaStitcher(
          * convinzione. A un ottavo della risoluzione il pettine è una massa unica, e resta solo
          * il combaciamento vero. La ricerca parte da lì e si raffina scendendo.
          */
-        val grayLevels: List<GrayLevel> by lazy {
+        val grayLevels: List<GrayLevel>
+            get() = levelsCache ?: buildLevels().also { levelsCache = it }
+
+        private fun buildLevels(): List<GrayLevel> {
             val levels = ArrayList<GrayLevel>(PYRAMID_LEVELS)
             levels += GrayLevel(gray, width, height)
             while (levels.size < PYRAMID_LEVELS) {
@@ -171,7 +202,7 @@ class PanoramaStitcher(
                 }
                 levels += GrayLevel(data, nw, nh)
             }
-            levels
+            return levels
         }
     }
 
@@ -190,8 +221,25 @@ class PanoramaStitcher(
             inSampleSize = sampleSizeFor(bounds.outWidth, WORKING_LONG_SIDE)
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        val bitmap = BitmapFactory.decodeFile(shot.file.absolutePath, options)
+        val decoded = BitmapFactory.decodeFile(shot.file.absolutePath, options)
             ?: throw IllegalStateException("Non riesco a leggere ${shot.file.name}")
+        // Il decodificatore riduce solo per potenze di due: una foto da 4000 pixel scende a
+        // 2000, non a 1600, e quel 25% in più di lato è il 56% in più di memoria — che
+        // moltiplicato per cinque foto è la differenza fra unire e morire di memoria.
+        val longSide = max(decoded.width, decoded.height)
+        val bitmap = if (longSide > WORKING_LONG_SIDE) {
+            val scale = WORKING_LONG_SIDE.toFloat() / longSide
+            val scaled = Bitmap.createScaledBitmap(
+                decoded,
+                (decoded.width * scale).roundToInt().coerceAtLeast(1),
+                (decoded.height * scale).roundToInt().coerceAtLeast(1),
+                true,
+            )
+            decoded.recycle()
+            scaled
+        } else {
+            decoded
+        }
         val pixels = IntArray(bitmap.width * bitmap.height)
         bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         Frame(bitmap, pixels, shot.label)
@@ -734,10 +782,10 @@ class PanoramaStitcher(
         val count = bw * bh
         val columns = IntArray(bw) { bx -> ((c0 + bx) % canvas.width + canvas.width) % canvas.width }
 
-        // Il fotogramma nuovo, proiettato nel ritaglio.
-        val newR = FloatArray(count)
-        val newG = FloatArray(count)
-        val newB = FloatArray(count)
+        // Il fotogramma nuovo, proiettato nel ritaglio. Colori impacchettati e non canali in
+        // virgola mobile: la fusione lavora un canale alla volta proprio per non tenere in
+        // memoria tre piani di float per due immagini insieme.
+        val newColor = IntArray(count)
         val newW = FloatArray(count)
         for (by in 0 until bh) {
             val latitude = canvas.latitudeAt(row0 + by)
@@ -750,9 +798,10 @@ class PanoramaStitcher(
                 val color = sample(frame, point.x, point.y)
                 val i = by * bw + bx
                 newW[i] = weight
-                newR[i] = (gain * ((color shr 16) and 0xFF)).coerceIn(0f, 255f)
-                newG[i] = (gain * ((color shr 8) and 0xFF)).coerceIn(0f, 255f)
-                newB[i] = (gain * (color and 0xFF)).coerceIn(0f, 255f)
+                val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                newColor[i] = (r shl 16) or (g shl 8) or b
             }
         }
 
@@ -767,25 +816,16 @@ class PanoramaStitcher(
             }
         }
 
-        val baseR = FloatArray(count)
-        val baseG = FloatArray(count)
-        val baseB = FloatArray(count)
+        val baseColor = IntArray(count)
         val mask = FloatArray(count)
         var hasOverlap = false
         for (i in 0 until count) {
-            val old = oldColor[i]
-            baseR[i] = ((old shr 16) and 0xFF).toFloat()
-            baseG[i] = ((old shr 8) and 0xFF).toFloat()
-            baseB[i] = (old and 0xFF).toFloat()
+            baseColor[i] = oldColor[i] and 0xFFFFFF
             when {
                 newW[i] <= 0f && oldW[i] <= 0f -> Unit
-                newW[i] <= 0f -> {
-                    // Solo la tela: il nuovo si riempie con il vecchio, così le sue bande
-                    // larghe non trascinano dentro il nero fuori campo.
-                    newR[i] = baseR[i]; newG[i] = baseG[i]; newB[i] = baseB[i]
-                }
+                newW[i] <= 0f -> newColor[i] = baseColor[i]
                 oldW[i] <= 0f -> {
-                    baseR[i] = newR[i]; baseG[i] = newG[i]; baseB[i] = newB[i]
+                    baseColor[i] = newColor[i]
                     mask[i] = 1f
                 }
                 else -> {
@@ -795,44 +835,38 @@ class PanoramaStitcher(
             }
         }
 
-        // I punti che nessuno copre restano neri sulla tela, ma dentro le piramidi il nero
-        // sanguinerebbe nelle bande larghe e scurirebbe il bordo vero della panoramica: si
-        // riempiono con il colore valido più vicino, solo per la durata della fusione.
-        val valid = BooleanArray(count) { newW[it] > 0f || oldW[it] > 0f }
-        fillHoles(baseR, valid, bw, bh)
-        fillHoles(baseG, valid, bw, bh)
-        fillHoles(baseB, valid, bw, bh)
-        for (i in 0 until count) {
-            if (!valid[i]) {
-                newR[i] = baseR[i]; newG[i] = baseG[i]; newB[i] = baseB[i]
-            }
-        }
-
         val outColor = IntArray(count)
         if (!hasOverlap) {
             // Nessuna sovrapposizione: si dipinge e basta.
             for (i in 0 until count) {
-                outColor[i] = if (newW[i] > 0f) {
-                    (0xFF shl 24) or (newR[i].toChannel() shl 16) or (newG[i].toChannel() shl 8) or newB[i].toChannel()
-                } else {
-                    oldColor[i]
-                }
+                outColor[i] = if (newW[i] > 0f) 0xFF000000.toInt() or newColor[i] else oldColor[i]
             }
         } else {
-            val blended = MultibandBlender.blend(
-                baseChannels = arrayOf(baseR, baseG, baseB),
-                overlayChannels = arrayOf(newR, newG, newB),
-                mask = mask,
-                width = bw,
-                height = bh,
-            )
-            for (i in 0 until count) {
-                outColor[i] = if (newW[i] <= 0f && oldW[i] <= 0f) {
-                    oldColor[i]
-                } else {
-                    (0xFF shl 24) or (blended[0][i].toChannel() shl 16) or
-                        (blended[1][i].toChannel() shl 8) or blended[2][i].toChannel()
+            // I punti che nessuno copre restano neri sulla tela, ma dentro le piramidi il nero
+            // sanguinerebbe nelle bande larghe e scurirebbe il bordo vero della panoramica: si
+            // riempiono con il colore valido più vicino, solo per la durata della fusione.
+            val valid = BooleanArray(count) { newW[it] > 0f || oldW[it] > 0f }
+            fillHoles(baseColor, valid, bw, bh)
+            for (i in 0 until count) if (!valid[i]) newColor[i] = baseColor[i]
+
+            // Un canale per volta: la memoria della fusione è un piano, non tre.
+            java.util.Arrays.fill(outColor, 0xFF000000.toInt())
+            for (shift in intArrayOf(16, 8, 0)) {
+                val baseChannel = FloatArray(count) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
+                val overChannel = FloatArray(count) { ((newColor[it] shr shift) and 0xFF).toFloat() }
+                val blended = MultibandBlender.blend(
+                    baseChannels = arrayOf(baseChannel),
+                    overlayChannels = arrayOf(overChannel),
+                    mask = mask,
+                    width = bw,
+                    height = bh,
+                )[0]
+                for (i in 0 until count) {
+                    outColor[i] = outColor[i] or (blended[i].toChannel() shl shift)
                 }
+            }
+            for (i in 0 until count) {
+                if (newW[i] <= 0f && oldW[i] <= 0f) outColor[i] = oldColor[i]
             }
         }
 
@@ -852,38 +886,46 @@ class PanoramaStitcher(
     }
 
     /**
-     * Riempie i punti non validi con il valore valido più vicino sulla riga (e poi sulla
-     * colonna, per le righe completamente vuote). Non è interpolazione fine: serve solo a non
-     * far entrare il nero fuori campo nelle bande larghe della fusione.
+     * Riempie i punti non validi con il colore valido più vicino sulla riga (e poi sulla
+     * colonna, per le righe completamente vuote). Non è interpolazione: copia il vicino, e
+     * serve solo a non far entrare il nero fuori campo nelle bande larghe della fusione.
      */
-    private fun fillHoles(channel: FloatArray, valid: BooleanArray, width: Int, height: Int) {
+    private fun fillHoles(colors: IntArray, valid: BooleanArray, width: Int, height: Int) {
+        val filled = BooleanArray(colors.size)
         for (y in 0 until height) {
             val base = y * width
-            var lastValue = Float.NaN
+            var last = -1
             for (x in 0 until width) {
                 val i = base + x
-                if (valid[i]) lastValue = channel[i] else if (!lastValue.isNaN()) channel[i] = lastValue
+                if (valid[i]) {
+                    last = colors[i]
+                    filled[i] = true
+                } else if (last >= 0) {
+                    colors[i] = last
+                    filled[i] = true
+                }
             }
-            lastValue = Float.NaN
+            last = -1
             for (x in width - 1 downTo 0) {
                 val i = base + x
-                if (valid[i]) lastValue = channel[i]
-                else if (!lastValue.isNaN() && channel[i] == 0f) channel[i] = lastValue
+                if (valid[i]) last = colors[i]
+                else if (!filled[i] && last >= 0) {
+                    colors[i] = last
+                    filled[i] = true
+                }
             }
         }
-        // Le righe senza nemmeno un punto valido prendono dalla riga valida sopra o sotto.
+        // Le righe senza nemmeno un punto valido prendono dalla riga piena sopra o sotto.
         for (x in 0 until width) {
-            var lastValue = Float.NaN
+            var last = -1
             for (y in 0 until height) {
                 val i = y * width + x
-                if (valid[i]) lastValue = channel[i]
-                else if (channel[i] == 0f && !lastValue.isNaN()) channel[i] = lastValue
+                if (filled[i]) last = colors[i] else if (last >= 0) { colors[i] = last; filled[i] = true }
             }
-            lastValue = Float.NaN
+            last = -1
             for (y in height - 1 downTo 0) {
                 val i = y * width + x
-                if (valid[i]) lastValue = channel[i]
-                else if (channel[i] == 0f && !lastValue.isNaN()) channel[i] = lastValue
+                if (filled[i]) last = colors[i] else if (last >= 0) { colors[i] = last; filled[i] = true }
             }
         }
     }
@@ -1152,6 +1194,12 @@ class PanoramaStitcher(
 
         /** Il nero pieno che [compose] lascia dove nessun fotogramma copre. */
         const val EMPTY_PIXEL = 0xFF000000.toInt()
+
+        /** Sotto questa frazione di nero, una riga o colonna di bordo è pulita abbastanza. */
+        const val EDGE_EMPTY_TOLERANCE = 0.01f
+
+        /** Il ritaglio non mangia mai più di così: metà per dimensione resta sempre. */
+        const val MIN_CROP_KEEP = 0.5f
 
         /** Una riga con più buchi di così è già dentro il foro, non sul suo bordo. */
         const val MAX_EMPTY_FRACTION = 0.10f

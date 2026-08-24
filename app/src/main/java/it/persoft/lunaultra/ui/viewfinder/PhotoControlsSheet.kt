@@ -58,6 +58,8 @@ fun PhotoControlsSheet(
     var open by remember { mutableStateOf<PhotoControl?>(null) }
 
     GlassPanel(
+        // Opaca: quando questa maschera è aperta si guarda lei, non quello che c'è sotto.
+        background = it.persoft.lunaultra.ui.theme.Luna.Surface,
         modifier = modifier.fillMaxWidth().widthIn(max = 430.dp),
         contentPadding = 12.dp,
         verticalSpacing = 8.dp,

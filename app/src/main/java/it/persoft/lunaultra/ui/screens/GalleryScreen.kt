@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.ui.MainViewModel
+import it.persoft.lunaultra.ui.viewfinder.StitchCard
 import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.theme.Luna
@@ -79,6 +82,7 @@ private enum class GalleryFilter(val label: String) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun GalleryScreen(viewModel: MainViewModel) {
+    val stitch by viewModel.stitchState.collectAsState()
     val gallery by viewModel.gallery.collectAsState()
     val viewer by viewModel.viewer.collectAsState()
     val favorites by viewModel.favorites.collectAsState()
@@ -105,36 +109,67 @@ fun GalleryScreen(viewModel: MainViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                GalleryFilter.entries.forEachIndexed { index, entry ->
-                    val accent = if (entry == GalleryFilter.PREFERITI) Luna.Photo else Luna.Path
-                    // Il numero sul filtro evita di doverlo premere per scoprire che è vuoto.
-                    val count = when (entry) {
-                        GalleryFilter.TUTTO -> gallery.items.size
-                        GalleryFilter.FOTO -> gallery.photos
-                        GalleryFilter.VIDEO -> gallery.videos
-                        GalleryFilter.PREFERITI -> gallery.items.count { it.path in favorites }
+                // I filtri scorrono se non entrano: quattro pastiglie più «Aggiorna» su un
+                // telefono stretto sforavano, e la stella dei preferiti finiva fuori riga.
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    GalleryFilter.entries.forEachIndexed { index, entry ->
+                        val accent = if (entry == GalleryFilter.PREFERITI) Luna.Photo else Luna.Path
+                        // Il numero sul filtro evita di doverlo premere per scoprire che è vuoto.
+                        val count = when (entry) {
+                            GalleryFilter.TUTTO -> gallery.items.size
+                            GalleryFilter.FOTO -> gallery.photos
+                            GalleryFilter.VIDEO -> gallery.videos
+                            GalleryFilter.PREFERITI -> gallery.items.count { it.path in favorites }
+                        }
+                        FilterChip(
+                            selected = filterIndex == index,
+                            onClick = { filterIndex = index },
+                            label = {
+                                // Il preferiti parla con la stella: il conteggio basta.
+                                val text = if (entry == GalleryFilter.PREFERITI) {
+                                    if (count > 0) "$count" else ""
+                                } else {
+                                    if (count > 0) "${entry.label} $count" else entry.label
+                                }
+                                if (text.isNotEmpty()) Text(text)
+                            },
+                            leadingIcon = if (entry == GalleryFilter.PREFERITI) {
+                                {
+                                    Icon(
+                                        LunaIcons.Star,
+                                        contentDescription = "Preferiti",
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = accent.copy(alpha = 0.20f),
+                                selectedLabelColor = accent,
+                                selectedLeadingIconColor = accent,
+                            ),
+                        )
                     }
-                    FilterChip(
-                        selected = filterIndex == index,
-                        onClick = { filterIndex = index },
-                        label = { Text(if (count > 0) "${entry.label} $count" else entry.label) },
-                        leadingIcon = if (entry == GalleryFilter.PREFERITI) {
-                            { Icon(LunaIcons.Star, contentDescription = null, modifier = Modifier.size(15.dp)) }
-                        } else {
-                            null
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = accent.copy(alpha = 0.20f),
-                            selectedLabelColor = accent,
-                            selectedLeadingIconColor = accent,
-                        ),
-                    )
                 }
-                Box(modifier = Modifier.weight(1f))
                 TextButton(onClick = { viewModel.refreshGallery(force = true) }, enabled = !gallery.loading) {
                     ButtonLabel(LunaIcons.Refresh, "Aggiorna")
                 }
             }
+
+            // L'unione lavora anche da qui: la sua carta dice cosa sta facendo e com'è finita,
+            // senza dover tornare al mirino a controllare.
+            StitchCard(
+                state = stitch,
+                onDismiss = viewModel::clearStitchState,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            )
 
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),

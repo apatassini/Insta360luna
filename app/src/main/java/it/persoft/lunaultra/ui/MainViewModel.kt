@@ -330,7 +330,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         observeConnection()
         observeForegroundService()
         observeFinishedRuns()
-        observeStitchVitals()
     }
 
     /**
@@ -1607,6 +1606,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _stitchVitals = MutableStateFlow<StitchVitals?>(null)
     val stitchVitals: StateFlow<StitchVitals?> = _stitchVitals
     private var vitalsJob: Job? = null
+
+    /**
+     * La sottoscrizione parte da qui e non dall'`init` in cima, per la regola scritta lassù:
+     * un osservatore non può toccare proprietà dichiarate più in basso di dove parte. Questo
+     * legge `_stitchState`, che sta mille righe sopra ma pur sempre sotto quell'`init` —
+     * metterlo lì ha chiuso l'app all'avvio, esattamente come il commento avvertiva.
+     */
+    init {
+        observeStitchVitals()
+    }
 
     private fun observeStitchVitals() {
         viewModelScope.launch {

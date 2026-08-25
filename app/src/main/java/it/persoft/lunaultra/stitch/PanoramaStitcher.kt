@@ -272,13 +272,15 @@ class PanoramaStitcher(
                 projection = projection,
             )
             if (projection != tuning.projection && !fillNadir) {
+                val reach = verticalReach(placements, lens)
                 levelNotes += ("Proiezione: %s invece di %s — la panoramica arriva a %.0f° dall'orizzonte, " +
-                    "e oltre il limite della %s la tela si stira all'infinito e le file esterne " +
-                    "verrebbero schiacciate sull'ultima riga.").format(
+                    "dove la %s allargherebbe i pixel di %.1f volte in verticale: pixel che nelle " +
+                    "foto non ci sono e che la tela dovrebbe inventarsi.").format(
                     projection.label,
                     tuning.projection.label,
-                    verticalReach(placements, lens),
+                    reach,
                     tuning.projection.label.lowercase(),
+                    verticalStretch(tuning.projection, reach),
                 )
             }
 
@@ -432,6 +434,26 @@ class PanoramaStitcher(
      * alla prima che ce la fa — dicendolo nel log, perché un cambio silenzioso di proiezione
      * è esattamente il genere di cosa che poi non si spiega guardando il risultato.
      */
+    /**
+     * Di quanto una proiezione allarga il pixel più lontano dall'orizzonte.
+     *
+     * È il numero che conta davvero, e non è l'angolo: la cilindrica moltiplica la scala
+     * verticale per `1/cos²`, Mercatore per `1/cos`, l'equirettangolare per niente. A
+     * trentacinque gradi la cilindrica stira di una volta e mezza — si vede appena. A
+     * sessantacinque stira di **cinque volte e mezza**, e Mercatore di due e mezza: quei
+     * pixel la tela deve inventarseli, perché nella foto non ci sono. Il file diventa enorme
+     * e il dettaglio no — è esattamente l'aria di «risoluzione altissima e immagine molle».
+     */
+    private fun verticalStretch(projection: StitchProjection, reachDegrees: Float): Float {
+        val phi = min(reachDegrees, projection.limitDegrees - 0.5f).toRadians()
+        val secant = 1f / cos(phi).coerceAtLeast(1e-3f)
+        return when (projection) {
+            StitchProjection.EQUIRECTANGULAR -> 1f
+            StitchProjection.CYLINDRICAL -> secant * secant
+            StitchProjection.MERCATOR -> secant
+        }
+    }
+
     private fun projectionFor(
         placements: List<FramePlacement>,
         lens: PinholeLens,
@@ -441,13 +463,12 @@ class PanoramaStitcher(
         // visualizzatore 360° sa leggere.
         if (fillNadir) return StitchProjection.EQUIRECTANGULAR
         val reach = verticalReach(placements, lens)
-        val comfort = when (tuning.projection) {
-            StitchProjection.CYLINDRICAL -> CYLINDRICAL_COMFORT_DEGREES
-            StitchProjection.MERCATOR -> MERCATOR_COMFORT_DEGREES
-            StitchProjection.EQUIRECTANGULAR -> StitchProjection.EQUIRECTANGULAR.limitDegrees
+        if (verticalStretch(tuning.projection, reach) <= MAX_VERTICAL_STRETCH) return tuning.projection
+        if (tuning.projection == StitchProjection.CYLINDRICAL &&
+            verticalStretch(StitchProjection.MERCATOR, reach) <= MAX_VERTICAL_STRETCH
+        ) {
+            return StitchProjection.MERCATOR
         }
-        if (reach <= comfort) return tuning.projection
-        if (reach <= MERCATOR_COMFORT_DEGREES) return StitchProjection.MERCATOR
         return StitchProjection.EQUIRECTANGULAR
     }
 
@@ -876,12 +897,13 @@ class PanoramaStitcher(
             )
 
             /** Rimanda a dopo, se c'è ancora qualcuno che potrebbe diventare un vicino. */
-            fun postpone(reason: String) {
+            fun postpone(reason: String): Boolean {
                 if (postponed.add(index) && queue.isNotEmpty()) {
                     queue.addLast(index)
-                    return
+                    return true
                 }
                 notes += "${frames[index].label}: $reason"
+                return false
             }
 
             // I vicini **già allineati** più vicini in angolo: quello di fianco e, se c'è,
@@ -890,7 +912,7 @@ class PanoramaStitcher(
             val settled = aligned.indices.filter { aligned[it] }
             val anchors = anchorsOf(index, placements, lens, settled)
             if (anchors.isEmpty()) {
-                postpone("nessun vicino allineato con cui confrontarsi, resta dov'era")
+                postpone("nessun vicino allineato con cui confrontarsi, resta agli angoli del gimbal")
                 continue
             }
 
@@ -904,27 +926,39 @@ class PanoramaStitcher(
                     wideSearch = wideSearch,
                 )
             }
-            if (results.isEmpty()) {
-                postpone(
-                    "nessuna misura affidabile — o la sovrapposizione è troppo povera, o " +
-                        "l'unica risposta stava sul bordo della finestra di ricerca: resta " +
-                        "agli angoli del gimbal, che sono un dato",
+            if (results.isEmpty() && postpone(
+                    "la ricerca grossolana non ha trovato niente di affidabile: parte dagli " +
+                        "angoli del gimbal e rifinisce con i soli punti di controllo",
                 )
+            ) {
                 continue
             }
 
+            // Senza misura non si abbandona il fotogramma: si parte da dove dice il gimbal.
+            //
+            // Rinunciare qui era la trappola peggiore, e ci sono cascato: se la ricerca
+            // grossolana non sa dire niente si saltava il fotogramma **e con lui i punti di
+            // controllo, il rollio, la focale, la deformazione locale e la fotometria** —
+            // tutto spento insieme, come quando la soglia dei punti al cento per cento non
+            // lasciava passare nessuno. Il risultato è una panoramica incollata a secco.
+            //
+            // Ma gli angoli del gimbal sono una misura meccanica buona a un grado, e i punti
+            // di controllo cercano in sette decimi di grado: sono già alla scala giusta per
+            // finire il lavoro da soli. Quindi si parte da zero correzione e si va avanti.
+            val trusted = results.isNotEmpty()
+
             // Due vicini concordi si mediano; discordi, vince il più sicuro di sé.
-            val proposal = if (results.size == 2 &&
-                abs(results[0].panDegrees - results[1].panDegrees) < ANCHOR_AGREEMENT_DEGREES &&
-                abs(results[0].tiltDegrees - results[1].tiltDegrees) < ANCHOR_AGREEMENT_DEGREES
-            ) {
-                Offset(
-                    (results[0].panDegrees + results[1].panDegrees) / 2f,
-                    (results[0].tiltDegrees + results[1].tiltDegrees) / 2f,
-                    max(results[0].confidence, results[1].confidence),
-                )
-            } else {
-                results.maxByOrNull { it.confidence }!!
+            val proposal = when {
+                !trusted -> Offset(0f, 0f, 0f)
+                results.size == 2 &&
+                    abs(results[0].panDegrees - results[1].panDegrees) < ANCHOR_AGREEMENT_DEGREES &&
+                    abs(results[0].tiltDegrees - results[1].tiltDegrees) < ANCHOR_AGREEMENT_DEGREES ->
+                    Offset(
+                        (results[0].panDegrees + results[1].panDegrees) / 2f,
+                        (results[0].tiltDegrees + results[1].tiltDegrees) / 2f,
+                        max(results[0].confidence, results[1].confidence),
+                    )
+                else -> results.maxByOrNull { it.confidence }!!
             }
 
             // La rifinitura finale la fanno i punti di controllo: con il piazzamento globale
@@ -1016,7 +1050,10 @@ class PanoramaStitcher(
                 }
             }
 
-            aligned[index] = true
+            // Allineato vuol dire misurato da qualcuno: dalla ricerca grossolana, oppure dai
+            // punti di controllo. Se non l'ha fatto nessuno, il fotogramma sta dove dice il
+            // gimbal — che è la cosa giusta — ma la scheda deve dirlo.
+            aligned[index] = trusted || kept.size >= CONTROL_MIN_KEPT
             placements[index] = placements[index].copy(
                 panCorrectionDegrees = finalPan,
                 tiltCorrectionDegrees = finalTilt,
@@ -3739,14 +3776,15 @@ class PanoramaStitcher(
         const val MAX_PHOTO_GAIN = 2.0f
 
         /**
-         * Fin dove una proiezione si può usare senza che la tela cominci a mentire.
+         * Quanto una proiezione può allargare il pixel più lontano dall'orizzonte.
          *
-         * Non sono i limiti matematici (75° e 80°): sono i gradi oltre i quali lo stiramento
-         * costa più di quello che rende. A 65° la cilindrica ha già raddoppiato la scala
-         * verticale rispetto all'orizzonte; a 75° l'ha quadruplicata e si ferma.
+         * Una volta e mezza è il punto in cui l'interpolazione non si nota ancora. Oltre, la
+         * tela chiede più pixel di quanti la foto ne contenga e se li inventa: il file cresce,
+         * il dettaglio no, e il risultato sembra molle proprio dove è più grande. Con questo
+         * limite una fila sola resta cilindrica (a 35° stira 1,48×) e una panoramica su tre
+         * file passa all'equirettangolare, che non stira affatto.
          */
-        const val CYLINDRICAL_COMFORT_DEGREES = 65f
-        const val MERCATOR_COMFORT_DEGREES = 72f
+        const val MAX_VERTICAL_STRETCH = 1.5f
 
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2

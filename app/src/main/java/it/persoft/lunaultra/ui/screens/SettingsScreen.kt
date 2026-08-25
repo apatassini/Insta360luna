@@ -241,11 +241,34 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "E completa con punti severi · F taglio netto, per vedere dove cadono le " +
                         "giunzioni. Trovata la migliore, si spegne il test e si regola qui sotto.",
                 )
+                Text("Proiezione della panoramica")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(1 to "Cilindrica", 2 to "Mercatore", 0 to "Equirett.").forEach { (code, label) ->
+                        FilterChip(
+                            selected = settings.stitch.projectionCode == code,
+                            onClick = { viewModel.updateStitch { it.copy(projectionCode = code) } },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "La cilindrica è quella delle panoramiche a fila singola: vicino " +
+                        "all'orizzonte le altezze restano naturali invece di essere compresse. " +
+                        "Mercatore è la via di mezzo, e conserva le forme in piccolo. " +
+                        "L'equirettangolare arriva ai poli ed è l'unica che un visualizzatore " +
+                        "360° sa leggere: le panoramiche sferiche la usano sempre, qualunque " +
+                        "cosa sia scelta qui.",
+                )
                 ToggleRow(
                     title = "Livella l'orizzonte",
-                    subtitle = "Cerca l'orizzonte nelle foto per sapere com'era inclinata la " +
-                        "camera. Serve alle unioni di foto scelte a mano, dove gli angoli veri " +
-                        "non ci sono e si darebbe per scontato che fosse in bolla",
+                    subtitle = "Spento, la tela resta centrata sul centro esatto delle foto. " +
+                        "Acceso, cerca l'orizzonte nelle foto e ci allinea la tela: le linee " +
+                        "lontane escono dritte, ma l'inquadratura si sposta",
                     checked = settings.stitch.levelHorizon,
                     onCheckedChange = { on -> viewModel.updateStitch { it.copy(levelHorizon = on) } },
                     icon = LunaIcons.Center,
@@ -265,12 +288,13 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     icon = LunaIcons.Axis,
                 )
                 Hint(
-                    "In una panoramica equirettangolare l'orizzonte è una riga dritta, e " +
-                        "sono le linee vicine — il bordo di un molo — a doversi incurvare. Se " +
-                        "esce il contrario, cioè il mare a conca e il molo dritto, vuol dire che " +
-                        "la camera guardava in su o in giù e nessuno lo sapeva: ogni foto " +
-                        "aggiunge un arco. Zero significa «misurala dall'orizzonte»; il valore a " +
-                        "mano serve quando l'orizzonte non si vede.",
+                    "Di serie il riferimento è il centro esatto della foto: prevedibile, e " +
+                        "non sposta l'inquadratura. L'orizzonte viene comunque misurato e, se " +
+                        "cade lontano dal centro, il verdetto di fine unione lo dice — perché " +
+                        "è da lì che nasce il mare a conca: una riga orizzontale piazzata come " +
+                        "se fosse all'altezza dell'occhio diventa un arco, e ogni foto ne " +
+                        "aggiunge uno. La livella la raddrizza; il valore a mano serve quando " +
+                        "l'orizzonte non si vede.",
                 )
                 ToggleRow(
                     title = "Taglio sul minimo disaccordo",

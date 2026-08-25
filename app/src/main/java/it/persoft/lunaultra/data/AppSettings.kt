@@ -154,11 +154,17 @@ data class StitchSettings(
     val fovOverrideDegrees: Float = 0f,
 
     /**
+     * La proiezione della tela: 0 equirettangolare, 1 cilindrica, 2 Mercatore. Vale per le
+     * panoramiche normali; la sferica resta sempre equirettangolare.
+     */
+    val projectionCode: Int = 1,
+
+    /**
      * Livellare l'orizzonte cercandolo nelle foto, per le unioni senza angoli veri.
      * Senza, si dà per scontato che la camera fosse in bolla — e se non lo era, il mare
      * esce a conca e le linee vicine restano dritte, cioè il contrario del giusto.
      */
-    val levelHorizon: Boolean = true,
+    val levelHorizon: Boolean = false,
 
     /** Inclinazione della camera imposta a mano, in gradi. Zero = misurala dall'orizzonte. */
     val cameraPitchDegrees: Float = 0f,

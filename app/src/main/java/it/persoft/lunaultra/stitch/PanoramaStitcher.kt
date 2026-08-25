@@ -129,7 +129,7 @@ class PanoramaStitcher(
             // per fotogramma, il mare sembra una conca e le linee vicine restano dritte
             // invece di incurvarsi. Misurato dall'orizzonte stesso, il difetto sparisce.
             val levelNotes = mutableListOf<String>()
-            if (tuning.levelHorizon && shots.all { abs(it.tiltDegrees) < 0.01f }) {
+            if (shots.all { abs(it.tiltDegrees) < 0.01f }) {
                 val forced = tuning.cameraPitchDegrees
                 if (abs(forced) > 0.05f) {
                     placements = placements.map { it.copy(tiltDegrees = forced) }
@@ -137,48 +137,42 @@ class PanoramaStitcher(
                 } else {
                     val pitches = frames.map { estimateCameraPitch(it, lens) }
                     val measured = pitches.filterNotNull()
-                    if (measured.size >= (frames.size + 1) / 2) {
-                        // I fotogrammi in cui l'orizzonte non si vede prendono la mediana
-                        // degli altri: meglio l'inclinazione dei vicini che lo zero di
-                        // default, che è proprio l'ipotesi sbagliata da cui si parte.
-                        val median = measured.sorted()[measured.size / 2]
+                    val median = if (measured.isEmpty()) null else measured.sorted()[measured.size / 2]
+                    val enough = measured.size >= (frames.size + 1) / 2
+                    if (tuning.levelHorizon && enough && median != null) {
+                        // I fotogrammi in cui l'orizzonte non si vede prendono la mediana degli
+                        // altri: meglio l'inclinazione dei vicini che uno zero di comodo.
                         placements = placements.mapIndexed { i, placement ->
                             placement.copy(tiltDegrees = pitches[i] ?: median)
                         }
-                        levelNotes += "Orizzonte: camera a %s (misurata su %d foto su %d)".format(
+                        levelNotes += "Orizzonte livellato: camera a %s (misurata su %d foto su %d)".format(
                             pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
                             measured.size,
                             frames.size,
                         )
-                    } else {
-                        levelNotes += "Orizzonte non trovato: la camera resta assunta in bolla"
+                    } else if (enough && median != null && abs(median) >= HORIZON_NOTABLE_DEGREES) {
+                        // Di serie la tela resta centrata sul centro delle foto: è la scelta
+                        // prevedibile, quella che non sposta l'inquadratura. Ma se l'orizzonte
+                        // è lontano dal centro vale la pena dirlo, perché è da lì che nasce
+                        // l'incurvamento del mare — e basta un interruttore per raddrizzarlo.
+                        levelNotes += ("L'orizzonte cade %+.1f° sotto il centro delle foto: la tela " +
+                            "resta centrata sulle foto. Accendi «Livella l'orizzonte» per raddrizzarlo.")
+                            .format(median)
                     }
                 }
             }
-            // La cucitura campiona dagli originali a piena risoluzione (uno per volta, in
-            // memoria nativa): la copia di lavoro serve solo all'allineamento. Quindi la
-            // tela può chiedere la densità dei pixel veri, non quella della copia ridotta.
-            val sourceScale = frames.minOf { frame ->
-                if (frame.sourceLongSide > 0) {
-                    frame.sourceLongSide.toFloat() / max(frame.width, frame.height)
-                } else {
-                    1f
-                }
-            }.coerceAtLeast(1f)
-            val fullResSampling = tuning.sampleFromOriginals && heapMb >= 384 && sourceScale > 1.05f
-            val requestedDensity = lens.imageWidth / lens.horizontalFovDegrees *
-                (if (fullResSampling) sourceScale else 1f)
-            // La densità della tela non è più un numero fisso: si calcola dal budget di
-            // memoria vero, sapendo quanto costerà la cucitura di ogni fotogramma con la
-            // fusione ristretta alla sola sovrapposizione. È quello che decide quanto
-            // grande esce la panoramica.
-            // Una tela provvisoria: serve solo all'allineamento, che la usa per convertire
-            // pixel in gradi. Quella definitiva si costruisce dopo, sulle posizioni corrette.
+
+            // La proiezione: cilindrica per le panoramiche normali — è quella delle file
+            // singole, e tiene le altezze naturali vicino all'orizzonte — ma equirettangolare
+            // per la sferica, perché è l'unica che arriva ai poli ed è l'unica che un
+            // visualizzatore 360° sa leggere.
+            val projection = if (fillNadir) StitchProjection.EQUIRECTANGULAR else tuning.projection
             val provisional = PanoramaCanvas.covering(
                 placements = placements,
                 lens = lens,
                 requestedPixelsPerDegree = chooseDensity(placements, lens, heapMb, requestedDensity),
                 maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
+                projection = projection,
             )
 
             onProgress(0.10f, "Allineo i fotogrammi")
@@ -207,6 +201,7 @@ class PanoramaStitcher(
                 lens = lens,
                 requestedPixelsPerDegree = chooseDensity(placements, lens, heapMb, requestedDensity),
                 maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
+                projection = projection,
             )
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
@@ -230,7 +225,8 @@ class PanoramaStitcher(
             val notes = refinement.notes.toMutableList()
             notes.add(
                 0,
-                "Tela ${canvas.width}×${canvas.height} a %.1f px/grado (heap $heapMb MB) · ".format(canvas.pixelsPerDegree) +
+                "Tela ${canvas.width}×${canvas.height} a %.1f px/grado · %s (heap $heapMb MB) · "
+                    .format(canvas.pixelsPerDegree, canvas.projection.label) +
                     if (fullResSampling) {
                         "cucitura dagli originali a piena risoluzione (×%.1f rispetto ai %d px di lavoro)"
                             .format(sourceScale, workingLongSide)
@@ -1639,13 +1635,14 @@ class PanoramaStitcher(
         val halfH = lens.horizontalFovDegrees / 2f + margin
         val halfV = lens.verticalFovDegrees / 2f + margin
         val startLon = canvas.centerPanDegrees - canvas.horizontalDegrees / 2f
-        val topLat = canvas.centerTiltDegrees + canvas.verticalDegrees / 2f
 
         val col0 = floor((placement.effectivePan - halfH - startLon) * canvas.pixelsPerDegree).toInt()
         val col1 = ceil((placement.effectivePan + halfH - startLon) * canvas.pixelsPerDegree).toInt()
-        val row0 = floor((topLat - (placement.effectiveTilt + halfV)) * canvas.pixelsPerDegree).toInt()
+        // Le righe se le fa dire dalla tela: con la cilindrica o Mercatore la latitudine non
+        // è più lineare nelle righe, e un conto a mano taglierebbe il fotogramma.
+        val row0 = floor(canvas.rowOf(placement.effectiveTilt + halfV)).toInt()
             .coerceIn(0, canvas.height - 1)
-        val row1 = ceil((topLat - (placement.effectiveTilt - halfV)) * canvas.pixelsPerDegree).toInt()
+        val row1 = ceil(canvas.rowOf(placement.effectiveTilt - halfV)).toInt()
             .coerceIn(0, canvas.height - 1)
 
         // Le colonne possono sbordare dalla tela. Se la tela chiude il giro si passa
@@ -2776,6 +2773,9 @@ class PanoramaStitcher(
 
         /** Oltre questa inclinazione non è più una camera che guarda un paesaggio. */
         const val MAX_CAMERA_PITCH_DEGREES = 40f
+
+        /** Sotto questo scarto fra orizzonte e centro della foto non vale la pena dire niente. */
+        const val HORIZON_NOTABLE_DEGREES = 3f
 
         // La soglia di qualità dei punti (già 0,80 fisso) ora è in StitchTuning.keepNcc.
 

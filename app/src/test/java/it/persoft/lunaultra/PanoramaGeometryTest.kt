@@ -4,6 +4,7 @@ import it.persoft.lunaultra.stitch.FramePlacement
 import it.persoft.lunaultra.stitch.LocalWarp
 import it.persoft.lunaultra.stitch.PanoramaCanvas
 import it.persoft.lunaultra.stitch.PinholeLens
+import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.stitch.angularDistance
 import it.persoft.lunaultra.stitch.exposureGain
 import it.persoft.lunaultra.stitch.featherWeight
@@ -283,6 +284,35 @@ class PanoramaGeometryTest {
             canvas.latitudeAt(canvas.height - 1) >= -90.01f,
         )
         assertEquals(180f, canvas.verticalDegrees, 0.5f)
+    }
+
+    @Test
+    fun `la cilindrica e' l'inverso esatto di se stessa, e non e' lineare`() {
+        val canvas = PanoramaCanvas(
+            centerPanDegrees = 0f, centerTiltDegrees = 0f,
+            horizontalDegrees = 120f, verticalDegrees = 60f, pixelsPerDegree = 10f,
+            projection = StitchProjection.CYLINDRICAL,
+        )
+        // Andata e ritorno: la riga che corrisponde a una latitudine deve riportare a quella
+        // latitudine. Se questo non torna, i fotogrammi vengono cuciti sulla riga sbagliata.
+        listOf(-25f, -10f, 0f, 10f, 25f).forEach { lat ->
+            val row = canvas.rowOf(lat)
+            assertEquals(lat, canvas.latitudeAt(row.toInt()), 0.2f)
+        }
+        // E non è lineare: dieci gradi lontano dall'orizzonte occupano più righe di dieci
+        // gradi sull'orizzonte. È esattamente la differenza con l'equirettangolare.
+        val centrali = canvas.rowOf(0f) - canvas.rowOf(10f)
+        val esterni = canvas.rowOf(20f) - canvas.rowOf(30f)
+        assertTrue("i gradi lontani dall'orizzonte devono occupare più righe", esterni > centrali * 1.2f)
+    }
+
+    @Test
+    fun `l'equirettangolare resta lineare come deve`() {
+        val canvas = PanoramaCanvas(0f, 0f, 120f, 60f, 10f)
+        val centrali = canvas.rowOf(0f) - canvas.rowOf(10f)
+        val esterni = canvas.rowOf(20f) - canvas.rowOf(30f)
+        assertEquals(centrali, esterni, 0.01f)
+        assertEquals(100f, centrali, 0.01f)
     }
 
     @Test

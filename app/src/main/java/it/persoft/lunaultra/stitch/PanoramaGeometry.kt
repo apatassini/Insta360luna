@@ -3,9 +3,11 @@ package it.persoft.lunaultra.stitch
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.asin
+import kotlin.math.atan
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -107,15 +109,49 @@ data class FramePlacement(
 }
 
 /**
- * La tela finita: quanti gradi copre, con quanti pixel per grado.
+ * La forma in cui la sfera viene stesa sul rettangolo finito.
  *
- * La proiezione è equirettangolare — longitudine sulle colonne, latitudine sulle righe — perché
- * una panoramica di questa camera può prendere anche centotrenta gradi in verticale, e una
- * proiezione cilindrica a quelle latitudini stirerebbe i poli fino a renderli inutilizzabili.
+ * Nessuna è «giusta»: una superficie curva non si appiattisce senza deformare qualcosa, e
+ * ognuna sceglie cosa sacrificare. Quello che tutte e tre conservano è la verticale — una
+ * linea verticale del mondo resta verticale — e l'orizzonte, che resta una riga dritta.
+ */
+enum class StitchProjection(val label: String, val limitDegrees: Float) {
+    /**
+     * Latitudine lineare sulle righe. È il formato dello standard sferico 2:1, l'unico che
+     * arriva ai poli, e l'unico che un visualizzatore 360° sa leggere.
+     */
+    EQUIRECTANGULAR("Equirettangolare", 90f),
+
+    /**
+     * Il cilindro appoggiato attorno alla sfera: `y = R·tan(latitudine)`.
+     *
+     * È la proiezione delle panoramiche a fila singola, quella che usano le app dei telefoni.
+     * Vicino all'orizzonte le altezze restano naturali invece di essere compresse come
+     * nell'equirettangolare; in cambio verso l'alto e verso il basso si stira in fretta, e
+     * ai poli non arriva affatto — motivo per cui una sferica non può usarla.
+     */
+    CYLINDRICAL("Cilindrica", 75f),
+
+    /**
+     * Mercatore: `y = R·ln(tan(45° + latitudine/2))`.
+     *
+     * La via di mezzo, e l'unica conforme delle tre: conserva le forme in piccolo, quindi
+     * niente sembra schiacciato o stirato **localmente**, a costo di gonfiare le altezze
+     * lontano dall'orizzonte. Buona per le file singole alte.
+     */
+    MERCATOR("Mercatore", 80f),
+}
+
+/**
+ * La tela finita: quanti gradi copre, con quanti pixel per grado, e in che proiezione.
  *
- * La risoluzione non è quella nominale delle foto messe in fila: si sceglie il numero di pixel
- * per grado che conserva il dettaglio del centro dei fotogrammi, e si mette un tetto al lato
- * lungo perché una tela da centinaia di megapixel non entra nella memoria di un telefono.
+ * Le colonne sono sempre longitudine lineare — è la parte facile, e tutte e tre le
+ * proiezioni la trattano uguale. La differenza sta nelle righe: [pixelsPerDegree] è la scala
+ * verticale **all'orizzonte**, e da lì in su e in giù ogni proiezione va per la sua strada.
+ *
+ * La risoluzione non è quella nominale delle foto messe in fila: si sceglie il numero di
+ * pixel per grado che conserva il dettaglio del centro dei fotogrammi, e si mette un tetto al
+ * lato lungo perché una tela da centinaia di megapixel non entra nella memoria di un telefono.
  */
 class PanoramaCanvas(
     val centerPanDegrees: Float,
@@ -123,17 +159,43 @@ class PanoramaCanvas(
     val horizontalDegrees: Float,
     val verticalDegrees: Float,
     val pixelsPerDegree: Float,
+    val projection: StitchProjection = StitchProjection.EQUIRECTANGULAR,
 ) {
+    private val topLatitude = centerTiltDegrees + verticalDegrees / 2f
+    private val bottomLatitude = centerTiltDegrees - verticalDegrees / 2f
+
+    /** Il raggio del cilindro in pixel: quello che rende [pixelsPerDegree] la scala a zero. */
+    private val radius = pixelsPerDegree * DEGREES_PER_RADIAN
+
+    private val topY = verticalPixel(topLatitude)
+
     val width: Int = max(1, (horizontalDegrees * pixelsPerDegree).toInt())
-    val height: Int = max(1, (verticalDegrees * pixelsPerDegree).toInt())
+    val height: Int = max(1, (topY - verticalPixel(bottomLatitude)).toInt())
 
     /** Longitudine della colonna, in gradi, riferita allo zero della camera. */
     fun longitudeAt(column: Int): Float =
         centerPanDegrees - horizontalDegrees / 2f + (column + 0.5f) / pixelsPerDegree
 
     /** Latitudine della riga: la prima riga è la più alta, come in ogni immagine. */
-    fun latitudeAt(row: Int): Float =
-        centerTiltDegrees + verticalDegrees / 2f - (row + 0.5f) / pixelsPerDegree
+    fun latitudeAt(row: Int): Float = latitudeOfPixel(topY - (row + 0.5f))
+
+    /** La riga su cui cade una latitudine: l'inverso esatto di [latitudeAt]. */
+    fun rowOf(latitudeDegrees: Float): Float = topY - verticalPixel(latitudeDegrees)
+
+    private fun verticalPixel(latitudeDegrees: Float): Float {
+        val lat = latitudeDegrees.coerceIn(-projection.limitDegrees, projection.limitDegrees).toRadians()
+        return when (projection) {
+            StitchProjection.EQUIRECTANGULAR -> lat.toDegrees() * pixelsPerDegree
+            StitchProjection.CYLINDRICAL -> radius * tan(lat)
+            StitchProjection.MERCATOR -> radius * ln(tan(QUARTER_TURN_RADIANS + lat / 2f))
+        }
+    }
+
+    private fun latitudeOfPixel(y: Float): Float = when (projection) {
+        StitchProjection.EQUIRECTANGULAR -> y / pixelsPerDegree
+        StitchProjection.CYLINDRICAL -> atan(y / radius).toDegrees()
+        StitchProjection.MERCATOR -> (2f * atan(exp(y / radius)) - QUARTER_TURN_RADIANS * 2f).toDegrees()
+    }
 
     companion object {
         /**
@@ -148,6 +210,7 @@ class PanoramaCanvas(
             lens: PinholeLens,
             requestedPixelsPerDegree: Float,
             maximumLongSide: Int,
+            projection: StitchProjection = StitchProjection.EQUIRECTANGULAR,
         ): PanoramaCanvas {
             require(placements.isNotEmpty()) { "Nessun fotogramma da unire" }
             val halfH = lens.horizontalFovDegrees / 2f
@@ -160,24 +223,43 @@ class PanoramaCanvas(
             // rifarebbero longitudini già disegnate, e la panoramica avrebbe un pezzo doppio.
             // Succede davvero: a 1× i 292° di corsa più gli 81,7° di campo fanno 373,7.
             val spanH = (maxPan - minPan).coerceIn(1f, FULL_TURN_DEGREES)
-            // Oltre i poli non c'è niente da disegnare: una latitudine di 153° non esiste, e
-            // lasciarla nella tela produrrebbe una fascia in cui la proiezione si ribalta. Con
-            // gli scatti sferici succede sempre, perché il fotogramma più alto guarda a 120° e
-            // il suo bordo superiore finirebbe ben oltre lo zenit.
-            val topTilt = min(maxTilt, POLE_DEGREES)
-            val bottomTilt = max(minTilt, -POLE_DEGREES)
+            // Oltre il limite della proiezione non c'è niente da disegnare: una latitudine di
+            // 153° non esiste, e per la cilindrica anche molto prima la scala esplode.
+            val limit = projection.limitDegrees
+            val topTilt = min(maxTilt, limit)
+            val bottomTilt = max(minTilt, -limit)
             val spanV = (topTilt - bottomTilt).coerceAtLeast(1f)
             // Il tetto vale sul lato più lungo: una panoramica bassa e larga e una alta e
-            // stretta devono costare la stessa memoria.
-            val longestSpan = max(spanH, spanV)
-            val capped = min(requestedPixelsPerDegree, maximumLongSide / longestSpan)
+            // stretta devono costare la stessa memoria. L'altezza in pixel non è più
+            // «gradi × densità» — con la cilindrica cresce più in fretta — quindi si misura
+            // a densità unitaria, che è lecito perché è lineare nella densità.
+            val heightPerDensity = verticalExtentPerDensity(topTilt, bottomTilt, projection)
+            val longestPerDensity = max(spanH, heightPerDensity)
+            val capped = min(requestedPixelsPerDegree, maximumLongSide / longestPerDensity)
             return PanoramaCanvas(
                 centerPanDegrees = (minPan + maxPan) / 2f,
                 centerTiltDegrees = (bottomTilt + topTilt) / 2f,
                 horizontalDegrees = spanH,
                 verticalDegrees = spanV,
                 pixelsPerDegree = capped.coerceAtLeast(MIN_PIXELS_PER_DEGREE),
+                projection = projection,
             )
+        }
+
+        /** L'altezza della tela per unità di densità: serve a mettere il tetto prima di costruirla. */
+        private fun verticalExtentPerDensity(
+            topDegrees: Float,
+            bottomDegrees: Float,
+            projection: StitchProjection,
+        ): Float {
+            val top = topDegrees.coerceIn(-projection.limitDegrees, projection.limitDegrees).toRadians()
+            val bottom = bottomDegrees.coerceIn(-projection.limitDegrees, projection.limitDegrees).toRadians()
+            return when (projection) {
+                StitchProjection.EQUIRECTANGULAR -> (top - bottom).toDegrees()
+                StitchProjection.CYLINDRICAL -> DEGREES_PER_RADIAN * (tan(top) - tan(bottom))
+                StitchProjection.MERCATOR -> DEGREES_PER_RADIAN *
+                    (ln(tan(QUARTER_TURN_RADIANS + top / 2f)) - ln(tan(QUARTER_TURN_RADIANS + bottom / 2f)))
+            }.coerceAtLeast(1f)
         }
 
         /** Sotto questo la panoramica non è più un'immagine, è una miniatura. */
@@ -188,6 +270,12 @@ class PanoramaCanvas(
 
         /** Il giro completo: una tela più larga ridisegnerebbe longitudini già fatte. */
         const val FULL_TURN_DEGREES = 360f
+
+        /** Quanti gradi vale un radiante: lega il raggio del cilindro alla densità. */
+        const val DEGREES_PER_RADIAN = 57.29578f
+
+        /** Un quarto di giro in radianti, per la formula di Mercatore. */
+        const val QUARTER_TURN_RADIANS = 0.7853982f
     }
 }
 

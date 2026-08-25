@@ -22,6 +22,7 @@ import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
 import it.persoft.lunaultra.stitch.PanoJobList
+import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.stitch.StitchTuning
 import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.stitch.sphericalCoverage
@@ -1675,6 +1676,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localWarp = stitch.localWarp,
             focalFreedom = stitch.focalFreedomPercent.coerceIn(0, 35) / 100f,
             warpStrength = stitch.warpStrength,
+            projection = when (stitch.projectionCode) {
+                0 -> StitchProjection.EQUIRECTANGULAR
+                2 -> StitchProjection.MERCATOR
+                else -> StitchProjection.CYLINDRICAL
+            },
             levelHorizon = stitch.levelHorizon,
             cameraPitchDegrees = stitch.cameraPitchDegrees,
         )

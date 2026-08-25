@@ -79,6 +79,13 @@ data class StitchTuning(
     val warpStrength: Int = 2,
 
     /**
+     * La proiezione della tela finita. La sferica ignora questa scelta e resta
+     * equirettangolare: è l'unica che arriva ai poli e l'unica che un visualizzatore 360°
+     * sa leggere.
+     */
+    val projection: StitchProjection = StitchProjection.CYLINDRICAL,
+
+    /**
      * Cercare l'orizzonte nelle foto per sapere come era inclinata la camera.
      *
      * Serve solo quando gli angoli veri non ci sono — le foto scelte a mano — perché lì si
@@ -87,7 +94,7 @@ data class StitchTuning(
      * archi e il mare sembra una conca, mentre il molo vicino (che dovrebbe incurvarsi)
      * resta dritto. Misurato una volta, il difetto sparisce.
      */
-    val levelHorizon: Boolean = true,
+    val levelHorizon: Boolean = false,
 
     /**
      * L'inclinazione della camera imposta a mano, in gradi (positiva = guardava in su).

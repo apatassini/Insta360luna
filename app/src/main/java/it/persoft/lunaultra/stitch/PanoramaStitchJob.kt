@@ -393,6 +393,11 @@ class PanoramaStitchJob(
                             .format(outcome.report.nadirPatchRows),
                     )
                 }
+                if (outcome.report.verdict.isNotEmpty()) {
+                    appendLine("--- verdetto ---")
+                    outcome.report.verdict.forEach { appendLine(it) }
+                    appendLine("---")
+                }
                 outcome.report.refinements.forEach { appendLine(it) }
                 append(
                     "Correzione massima dell'allineamento: %.2f°"
@@ -449,6 +454,7 @@ class PanoramaStitchJob(
                     "PROVA ${variant.letter} · ${variant.title}",
                     buildString {
                         appendLine("$name · ${out.report.canvasWidth}×${out.report.canvasHeight} px")
+                        out.report.verdict.forEach { appendLine(it) }
                         out.report.refinements.forEach { appendLine(it) }
                         append("Correzione massima: %.2f°".format(out.report.worstCorrectionDegrees))
                     },

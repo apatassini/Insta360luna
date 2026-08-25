@@ -118,12 +118,23 @@ fun StitchCard(
                 )
             }
 
-            is StitchUiState.Done -> Text(
-                text = "${state.fileName} · ${state.report.canvasWidth}×${state.report.canvasHeight} px " +
-                    "· in DCIM › Luna Ultra",
-                style = MaterialTheme.typography.bodySmall,
-                color = Luna.OnSurfaceDim,
-            )
+            is StitchUiState.Done -> {
+                Text(
+                    text = "${state.fileName} · ${state.report.canvasWidth}×${state.report.canvasHeight} px " +
+                        "· in DCIM › Luna Ultra",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Luna.OnSurfaceDim,
+                )
+                // Il verdetto in chiaro: i pochi numeri che dicono se la cucitura ha tenuto.
+                // Stanno qui perché il log completo, su un telefono, non lo apre nessuno.
+                state.report.verdict.forEach { line ->
+                    Text(
+                        text = line,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (line.startsWith("⚠")) Luna.Rec else Luna.OnSurfaceDim,
+                    )
+                }
+            }
 
             is StitchUiState.Queued -> Text(
                 text = "${state.count} scatti al sicuro sul telefono. Unisci quando vuoi, " +

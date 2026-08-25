@@ -40,6 +40,15 @@ data class StitchReport(
     val worstCorrectionDegrees: Float,
     /** Righe inventate in fondo per chiudere il buco sotto: zero se non ce n'era bisogno. */
     val nadirPatchRows: Int = 0,
+    /**
+     * Le poche righe che dicono se l'unione è andata bene *davvero*, da mostrare in app.
+     *
+     * Il log completo è la sede della verità, ma si legge su un telefono e nessuno lo apre
+     * per sapere se la cucitura ha tenuto. Qui ci vanno solo i numeri che cambiano il
+     * giudizio: quanti punti di controllo hanno retto e a che soglia, quanto si
+     * sovrappongono le foto, il campo visivo misurato, e se qualcosa non ha funzionato.
+     */
+    val verdict: List<String> = emptyList(),
 )
 
 data class StitchOutcome(val bitmap: Bitmap, val report: StitchReport)
@@ -130,20 +139,42 @@ class PanoramaStitcher(
             // memoria vero, sapendo quanto costerà la cucitura di ogni fotogramma con la
             // fusione ristretta alla sola sovrapposizione. È quello che decide quanto
             // grande esce la panoramica.
-            val density = chooseDensity(placements, lens, heapMb, requestedDensity)
-            val canvas = PanoramaCanvas.covering(
+            // Una tela provvisoria: serve solo all'allineamento, che la usa per convertire
+            // pixel in gradi. Quella definitiva si costruisce dopo, sulle posizioni corrette.
+            val provisional = PanoramaCanvas.covering(
                 placements = placements,
                 lens = lens,
-                requestedPixelsPerDegree = density,
+                requestedPixelsPerDegree = chooseDensity(placements, lens, heapMb, requestedDensity),
                 maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
             )
 
             onProgress(0.10f, "Allineo i fotogrammi")
             val refineStartedAt = System.currentTimeMillis()
-            val refinement = refine(frames, placements, lens, canvas, wideSearch)
+            val refinement = refine(
+                frames = frames,
+                initial = placements,
+                lens = lens,
+                canvas = provisional,
+                wideSearch = wideSearch,
+            )
             val refineSeconds = (System.currentTimeMillis() - refineStartedAt) / 1000f
             placements = refinement.placements
             frames.forEach { it.releaseWorkingData() }
+
+            // La tela si rifà sulle posizioni **corrette**, non su quelle di partenza.
+            //
+            // Era un bug vero e con un sintomo preciso: la tela veniva dimensionata sugli
+            // angoli nominali, poi l'allineamento spostava i fotogrammi, e quelli spostati
+            // sporgevano oltre il bordo — dove non c'è tela non si dipinge, e quel pezzo di
+            // foto spariva. Con correzioni di un grado non si notava; con una correzione di
+            // venticinque gradi se ne perdeva un quarto. «Manca anche una parte della foto»
+            // era esattamente questo.
+            val canvas = PanoramaCanvas.covering(
+                placements = placements,
+                lens = lens,
+                requestedPixelsPerDegree = chooseDensity(placements, lens, heapMb, requestedDensity),
+                maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
+            )
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
             val composeDetail = mutableListOf<String>()
@@ -190,6 +221,28 @@ class PanoramaStitcher(
 
             frames.forEach { it.bitmap.recycle() }
             onProgress(1f, "Panoramica pronta")
+
+            // La sovrapposizione **misurata** fra fotogrammi vicini, che è la cosa che decide
+            // se una cucitura può venire bene. Sotto una decina di gradi non c'è abbastanza
+            // materiale in comune né per allinearsi né per nascondere una giunzione: meglio
+            // dirlo, perché non è un difetto del programma ma di come sono state scattate.
+            val verdict = refinement.verdict.toMutableList()
+            if (placements.size >= 2) {
+                var tightest = Float.MAX_VALUE
+                for (k in 1 until placements.size) {
+                    val gap = abs(wrapDegrees(placements[k].effectivePan - placements[k - 1].effectivePan))
+                    tightest = min(tightest, lens.horizontalFovDegrees - gap)
+                }
+                verdict.add(
+                    0,
+                    if (tightest < MIN_HEALTHY_OVERLAP_DEGREES) {
+                        "⚠ Sovrapposizione minima %.0f°: poca roba in comune, la giunzione si vedrà"
+                            .format(tightest)
+                    } else {
+                        "Sovrapposizione minima %.0f°".format(tightest)
+                    },
+                )
+            }
             StitchOutcome(
                 bitmap = bitmap,
                 report = StitchReport(
@@ -201,6 +254,7 @@ class PanoramaStitcher(
                     refinements = notes,
                     worstCorrectionDegrees = refinement.worstCorrection,
                     nadirPatchRows = patchedRows,
+                    verdict = verdict,
                 ),
             )
         }
@@ -481,6 +535,8 @@ class PanoramaStitcher(
          * È quello che assorbe la parallasse: la rotazione da sola non può.
          */
         val warps: List<LocalWarp?>,
+        /** Le poche righe che decidono il giudizio, per la scheda in app. */
+        val verdict: List<String>,
     )
 
     /**
@@ -510,6 +566,10 @@ class PanoramaStitcher(
         val photometric = mutableListOf<FloatArray>()
         val warps = arrayOfNulls<LocalWarp>(frames.size)
         val focalEstimates = mutableListOf<Float>()
+        val keptCounts = mutableListOf<Int>()
+        val thresholds = mutableListOf<Float>()
+        var overruledCount = 0
+        var starvedCount = 0
 
         for (index in 1 until frames.size) {
             currentCoroutineContext().ensureActive()
@@ -548,7 +608,7 @@ class PanoramaStitcher(
             }
 
             // Due vicini concordi si mediano; discordi, vince il più sicuro di sé.
-            val offset = if (results.size == 2 &&
+            val proposal = if (results.size == 2 &&
                 abs(results[0].panDegrees - results[1].panDegrees) < ANCHOR_AGREEMENT_DEGREES &&
                 abs(results[0].tiltDegrees - results[1].tiltDegrees) < ANCHOR_AGREEMENT_DEGREES
             ) {
@@ -564,28 +624,69 @@ class PanoramaStitcher(
             // La rifinitura finale la fanno i punti di controllo: con il piazzamento globale
             // già trovato dalla piramide, ogni punto cerca solo in un raggio piccolo — più
             // piccolo del passo di una foglia — e la foglia sbagliata non è più raggiungibile.
-            val corrected = placements[index].copy(
-                panCorrectionDegrees = offset.panDegrees,
-                tiltCorrectionDegrees = offset.tiltDegrees,
-            )
-            var candidates = 0
-            val kept = mutableListOf<FloatArray>()
-            anchors.forEach { anchor ->
-                val tally = controlPoints(
-                    moving = frames[index],
-                    fixed = frames[anchor],
-                    movingPlacement = corrected,
-                    fixedPlacement = placements[anchor],
-                    lens = lens,
+            //
+            // I punti però fanno anche da giuria. La piramide, davanti a un cielo di nuvole e
+            // a un mare increspato — cioè a due superfici che si somigliano ovunque — sa
+            // agganciarsi con grande convinzione al posto sbagliato: si è vista proporre
+            // ventidue gradi di correzione con il novantuno per cento di concordanza. Una
+            // proposta così grossa non si prende per buona: si prova anche a NON applicarla,
+            // e vince quella che i punti di controllo confermano. Chi ha ragione trova
+            // dettagli che combaciano; chi si è agganciato alle nuvole non ne trova.
+            suspend fun gather(candidate: Offset): Pair<Int, ChosenPoints> {
+                val place = placements[index].copy(
+                    panCorrectionDegrees = candidate.panDegrees,
+                    tiltCorrectionDegrees = candidate.tiltDegrees,
                 )
-                candidates += tally.candidates
-                kept += tally.kept
-                // I campioni per la fotometria: si scartano i punti vicini alla saturazione,
-                // dove il rapporto di luminanza non dice più niente di vero.
-                tally.kept.forEach { p ->
-                    if (p[4] in 12f..242f && p[5] in 12f..242f) {
-                        photometric += floatArrayOf(anchor.toFloat(), index.toFloat(), p[4], p[5], p[6], p[7])
-                    }
+                var found = 0
+                val all = mutableListOf<FloatArray>()
+                anchors.forEach { anchor ->
+                    val tally = controlPoints(
+                        moving = frames[index],
+                        fixed = frames[anchor],
+                        movingPlacement = place,
+                        fixedPlacement = placements[anchor],
+                        lens = lens,
+                    )
+                    found += tally.candidates
+                    // Ogni punto si porta dietro da quale vicino viene: la fotometria ha
+                    // bisogno di sapere quale coppia di foto sta confrontando.
+                    tally.kept.forEach { point -> all += point + anchor.toFloat() }
+                }
+                // La soglia di qualità si **adatta** invece di affamare l'allineamento.
+                // Chiedere punti al cento per cento e non trovarne nemmeno uno non è
+                // severità: è spegnere insieme bundle adjustment, rollio, focale,
+                // deformazione locale, fotometria e misura del campo visivo — e far
+                // uscire sei ricette di prova identiche fra loro. È successo davvero:
+                // 0 punti tenuti su 75, e 1 su 493.
+                return found to selectControlPoints(all, tuning.keepNcc, tuning.localWarp)
+            }
+
+            var offset = proposal
+            var attempt = gather(proposal)
+            var overruled = false
+            if (max(abs(proposal.panDegrees), abs(proposal.tiltDegrees)) >= SUSPICIOUS_OFFSET_DEGREES) {
+                val nominal = Offset(0f, 0f, proposal.confidence)
+                val alternative = gather(nominal)
+                if (alternative.second.points.size >= CONTROL_MIN_KEPT &&
+                    alternative.second.points.size > attempt.second.points.size * OVERRULE_MARGIN
+                ) {
+                    offset = nominal
+                    attempt = alternative
+                    overruled = true
+                }
+            }
+            val candidates = attempt.first
+            val chosen = attempt.second
+            val kept = chosen.points
+            keptCounts += kept.size
+            thresholds += chosen.threshold
+            if (overruled) overruledCount++
+            if (kept.size < CONTROL_MIN_KEPT) starvedCount++
+            // I campioni per la fotometria: si scartano i punti vicini alla saturazione,
+            // dove il rapporto di luminanza non dice più niente di vero.
+            kept.forEach { p ->
+                if (p[4] in 12f..242f && p[5] in 12f..242f) {
+                    photometric += floatArrayOf(p[13], index.toFloat(), p[4], p[5], p[6], p[7])
                 }
             }
             var finalPan = offset.panDegrees
@@ -663,12 +764,22 @@ class PanoramaStitcher(
 
             val magnitude = max(abs(finalPan), abs(finalTilt))
             worst = max(worst, magnitude)
-            notes += ("%s: %d punti di controllo, %d sopra l'%d%% · corretto %+.2f° / %+.2f° · " +
+            notes += ("%s: %d punti di controllo, %d sopra l'%d%%%s · corretto %+.2f° / %+.2f° · " +
                 "rollio %+.2f° · focale ×%.3f · concordanza %.0f%%%s").format(
                 frames[index].label,
                 candidates,
                 kept.size,
-                (tuning.keepNcc * 100).toInt(),
+                (chosen.threshold * 100).roundToInt(),
+                if (chosen.lowered) {
+                    " (chiesto %d%%, troppo severo: nessuno passava)".format((chosen.requested * 100).roundToInt())
+                } else {
+                    ""
+                } + if (overruled) {
+                    " · piramide sconfessata (proponeva %+.1f°, i punti dicono di no)"
+                        .format(proposal.panDegrees)
+                } else {
+                    ""
+                },
                 finalPan,
                 finalTilt,
                 rollDegrees,
@@ -695,10 +806,85 @@ class PanoramaStitcher(
                     .format(lens.horizontalFovDegrees, trueFov)
             }
         }
-        return Refinement(placements, notes, worst, aligned, photometric, warps.toList())
+        val verdict = buildList {
+            if (keptCounts.isNotEmpty()) {
+                val worstThreshold = thresholds.minOrNull() ?: 0f
+                add(
+                    "Punti di controllo: %d…%d per giunzione, soglia %d%%".format(
+                        keptCounts.minOrNull() ?: 0,
+                        keptCounts.maxOrNull() ?: 0,
+                        (worstThreshold * 100).roundToInt(),
+                    ),
+                )
+            }
+            if (starvedCount > 0) {
+                add(
+                    "⚠ %d giunzioni senza punti a sufficienza: lì l'allineamento non è verificato"
+                        .format(starvedCount),
+                )
+            }
+            if (overruledCount > 0) {
+                add(
+                    "⚠ %d spostamenti proposti sono stati scartati: erano agganci falsi"
+                        .format(overruledCount),
+                )
+            }
+            if (focalEstimates.size >= 2) {
+                val median = focalEstimates.sorted()[focalEstimates.size / 2]
+                val trueFov = 2f * atan(tan(lens.horizontalFovDegrees.toRadians() / 2f) / median).toDegrees()
+                add(
+                    "Campo visivo: dichiarato %.1f°, misurato %.1f°%s".format(
+                        lens.horizontalFovDegrees, trueFov,
+                        if (abs(median - 1f) >= FOCAL_NOTABLE_DEVIATION) " ← mettilo nelle impostazioni" else "",
+                    ),
+                )
+            }
+            val warped = warps.count { it != null }
+            if (warped > 0) {
+                add(
+                    "Deformazione locale su %d fotogrammi, fino a %.0f px".format(
+                        warped, warps.filterNotNull().maxOf { it.worstShiftPixels },
+                    ),
+                )
+            } else if (tuning.localWarp) {
+                add("Deformazione locale non applicata: punti di controllo insufficienti")
+            }
+        }
+        return Refinement(placements, notes, worst, aligned, photometric, warps.toList(), verdict)
     }
 
     private class ControlPointTally(val candidates: Int, val kept: List<FloatArray>)
+
+    /** I punti scelti e la soglia a cui si è dovuto scendere per averne abbastanza. */
+    private class ChosenPoints(val points: List<FloatArray>, val threshold: Float, val requested: Float) {
+        val lowered: Boolean get() = threshold < requested - 1e-4f
+    }
+
+    /**
+     * Sceglie i punti di controllo partendo dalla qualità chiesta e scendendo se non bastano.
+     *
+     * Una soglia è un desiderio, non un dato di fatto: su una parete uniforme o in controluce
+     * nemmeno un punto raggiunge il novantacinque per cento, e pretenderlo significa restare
+     * senza. Restare senza non è «essere prudenti»: è spegnere il bundle adjustment, il
+     * rollio, la focale, la deformazione locale, la fotometria e la misura del campo visivo
+     * tutti insieme, e ritrovarsi con la sola registrazione a piramide di cui nessuno
+     * controlla più il lavoro. Meglio una manciata di punti all'ottanta per cento, e dirlo.
+     */
+    private fun selectControlPoints(
+        matched: List<FloatArray>,
+        requested: Float,
+        wantsWarp: Boolean,
+    ): ChosenPoints {
+        val target = if (wantsWarp) CONTROL_TARGET_KEPT else CONTROL_MIN_KEPT
+        var threshold = requested
+        while (true) {
+            val points = matched.filter { it[12] >= threshold }
+            if (points.size >= target || threshold <= CONTROL_FLOOR_NCC + 1e-4f) {
+                return ChosenPoints(points, threshold, requested)
+            }
+            threshold = max(CONTROL_FLOOR_NCC, threshold - CONTROL_NCC_STEP)
+        }
+    }
 
     /**
      * Il piccolo bundle adjustment di un fotogramma, come lo fanno gli stitcher seri.
@@ -1046,6 +1232,7 @@ class PanoramaStitcher(
                                 world[1],
                                 found[0],
                                 found[1],
+                                found[2],
                             )
                         }
                         local
@@ -1130,8 +1317,8 @@ class PanoramaStitcher(
                 }
             }
         }
-        if (bestX < 0 || best < tuning.keepNcc) return null
-        return floatArrayOf(bestX.toFloat(), bestY.toFloat())
+        if (bestX < 0 || best < CONTROL_FLOOR_NCC) return null
+        return floatArrayOf(bestX.toFloat(), bestY.toFloat(), best)
     }
 
     /** La media dei residui senza le code: il dieci per cento più estremo per lato non vota. */
@@ -2438,6 +2625,30 @@ class PanoramaStitcher(
 
         /** Oltre questo tetto il costo cresce e la statistica no. */
         const val CONTROL_MAX_CANDIDATES = 260
+
+        /**
+         * Il pavimento assoluto della qualità di un punto: sotto, non è più nemmeno
+         * un'opinione. La soglia chiesta può scendere fin qui, non oltre.
+         */
+        const val CONTROL_FLOOR_NCC = 0.60f
+
+        /** Di quanto scende la soglia a ogni tentativo, quando i punti non bastano. */
+        const val CONTROL_NCC_STEP = 0.05f
+
+        /** I punti che si vorrebbero avere quando serve anche la deformazione locale. */
+        const val CONTROL_TARGET_KEPT = 40
+
+        /**
+         * Oltre questa correzione la proposta della piramide è troppo grossa per crederle
+         * sulla parola: si mette alla prova contro l'ipotesi «non spostare niente».
+         */
+        const val SUSPICIOUS_OFFSET_DEGREES = 6f
+
+        /** Di quanto l'alternativa deve battere la proposta per sostituirla. */
+        const val OVERRULE_MARGIN = 1.5f
+
+        /** Sotto questa sovrapposizione fra due scatti non c'è materiale per una cucitura buona. */
+        const val MIN_HEALTHY_OVERLAP_DEGREES = 12f
 
         // La soglia di qualità dei punti (già 0,80 fisso) ora è in StitchTuning.keepNcc.
 

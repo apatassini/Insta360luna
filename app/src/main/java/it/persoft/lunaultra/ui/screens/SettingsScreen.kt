@@ -348,9 +348,12 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 }
                 Hint(
                     "I punti di controllo sono i dettagli ritrovati fra due foto vicine: da loro " +
-                        "si misurano spostamento, rollio e focale. Più punti e soglia più severa = " +
-                        "misure più affidabili ma allineamento più lento; al 100% restano solo i " +
-                        "ritrovamenti quasi perfetti, e se sono troppo pochi la rifinitura si salta.",
+                        "si misurano spostamento, rollio, focale e deformazione locale. La soglia " +
+                        "è un punto di partenza, non un ultimatum: se a quella qualità i " +
+                        "superstiti non bastano, scende da sola fino a trovarne abbastanza e la " +
+                        "scheda di fine unione dice a quale valore si è fermata. Su un cielo di " +
+                        "nuvole o in controluce nessun punto arriva al 95%, e restare senza " +
+                        "significherebbe spegnere tutta la rifinitura insieme.",
                 )
             }
         }

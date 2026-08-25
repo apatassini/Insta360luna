@@ -2810,7 +2810,26 @@ class PanoramaStitcher(
         // continuare sopra la tenda. Il taglio sul minimo disaccordo cerca invece il
         // percorso lungo il quale le due foto già si assomigliano: lì la cucitura non ha
         // niente da tradire.
-        val seam = if (tuning.seamMinimalDifference) {
+        // Una cucitura sola non può descrivere una sovrapposizione su due lati.
+        //
+        // Il taglio sul minimo disaccordo è un percorso **monotono**: o una colonna per riga,
+        // o una riga per colonna. Su una fila sola è perfetto — il vicino è uno, e sta da una
+        // parte. In una griglia il fotogramma di centro confina con quello di sinistra *e* con
+        // quello di sopra, e un percorso solo deve scegliere: sceglie l'orizzontale, e tutto
+        // quello che sta sotto la linea diventa suo — **compresa la parte che era del vicino
+        // di sinistra**. Da lì nascono le giunzioni verticali in più: nella fascia centrale se
+        // ne contano quattro invece delle due che ci devono essere, perché ogni fotogramma
+        // della fila di mezzo si riprende un pezzo di quello di prima.
+        //
+        // Quando la sovrapposizione riempie quasi tutta la finestra in **entrambe** le
+        // direzioni, i vicini sono su più lati. Lì comanda il peso — ogni pixel al fotogramma
+        // che in quel punto è più a casa sua, cioè più lontano dal proprio bordo — e quel
+        // confine ha la forma giusta per costruzione: due tagli verticali fra i tre della
+        // fila, due orizzontali fra le tre file, e basta.
+        val windowHeight = if (bw > 0) windowNewW.size / bw else 0
+        val manySided = sbw >= bw * SEAM_ONE_SIDED_FRACTION &&
+            sbh >= windowHeight * SEAM_ONE_SIDED_FRACTION
+        val seam = if (tuning.seamMinimalDifference && !manySided) {
             findSeam(difference, bothPresent, newWeightGrid, oldWeightGrid, gw, gh)
         } else {
             null
@@ -2946,8 +2965,9 @@ class PanoramaStitcher(
             }
         }
         return when {
+            manySided -> "confine sul peso (vicini su più lati: un taglio solo non basterebbe)"
             seam == null && tuning.seamMinimalDifference ->
-                "taglio a metà strada (sovrapposizione su più lati)"
+                "taglio a metà strada (la polarità della sovrapposizione non è chiara)"
             seam == null -> "taglio a metà strada"
             else -> "taglio sul minimo disaccordo, %s".format(
                 if (seam.vertical) "verticale" else "orizzontale",
@@ -3835,6 +3855,17 @@ class PanoramaStitcher(
          * mediana geometrica.
          */
         const val SEAM_MIN_POLARITY = 0.15f
+
+        /**
+         * Quanto la sovrapposizione deve riempire la finestra, in entrambe le direzioni,
+         * perché si capisca che i vicini sono su più lati.
+         *
+         * Un vicino solo lascia una sovrapposizione stretta in una direzione: mezza finestra o
+         * meno. Due vicini su due lati la riempiono quasi tutta in tutte e due. Sui numeri veri
+         * di una griglia 3×3 la separazione è netta — 46%/96% e 98%/51% per chi ha un vicino
+         * solo, 96%/92% e 100%/93% per chi ne ha due.
+         */
+        const val SEAM_ONE_SIDED_FRACTION = 0.75f
 
         /** Sotto questi campioni la fotometria globale non si fida e resta la catena. */
         const val PHOTOMETRIC_MIN_SAMPLES = 40

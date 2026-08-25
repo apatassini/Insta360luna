@@ -318,32 +318,64 @@ class LunaCommands(
 
     // ---- Risoluzione foto ----
 
-    /** L'enum `PhotoSize` corrente (opzione 2): l'Ultra/Standard dell'app ufficiale. */
-    suspend fun fetchPhotoSize(): Int? =
+    /**
+     * La risoluzione foto letta dalla camera. Misurato: l'opzione `PHOTO_SIZE` di
+     * `GET_OPTIONS` risponde vuota su questo firmware — il dato vive nelle
+     * `PhotographyOptions` del function mode foto. Lo schema conosce due campi:
+     * `photo_size_id` (30, enum `PhotoSize`) e `photo_resolution` (40, enum
+     * `VideoResolution`); si chiedono entrambi e si riporta quello che risponde.
+     */
+    data class PhotoSizeReading(val sizeId: Int?, val resolution: Int?) {
+        val value: Int? get() = sizeId ?: resolution
+        val usesSizeId: Boolean get() = sizeId != null
+    }
+
+    suspend fun fetchPhotoSize(): PhotoSizeReading? =
         session.request(
-            LunaProtocolCodes.GET_OPTIONS,
-            LunaMessages.getOptions(OptionType.PHOTO_SIZE),
+            LunaProtocolCodes.GET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.getPhotographyOptions(
+                listOf(
+                    LunaProtocolCodes.PhotographyOptionType.PHOTO_SIZE_ID,
+                    LunaProtocolCodes.PhotographyOptionType.PHOTO_RESOLUTION,
+                ),
+                LunaProtocolCodes.FunctionMode.NORMAL_IMAGE,
+            ),
         ).map { frame ->
-            optionsReader(frame).intOrNull(OPTIONS, OptionsField.PHOTO_SIZE)
+            val reader = ProtoReader(frame.payload)
+            PhotoSizeReading(
+                sizeId = reader.intOrNull(2, LunaProtocolCodes.PhotographyOptionsField.PHOTO_SIZE_ID),
+                resolution = reader.intOrNull(2, LunaProtocolCodes.PhotographyOptionsField.PHOTO_RESOLUTION),
+            )
         }.getOrNull()
 
     /**
-     * Imposta la risoluzione foto e **rilegge**: questo firmware non dice mai di no, quindi
-     * la verità è il valore che torna indietro. Restituisce quello.
+     * Imposta la risoluzione foto sul campo indicato e **rilegge**: questo firmware non dice
+     * mai di no, quindi la verità è il valore che torna indietro.
      */
-    suspend fun setPhotoSize(value: Int): Result<Int?> =
-        session.request(
-            LunaProtocolCodes.SET_OPTIONS,
-            LunaMessages.setOption(OptionType.PHOTO_SIZE, OptionsField.PHOTO_SIZE, value),
+    suspend fun setPhotoSize(value: Int, useSizeId: Boolean): Result<PhotoSizeReading?> {
+        val option = if (useSizeId) {
+            LunaProtocolCodes.PhotographyOptionType.PHOTO_SIZE_ID
+        } else {
+            LunaProtocolCodes.PhotographyOptionType.PHOTO_RESOLUTION
+        }
+        return session.request(
+            LunaProtocolCodes.SET_PHOTOGRAPHY_OPTIONS,
+            LunaMessages.setPhotographyOption(
+                optionType = option,
+                field = option,
+                value = value,
+                functionMode = LunaProtocolCodes.FunctionMode.NORMAL_IMAGE,
+            ),
         ).map {
             val actual = fetchPhotoSize()
             log.info(
-                "Risoluzione foto: chiesta ${LunaProtocolCodes.PhotoSize.label(value)}",
-                "La camera ora dichiara: " +
-                    (actual?.let { v -> LunaProtocolCodes.PhotoSize.label(v) } ?: "nessun valore"),
+                "Risoluzione foto: chiesta ${LunaProtocolCodes.PhotoSize.label(value)} sul campo $option",
+                "La camera ora dichiara: photo_size_id=${actual?.sizeId ?: "-"} · " +
+                    "photo_resolution=${actual?.resolution ?: "-"}",
             )
             actual
         }
+    }
 
     // ---- Registrazione ----
 

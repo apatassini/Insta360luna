@@ -292,7 +292,11 @@ object LunaProtocolCodes {
         const val STILL_EXPOSURE_OPTIONS = 20
         const val VIDEO_EXPOSURE_OPTIONS = 21
         const val RAW_CAPTURE_TYPE = 25
+        /** `PHOTO_SIZE_ID`: risoluzione foto come enum `PhotoSize`. */
+        const val PHOTO_SIZE_ID = 30
         const val RECORD_RESOLUTION = 31
+        /** `PHOTO_RESOLUTION`: risoluzione foto come enum `VideoResolution`, su altri firmware. */
+        const val PHOTO_RESOLUTION = 40
         const val COLOR_MODE = 35
         const val WHITE_BALANCE_VALUE = 39
         const val ZOOM_SCALE = 53
@@ -311,7 +315,11 @@ object LunaProtocolCodes {
         const val STILL_EXPOSURE_OPTIONS = 20
         const val VIDEO_EXPOSURE_OPTIONS = 21
         const val RAW_CAPTURE_TYPE = 25
+        /** `PHOTO_SIZE_ID`: risoluzione foto come enum `PhotoSize`. */
+        const val PHOTO_SIZE_ID = 30
         const val RECORD_RESOLUTION = 31
+        /** `PHOTO_RESOLUTION`: risoluzione foto come enum `VideoResolution`, su altri firmware. */
+        const val PHOTO_RESOLUTION = 40
         const val COLOR_MODE = 35
         const val WHITE_BALANCE_VALUE = 39
         const val ZOOM_SCALE = 53

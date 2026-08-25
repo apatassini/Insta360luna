@@ -1991,17 +1991,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * ciò che le è stato chiesto. Se i due non coincidono, i numeri della mappa sono da
      * correggere e il log dice quali sono quelli veri.
      */
+    /** Su quale dei due campi possibili la camera risponde: si impara dalla prima lettura. */
+    private var photoSizeUsesSizeId = true
+
     fun setPhotoResolution(sizeCode: Int) {
         viewModelScope.launch {
-            container.commands.setPhotoSize(sizeCode)
+            container.commands.setPhotoSize(sizeCode, useSizeId = photoSizeUsesSizeId)
                 .onSuccess { actual ->
-                    updatePhotoSettings { it.copy(photoSizeCode = actual ?: -1) }
-                    if (actual == sizeCode) {
+                    val value = actual?.value
+                    updatePhotoSettings { it.copy(photoSizeCode = value ?: -1) }
+                    if (value == sizeCode) {
                         showMessage("Risoluzione foto: ${LunaProtocolCodes.PhotoSize.label(sizeCode)}")
                     } else {
                         showMessage(
                             "La camera dichiara " +
-                                (actual?.let { LunaProtocolCodes.PhotoSize.label(it) } ?: "nessuna risoluzione") +
+                                (value?.let { "#$it" } ?: "nessuna risoluzione") +
                                 ": mandami il log",
                         )
                     }
@@ -2013,11 +2017,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Legge dalla camera la risoluzione foto attuale, per mostrare la verità e non un ricordo. */
     private fun refreshPhotoSize() {
         viewModelScope.launch {
-            val code = container.commands.fetchPhotoSize() ?: return@launch
+            val reading = container.commands.fetchPhotoSize()
+            if (reading?.value == null) {
+                container.log.info(
+                    "Risoluzione foto: la camera non risponde su nessuno dei due campi noti",
+                    "Chiesti photo_size_id (30) e photo_resolution (40) sul function mode foto.",
+                )
+                return@launch
+            }
+            photoSizeUsesSizeId = reading.usesSizeId
+            val code = reading.value ?: return@launch
             if (code != settings.value.photo.photoSizeCode) {
                 updatePhotoSettings { it.copy(photoSizeCode = code) }
             }
-            container.log.info("Risoluzione foto attuale: ${LunaProtocolCodes.PhotoSize.label(code)}")
+            container.log.info(
+                "Risoluzione foto attuale: ${LunaProtocolCodes.PhotoSize.label(code)}",
+                "Campo: " + if (reading.usesSizeId) "photo_size_id (enum PhotoSize)" else "photo_resolution (enum VideoResolution)",
+            )
         }
     }
 

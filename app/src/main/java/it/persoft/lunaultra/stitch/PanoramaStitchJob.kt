@@ -16,6 +16,8 @@ import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.timelapse.ShotAngle
 import kotlinx.coroutines.Dispatchers
 import androidx.annotation.RequiresApi
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -240,6 +242,8 @@ class PanoramaStitchJob(
         overlapPercent: Int,
         fillNadir: Boolean = false,
         shotAtMs: Long = System.currentTimeMillis(),
+        tuning: StitchTuning = StitchTuning(),
+        testMode: Boolean = false,
         onProgress: (Float, String) -> Unit,
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
@@ -266,7 +270,11 @@ class PanoramaStitchJob(
                     "Panorama ${ordered.first().second!!.panoramaId}: ${shots.size} foto con angoli " +
                         "esatti dai tag EXIF. Niente ipotesi, ricerca stretta.",
                 )
-                return@runCatching stitchAndSave(shots, fov, fillNadir = fillNadir, shotAtMs = shotAtMs, onProgress = onProgress)
+                return@runCatching if (testMode) {
+                    stitchTestVariants(shots, fov, wideSearch = false, shotAtMs = shotAtMs, base = tuning, onProgress = onProgress)
+                } else {
+                    stitchAndSave(shots, fov, fillNadir = fillNadir, shotAtMs = shotAtMs, tuning = tuning, onProgress = onProgress)
+                }
             }
 
             val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
@@ -284,7 +292,11 @@ class PanoramaStitchJob(
                 "${files.size} foto nell'ordine dato · passo assunto %.1f° (FOV %.1f°, sovrapposizione $overlapPercent%%)"
                     .format(stepDegrees, horizontalFovDegrees),
             )
-            stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, wideSearch = true, shotAtMs = shotAtMs, onProgress = onProgress)
+            if (testMode) {
+                stitchTestVariants(shots, horizontalFovDegrees, wideSearch = true, shotAtMs = shotAtMs, base = tuning, onProgress = onProgress)
+            } else {
+                stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, wideSearch = true, shotAtMs = shotAtMs, tuning = tuning, onProgress = onProgress)
+            }
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
     }
 
@@ -295,9 +307,10 @@ class PanoramaStitchJob(
         fillNadir: Boolean,
         wideSearch: Boolean = false,
         shotAtMs: Long = System.currentTimeMillis(),
+        tuning: StitchTuning = StitchTuning(),
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
-        val stitcher = PanoramaStitcher(onProgress)
+        val stitcher = PanoramaStitcher(onProgress, tuning)
         val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir, wideSearch).getOrThrow()
         val unaligned = outcome.report.refinements.count { it.contains("resta dov'era") }
         if (unaligned > 0) {
@@ -335,6 +348,70 @@ class PanoramaStitchJob(
             },
         )
         return StitchUiState.Done(name, outcome.report)
+    }
+
+    /**
+     * Il banco di prova dell'unione: la stessa terna di foto, tutte le ricette in fila.
+     *
+     * Ogni ricetta lavora a [StitchTestLab.TEST_WORKING_LONG_SIDE] px sul lato lungo e
+     * campiona dalla copia di lavoro: piccola e veloce apposta. Ogni risultato finisce in
+     * galleria come `Panorama_TEST_<lettera>_…`, così si confrontano fianco a fianco e la
+     * lettera dice quale ricetta è. Una ricetta che fallisce non ferma le altre: si annota
+     * nel log e si passa avanti.
+     */
+    private suspend fun stitchTestVariants(
+        shots: List<PanoramaShot>,
+        horizontalFovDegrees: Float,
+        wideSearch: Boolean,
+        shotAtMs: Long,
+        base: StitchTuning,
+        onProgress: (Float, String) -> Unit,
+    ): StitchUiState.Done {
+        val trio = shots.take(StitchTestLab.TEST_FRAMES)
+        val variants = StitchTestLab.variants(base)
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ITALY).format(Date())
+        var saved = 0
+        var lastReport: StitchReport? = null
+        log.info(
+            "MODALITÀ TEST UNIONE",
+            "${trio.size} foto a ${StitchTestLab.TEST_WORKING_LONG_SIDE} px · ${variants.size} ricette:\n" +
+                variants.joinToString("\n") { "${it.letter}) ${it.title}" },
+        )
+        for ((index, variant) in variants.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            val header = "Prova ${variant.letter} di ${variants.size}"
+            onProgress(index.toFloat() / variants.size, "$header — ${variant.title}")
+            val outcome = PanoramaStitcher(
+                onProgress = { fraction, message ->
+                    onProgress((index + fraction) / variants.size, "$header: $message")
+                },
+                tuning = variant.tuning,
+            ).stitch(trio, horizontalFovDegrees, fillNadir = false, wideSearch = wideSearch)
+            outcome.onSuccess { out ->
+                val name = save(out.bitmap, shotAtMs, name = "Panorama_TEST_${variant.letter}_$stamp.jpg")
+                out.bitmap.recycle()
+                saved++
+                lastReport = out.report
+                log.info(
+                    "PROVA ${variant.letter} · ${variant.title}",
+                    buildString {
+                        appendLine("$name · ${out.report.canvasWidth}×${out.report.canvasHeight} px")
+                        out.report.refinements.forEach { appendLine(it) }
+                        append("Correzione massima: %.2f°".format(out.report.worstCorrectionDegrees))
+                    },
+                )
+            }.onFailure {
+                currentCoroutineContext().ensureActive()
+                log.warn("PROVA ${variant.letter} NON RIUSCITA", "${variant.title} · ${it.message}")
+            }
+        }
+        val report = lastReport
+            ?: throw IllegalStateException("Nessuna delle ${variants.size} ricette di prova è riuscita: guarda il log")
+        onProgress(1f, "Prove pronte: $saved in galleria")
+        return StitchUiState.Done(
+            "$saved prove in galleria (Panorama_TEST_A…${variants.last().letter})",
+            report,
+        )
     }
 
     /**
@@ -402,9 +479,10 @@ class PanoramaStitchJob(
      * Finisce in DCIM › Luna Ultra, la stessa cartella dove vanno le foto scaricate dalla
      * camera: la panoramica unita e gli scatti che l'hanno generata stanno insieme.
      */
-    private fun save(bitmap: Bitmap, shotAtMs: Long): String {
+    private fun save(bitmap: Bitmap, shotAtMs: Long, name: String? = null): String {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ITALY).format(Date())
-        val name = "Panorama_Luna_$stamp.jpg"
+        @Suppress("NAME_SHADOWING")
+        val name = name ?: "Panorama_Luna_$stamp.jpg"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             saveToMediaStore(name, bitmap, shotAtMs)
         } else {

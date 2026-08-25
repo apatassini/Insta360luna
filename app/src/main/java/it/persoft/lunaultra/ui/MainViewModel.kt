@@ -19,8 +19,10 @@ import it.persoft.lunaultra.data.VideoSettings
 import it.persoft.lunaultra.diagnostics.WaypointImageVerifier
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
+import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
 import it.persoft.lunaultra.stitch.PanoJobList
+import it.persoft.lunaultra.stitch.StitchTuning
 import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.stitch.sphericalCoverage
 import it.persoft.lunaultra.preview.PreviewState
@@ -1460,6 +1462,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             files = files,
             horizontalFovDegrees = fov.horizontalDegrees,
             overlapPercent = seq.panoramaOverlapPercent,
+            tuning = stitchTuning(),
+            testMode = settings.value.stitch.testMode,
             onProgress = { fraction, message ->
                 _stitchState.value = StitchUiState.Working(
                     downloadShare + (1f - downloadShare) * fraction,
@@ -1559,21 +1563,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
-            _stitchState.value = StitchUiState.Working(0f, "Unisco le ${files.size} foto del job")
+            val testMode = settings.value.stitch.testMode
+            _stitchState.value = StitchUiState.Working(
+                0f,
+                if (testMode) "Modalità test: provo le ricette su 3 foto" else "Unisco le ${files.size} foto del job",
+            )
             container.stitchJob.runOnFiles(
                 files = files,
                 horizontalFovDegrees = job.fovDegrees,
                 overlapPercent = sequence.value.panoramaOverlapPercent,
                 fillNadir = job.spherical,
                 shotAtMs = job.createdAtMs,
+                tuning = stitchTuning(),
+                testMode = testMode,
                 onProgress = { fraction, message ->
                     _stitchState.value = StitchUiState.Working(fraction, message)
                 },
             ).onSuccess { done ->
                 // Gli scatti temporanei e il job si buttano solo a panoramica salvata E se
                 // l'interruttore lo chiede: con l'opzione spenta il job resta lì, pronto per
-                // la prova successiva — è il banco di prova dell'unione.
-                if (settings.value.deleteJobAfterStitch) {
+                // la prova successiva — è il banco di prova dell'unione. In modalità test
+                // non si butta mai niente: le prove servono a rifare, non a chiudere.
+                if (settings.value.deleteJobAfterStitch && !testMode) {
                     withContext(Dispatchers.IO) {
                         container.stitchJob.discardJobFiles(files.map { it.absolutePath })
                     }
@@ -1592,6 +1603,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** A unione riuscita: buttare scatti e job, o tenerli per la prova successiva? */
     fun setDeleteJobAfterStitch(enabled: Boolean) {
         container.settingsStore.update { it.copy(deleteJobAfterStitch = enabled) }
+    }
+
+    /** Le manopole dell'unione foto, dalla sezione dedicata delle impostazioni. */
+    fun updateStitch(transform: (StitchSettings) -> StitchSettings) =
+        container.settingsStore.update { it.copy(stitch = transform(it.stitch)) }
+
+    /**
+     * La ricetta dell'unione costruita dalle impostazioni. Il «100%» delle impostazioni
+     * diventa 0,99: una correlazione esattamente 1,0 non esiste in virgola mobile, e la
+     * soglia a 1,0 butterebbe tutti i punti invece di tenere solo i perfetti.
+     */
+    private fun stitchTuning(): StitchTuning {
+        val stitch = settings.value.stitch
+        return StitchTuning(
+            keepNcc = stitch.controlQualityPercent.coerceIn(50, 99) / 100f,
+            candidateScale = stitch.controlDensity.coerceIn(1, 4).toFloat(),
+        )
     }
 
     /** Annulla un job: sparisce dall'elenco, le foto restano dove sono. */

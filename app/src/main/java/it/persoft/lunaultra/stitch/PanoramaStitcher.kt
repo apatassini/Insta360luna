@@ -74,6 +74,8 @@ data class StitchOutcome(val bitmap: Bitmap, val report: StitchReport)
  */
 class PanoramaStitcher(
     private val onProgress: (Float, String) -> Unit = { _, _ -> },
+    /** La ricetta: le manopole regolabili dell'unione. Il default è la ricetta completa. */
+    private val tuning: StitchTuning = StitchTuning(),
 ) {
 
     suspend fun stitch(
@@ -98,7 +100,7 @@ class PanoramaStitcher(
             // Bitmap vivono in memoria nativa, fuori dal tetto; i vettori di lavoro in heap
             // Java, e vivono un fotogramma alla volta.
             val heapMb = (Runtime.getRuntime().maxMemory() / (1024L * 1024L)).toInt()
-            val workingLongSide = when {
+            val workingLongSide = tuning.workingLongSide ?: when {
                 heapMb >= 384 -> GENEROUS_WORKING_LONG_SIDE
                 heapMb >= 256 -> 2_400
                 else -> WORKING_LONG_SIDE
@@ -119,7 +121,7 @@ class PanoramaStitcher(
                     1f
                 }
             }.coerceAtLeast(1f)
-            val fullResSampling = heapMb >= 384 && sourceScale > 1.05f
+            val fullResSampling = tuning.sampleFromOriginals && heapMb >= 384 && sourceScale > 1.05f
             val requestedDensity = lens.imageWidth / lens.horizontalFovDegrees *
                 (if (fullResSampling) sourceScale else 1f)
             // La densità della tela non è più un numero fisso: si calcola dal budget di
@@ -585,7 +587,8 @@ class PanoramaStitcher(
                 // Il piccolo bundle adjustment: dai punti di controllo si stimano insieme
                 // spostamento, rollio e scala della focale — è quello che fanno gli
                 // stitcher seri, ed è quello che raddrizza una foto scattata storta.
-                val fit = fitPlacement(kept)
+                // Con la manopola spenta si torna alla ricetta storica: solo traslazione.
+                val fit = if (tuning.rollFocal) fitPlacement(kept) else null
                 if (fit != null) {
                     finalPan += fit[0]
                     finalTilt += fit[1]
@@ -625,7 +628,7 @@ class PanoramaStitcher(
                 frames[index].label,
                 candidates,
                 kept.size,
-                (CONTROL_KEEP_NCC * 100).toInt(),
+                (tuning.keepNcc * 100).toInt(),
                 finalPan,
                 finalTilt,
                 rollDegrees,
@@ -921,13 +924,14 @@ class PanoramaStitcher(
                 cy += step
             }
             picked = found
-            if (found.size >= CONTROL_MIN_CANDIDATES || step <= CONTROL_MIN_GRID_STEP) break
+            val wanted = (CONTROL_MIN_CANDIDATES * tuning.candidateScale).roundToInt()
+            if (found.size >= wanted || step <= CONTROL_MIN_GRID_STEP) break
             step = (step * 2) / 3
         }
 
         // La ricerca di ogni punto è indipendente dalle altre: si spartiscono fra i core.
         val movingGray = moving.gray
-        val candidates = picked.take(CONTROL_MAX_CANDIDATES)
+        val candidates = picked.take((CONTROL_MAX_CANDIDATES * tuning.candidateScale).roundToInt())
         val kept = coroutineScope {
             candidates.chunked((candidates.size / MAX_STITCH_WORKERS + 1).coerceAtLeast(8))
                 .map { chunk ->
@@ -1053,7 +1057,7 @@ class PanoramaStitcher(
                 }
             }
         }
-        if (bestX < 0 || best < CONTROL_KEEP_NCC) return null
+        if (bestX < 0 || best < tuning.keepNcc) return null
         return floatArrayOf(bestX.toFloat(), bestY.toFloat())
     }
 
@@ -1274,7 +1278,7 @@ class PanoramaStitcher(
 
         // La fotometria vera: guadagni per foto e vignettatura dell'obiettivo, stimati
         // insieme dai punti di controllo. Il ripiego è la vecchia catena delle mediane.
-        val fit = fitPhotometric(photometric, frames.size)
+        val fit = if (tuning.photometric) fitPhotometric(photometric, frames.size) else null
         val gains = fit?.gains ?: exposureGains(frames, placements, lens, canvas, aligned)
         detail += if (fit != null) {
             "Fotometria: guadagni " + gains.joinToString(" · ") { "%.2f".format(it) } +
@@ -1592,7 +1596,10 @@ class PanoramaStitcher(
         // sbagliata scuriva a blocchi.
         val corrOver = Array(3) { FloatArray(gcount) }
         val corrBase = Array(3) { FloatArray(gcount) }
+        // Manopola multibanda spenta: correzioni a zero, il montaggio resta a taglio netto —
+        // è la ricetta diagnostica che mostra dove cadono le giunzioni.
         for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
+            if (!tuning.multiband) break
             val baseChannel = FloatArray(gcount) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
             val overChannel = FloatArray(gcount) { ((newColor[it] shr shift) and 0xFF).toFloat() }
             val blended = MultibandBlender.blend(
@@ -2117,8 +2124,7 @@ class PanoramaStitcher(
         /** Oltre questo tetto il costo cresce e la statistica no. */
         const val CONTROL_MAX_CANDIDATES = 260
 
-        /** Si tengono solo i punti sopra questa qualità: sotto, è un'opinione. */
-        const val CONTROL_KEEP_NCC = 0.80f
+        // La soglia di qualità dei punti (già 0,80 fisso) ora è in StitchTuning.keepNcc.
 
         /** Sotto questi superstiti la rifinitura non si applica e resta la piramide. */
         const val CONTROL_MIN_KEPT = 12

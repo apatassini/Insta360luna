@@ -107,6 +107,22 @@ data class VideoSettings(
     val sharpness: Int = 1,
 )
 
+/**
+ * Le manopole dell'unione foto, regolabili dalle impostazioni.
+ *
+ * La modalità test è il banco di prova: 3 foto a 1024 px, tutte le ricette in fila (A, B,
+ * C…), ognuna salvata in galleria col suo nome — si confrontano e si sceglie la migliore,
+ * senza pagare ogni volta i minuti dell'unione a piena risoluzione.
+ */
+@Serializable
+data class StitchSettings(
+    val testMode: Boolean = false,
+    /** Qualità minima dei punti di controllo, in percento: 80 è lo standard, 100 i soli perfetti. */
+    val controlQualityPercent: Int = 80,
+    /** Quantità di punti di controllo: 1 = normale, 2 = doppia, 4 = quadrupla. */
+    val controlDensity: Int = 1,
+)
+
 @Serializable
 data class AppSettings(
     val host: String = "192.168.42.1",
@@ -134,6 +150,9 @@ data class AppSettings(
      * prova dell'unione, senza dover riscattare niente.
      */
     val deleteJobAfterStitch: Boolean = false,
+
+    /** Le manopole dell'unione foto: modalità test e punti di controllo. */
+    val stitch: StitchSettings = StitchSettings(),
 
     /** L'app ufficiale ripete l'handshake ogni 3 secondi come keep-alive. */
     val keepAliveSeconds: Int = 3,

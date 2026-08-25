@@ -225,6 +225,61 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
+        SectionCard(title = "Unione foto", icon = LunaIcons.Jobs, accent = Luna.Pano) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ToggleRow(
+                    title = "Modalità test",
+                    subtitle = "3 foto a 1024 px, tutte le ricette in fila: in galleria arrivano " +
+                        "Panorama_TEST_A…F, una per ricetta, da confrontare fianco a fianco",
+                    checked = settings.stitch.testMode,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(testMode = on) } },
+                    icon = LunaIcons.Diagnostics,
+                )
+                Hint(
+                    "Le ricette: A storica (solo piramide e punti, multibanda) · B storica + " +
+                        "fotometria · C rollio e focale senza fotometria · D completa attuale · " +
+                        "E completa con punti severi · F taglio netto, per vedere dove cadono le " +
+                        "giunzioni. Trovata la migliore, si spegne il test e si regola qui sotto.",
+                )
+                Text("Qualità minima dei punti di controllo")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(80, 90, 95, 100).forEach { percent ->
+                        FilterChip(
+                            selected = settings.stitch.controlQualityPercent == percent,
+                            onClick = { viewModel.updateStitch { it.copy(controlQualityPercent = percent) } },
+                            label = { Text("$percent%") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Text("Quantità di punti di controllo")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(1 to "Normale", 2 to "Doppia", 4 to "Quadrupla").forEach { (scale, label) ->
+                        FilterChip(
+                            selected = settings.stitch.controlDensity == scale,
+                            onClick = { viewModel.updateStitch { it.copy(controlDensity = scale) } },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "I punti di controllo sono i dettagli ritrovati fra due foto vicine: da loro " +
+                        "si misurano spostamento, rollio e focale. Più punti e soglia più severa = " +
+                        "misure più affidabili ma allineamento più lento; al 100% restano solo i " +
+                        "ritrovamenti quasi perfetti, e se sono troppo pochi la rifinitura si salta.",
+                )
+            }
+        }
+
         SectionCard(title = "Movimento manuale", icon = LunaIcons.Joystick, accent = Luna.PathLapse) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SliderRow(

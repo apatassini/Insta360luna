@@ -564,15 +564,30 @@ class PanoramaStitcher(
             }
             var finalPan = offset.panDegrees
             var finalTilt = offset.tiltDegrees
+            var rollDegrees = 0f
+            var focalScale = 1f
             if (kept.size >= CONTROL_MIN_KEPT) {
-                finalPan += trimmedMean(kept.map { it[0] })
-                finalTilt += trimmedMean(kept.map { it[1] })
+                // Il piccolo bundle adjustment: dai punti di controllo si stimano insieme
+                // spostamento, rollio e scala della focale — è quello che fanno gli
+                // stitcher seri, ed è quello che raddrizza una foto scattata storta.
+                val fit = fitPlacement(kept)
+                if (fit != null) {
+                    finalPan += fit[0]
+                    finalTilt += fit[1]
+                    rollDegrees = fit[2]
+                    focalScale = fit[3]
+                } else {
+                    finalPan += trimmedMean(kept.map { it[0] })
+                    finalTilt += trimmedMean(kept.map { it[1] })
+                }
             }
 
             aligned[index] = true
             placements[index] = placements[index].copy(
                 panCorrectionDegrees = finalPan,
                 tiltCorrectionDegrees = finalTilt,
+                rollDegrees = rollDegrees,
+                focalScale = focalScale,
             )
             // I fotogrammi ormai lontani non faranno più da vicini a nessuno: i loro vettori
             // di lavoro si liberano, così una griglia grande non accumula piramidi.
@@ -590,13 +605,16 @@ class PanoramaStitcher(
 
             val magnitude = max(abs(finalPan), abs(finalTilt))
             worst = max(worst, magnitude)
-            notes += "%s: %d punti di controllo, %d sopra l'%d%% · corretto %+.2f° / %+.2f° · concordanza %.0f%%".format(
+            notes += ("%s: %d punti di controllo, %d sopra l'%d%% · corretto %+.2f° / %+.2f° · " +
+                "rollio %+.2f° · focale ×%.3f · concordanza %.0f%%").format(
                 frames[index].label,
                 candidates,
                 kept.size,
                 (CONTROL_KEEP_NCC * 100).toInt(),
                 finalPan,
                 finalTilt,
+                rollDegrees,
+                focalScale,
                 offset.confidence * 100f,
             )
         }
@@ -604,6 +622,98 @@ class PanoramaStitcher(
     }
 
     private class ControlPointTally(val candidates: Int, val kept: List<FloatArray>)
+
+    /**
+     * Il piccolo bundle adjustment di un fotogramma, come lo fanno gli stitcher seri.
+     *
+     * Ogni punto di controllo porta il suo residuo (rLon, rLat) e la sua posizione (u, v)
+     * rispetto al centro del fotogramma mobile. Un puro spostamento muove tutti i punti
+     * dello stesso vettore; una rotazione attorno all'asse ottico li muove tangenzialmente
+     * (−v, +u)·R; un errore di focale radialmente (−u, −v)·d. Si risolvono insieme ai
+     * minimi quadrati — è la linearizzazione per piccoli angoli del Levenberg–Marquardt di
+     * Hugin/Autopano — con una passata di potatura dei fuori posto. Restituisce
+     * [dPan, dTilt, rollio in gradi, scala focale], o null se il sistema non è affidabile.
+     */
+    private fun fitPlacement(points: List<FloatArray>): FloatArray? {
+        var current = points
+        var solution: DoubleArray? = null
+        repeat(2) { round ->
+            val sol = solvePlacementLeastSquares(current) ?: return@repeat
+            solution = sol
+            if (round == 0) {
+                val residuals = current.map { p -> placementResidual(p, sol) }
+                val median = residuals.sorted()[residuals.size / 2]
+                val filtered = current.filterIndexed { i, _ -> residuals[i] <= 2.5f * median + 1e-4f }
+                if (filtered.size >= CONTROL_MIN_KEPT) current = filtered
+            }
+        }
+        val sol = solution ?: return null
+        val rollDeg = Math.toDegrees(sol[2]).toFloat()
+        val scaleAdjust = sol[3].toFloat()
+        // Valori fuori dal credibile per una camera su gimbal: meglio la sola traslazione
+        // che una rotazione inventata da punti cattivi.
+        if (abs(rollDeg) > MAX_ROLL_DEGREES || abs(scaleAdjust) > MAX_FOCAL_ADJUST) return null
+        return floatArrayOf(sol[0].toFloat(), sol[1].toFloat(), rollDeg, 1f + scaleAdjust)
+    }
+
+    /** Le equazioni normali 4×4 del modello, risolte con eliminazione di Gauss. */
+    private fun solvePlacementLeastSquares(points: List<FloatArray>): DoubleArray? {
+        val n = DoubleArray(16)
+        val t = DoubleArray(4)
+        val row = DoubleArray(4)
+        for (p in points) {
+            val u = p[2].toDouble()
+            val v = p[3].toDouble()
+            // Equazione della longitudine: rLon = a − v·R − u·d
+            row[0] = 1.0; row[1] = 0.0; row[2] = -v; row[3] = -u
+            accumulate(n, t, row, p[0].toDouble())
+            // Equazione della latitudine: rLat = b + u·R − v·d
+            row[0] = 0.0; row[1] = 1.0; row[2] = u; row[3] = -v
+            accumulate(n, t, row, p[1].toDouble())
+        }
+        return solve4x4(n, t)
+    }
+
+    private fun accumulate(n: DoubleArray, t: DoubleArray, row: DoubleArray, y: Double) {
+        for (i in 0 until 4) {
+            t[i] += row[i] * y
+            for (j in 0 until 4) n[i * 4 + j] += row[i] * row[j]
+        }
+    }
+
+    private fun solve4x4(matrix: DoubleArray, vector: DoubleArray): DoubleArray? {
+        val a = matrix.copyOf()
+        val b = vector.copyOf()
+        for (col in 0 until 4) {
+            var pivot = col
+            for (r in col + 1 until 4) {
+                if (abs(a[r * 4 + col]) > abs(a[pivot * 4 + col])) pivot = r
+            }
+            if (abs(a[pivot * 4 + col]) < 1e-9) return null
+            if (pivot != col) {
+                for (j in 0 until 4) {
+                    val tmp = a[col * 4 + j]; a[col * 4 + j] = a[pivot * 4 + j]; a[pivot * 4 + j] = tmp
+                }
+                val tmp = b[col]; b[col] = b[pivot]; b[pivot] = tmp
+            }
+            val diag = a[col * 4 + col]
+            for (r in 0 until 4) {
+                if (r == col) continue
+                val factor = a[r * 4 + col] / diag
+                for (j in 0 until 4) a[r * 4 + j] -= factor * a[col * 4 + j]
+                b[r] -= factor * b[col]
+            }
+        }
+        return DoubleArray(4) { b[it] / a[it * 4 + it] }
+    }
+
+    private fun placementResidual(p: FloatArray, sol: DoubleArray): Float {
+        val u = p[2].toDouble()
+        val v = p[3].toDouble()
+        val eLon = p[0] - (sol[0] - v * sol[2] - u * sol[3])
+        val eLat = p[1] - (sol[1] + u * sol[2] - v * sol[3])
+        return sqrt(eLon * eLon + eLat * eLat).toFloat()
+    }
 
     /**
      * I punti di controllo fra due fotogrammi, alla maniera di Autopano: tanti, e filtrati
@@ -693,9 +803,14 @@ class PanoramaStitcher(
                                 radiusPx = searchPx,
                             ) ?: continue
                             val worldFound = frameToWorld(found[0], found[1], movingPlacement, lens)
+                            // Oltre al residuo, la posizione del punto nel fotogramma mobile
+                            // (in gradi dal centro): è quella che permette di distinguere uno
+                            // spostamento da una rotazione o da un errore di focale.
                             local += floatArrayOf(
                                 wrapDegrees(world[0] - worldFound[0]),
                                 world[1] - worldFound[1],
+                                ((found[0] - lens.imageWidth / 2f) / lens.focalPixels).toDegrees(),
+                                ((lens.imageHeight / 2f - found[1]) / lens.focalPixels).toDegrees(),
                             )
                         }
                         local
@@ -1855,6 +1970,10 @@ class PanoramaStitcher(
 
         /** Quanti fili lavorano insieme alla cucitura: tutti i core, con un tetto sano. */
         const val MAX_STITCH_WORKERS = 8
+
+        /** Oltre questi valori la stima non è più credibile e si torna alla sola traslazione. */
+        const val MAX_ROLL_DEGREES = 4f
+        const val MAX_FOCAL_ADJUST = 0.04f
 
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2

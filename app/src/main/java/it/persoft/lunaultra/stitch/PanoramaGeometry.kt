@@ -88,6 +88,18 @@ data class FramePlacement(
     /** Correzioni trovate confrontando le immagini, sommate a quelle nominali. */
     val panCorrectionDegrees: Float = 0f,
     val tiltCorrectionDegrees: Float = 0f,
+    /**
+     * La rotazione attorno all'asse ottico, stimata dai punti di controllo: la camera su un
+     * gimbal non è mai perfettamente in bolla, e una foto anche solo mezzo grado storta
+     * combacia al centro e diverge ai bordi. È il parametro che gli stitcher seri (Hugin,
+     * Autopano) ottimizzano insieme a pan e tilt, e che qui mancava.
+     */
+    val rollDegrees: Float = 0f,
+    /**
+     * Correzione moltiplicativa della focale per questo fotogramma: assorbe il piccolo
+     * respiro dello zoom e gli errori del campo visivo dichiarato.
+     */
+    val focalScale: Float = 1f,
 ) {
     val effectivePan: Float get() = panDegrees + panCorrectionDegrees
     val effectiveTilt: Float get() = tiltDegrees + tiltCorrectionDegrees
@@ -276,7 +288,15 @@ fun projectToFrame(
     val yr = y * cosT - z * sinT
     val zr = y * sinT + z * cosT
 
-    return lens.project(x, yr, zr)
+    // Rotazione inversa del rollio attorno all'asse ottico, e la scala della focale:
+    // moltiplicare le componenti trasversali equivale a scalare la focale stessa.
+    val roll = placement.rollDegrees.toRadians()
+    val cosR = cos(roll)
+    val sinR = sin(roll)
+    val xr = x * cosR + yr * sinR
+    val yrr = -x * sinR + yr * cosR
+
+    return lens.project(xr * placement.focalScale, yrr * placement.focalScale, zr)
 }
 
 /**
@@ -292,8 +312,16 @@ fun frameToWorld(
     placement: FramePlacement,
     lens: PinholeLens,
 ): FloatArray {
-    val x = (pixelX - lens.imageWidth / 2f) / lens.focalPixels
-    val y = (lens.imageHeight / 2f - pixelY) / lens.focalPixels
+    val u = (pixelX - lens.imageWidth / 2f) / (lens.focalPixels * placement.focalScale)
+    val v = (lens.imageHeight / 2f - pixelY) / (lens.focalPixels * placement.focalScale)
+
+    // Rotazione diretta del rollio: l'inversa di quella applicata nella proiezione.
+    val roll = placement.rollDegrees.toRadians()
+    val cosR = cos(roll)
+    val sinR = sin(roll)
+    val x = u * cosR - v * sinR
+    val y = u * sinR + v * cosR
+
     val norm = sqrt(x * x + y * y + 1f)
     val xn = x / norm
     val yn = y / norm

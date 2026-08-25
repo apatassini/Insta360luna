@@ -464,11 +464,10 @@ class PanoramaStitcher(
         if (fillNadir) return StitchProjection.EQUIRECTANGULAR
         val reach = verticalReach(placements, lens)
         if (verticalStretch(tuning.projection, reach) <= MAX_VERTICAL_STRETCH) return tuning.projection
-        if (tuning.projection == StitchProjection.CYLINDRICAL &&
-            verticalStretch(StitchProjection.MERCATOR, reach) <= MAX_VERTICAL_STRETCH
-        ) {
-            return StitchProjection.MERCATOR
-        }
+        // Quando la scelta non regge si va **diritti all'equirettangolare**, che non stira
+        // affatto. Mercatore come ripiego automatico era la mossa peggiore delle tre: a
+        // sessantacinque gradi stira di due volte e mezza — cioè quasi quanto la cilindrica
+        // che si era appena rifiutata — e nessuno l'aveva chiesta.
         return StitchProjection.EQUIRECTANGULAR
     }
 
@@ -3984,13 +3983,21 @@ class PanoramaStitcher(
         /**
          * Quanto una proiezione può allargare il pixel più lontano dall'orizzonte.
          *
-         * Una volta e mezza è il punto in cui l'interpolazione non si nota ancora. Oltre, la
-         * tela chiede più pixel di quanti la foto ne contenga e se li inventa: il file cresce,
-         * il dettaglio no, e il risultato sembra molle proprio dove è più grande. Con questo
-         * limite una fila sola resta cilindrica (a 35° stira 1,48×) e una panoramica su tre
-         * file passa all'equirettangolare, che non stira affatto.
+         * Oltre questo la tela chiede più pixel di quanti la foto ne contenga e se li inventa:
+         * il file cresce, il dettaglio no, e il risultato sembra molle proprio dove è più
+         * grande.
+         *
+         * Era una volta e mezza, ed era troppo severo: **toglieva la cilindrica anche a una
+         * fila sola**. Una fila livellata su una camera che guardava in su di quindici gradi
+         * arriva a quarantotto dall'orizzonte, dove la cilindrica stira 2,23× — visibile
+         * soltanto nella striscia più alta, che è cielo, mentre l'orizzonte al centro resta
+         * intatto. E la cilindrica per le panoramiche normali è una scelta esplicita di chi
+         * scatta, non un dettaglio da scavalcare.
+         *
+         * Due e mezza tiene la cilindrica dove serve e rifiuta il caso che conta davvero: tre
+         * file arrivano a sessantacinque gradi, dove la cilindrica stira 5,6×.
          */
-        const val MAX_VERTICAL_STRETCH = 1.5f
+        const val MAX_VERTICAL_STRETCH = 2.5f
 
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2

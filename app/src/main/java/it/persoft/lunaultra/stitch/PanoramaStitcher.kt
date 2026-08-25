@@ -162,6 +162,20 @@ class PanoramaStitcher(
                 }
             }
 
+            // La cucitura campiona dagli originali a piena risoluzione (uno per volta, in
+            // memoria nativa): la copia di lavoro serve solo all'allineamento. Quindi la
+            // tela può chiedere la densità dei pixel veri, non quella della copia ridotta.
+            val sourceScale = frames.minOf { frame ->
+                if (frame.sourceLongSide > 0) {
+                    frame.sourceLongSide.toFloat() / max(frame.width, frame.height)
+                } else {
+                    1f
+                }
+            }.coerceAtLeast(1f)
+            val fullResSampling = tuning.sampleFromOriginals && heapMb >= 384 && sourceScale > 1.05f
+            val requestedDensity = lens.imageWidth / lens.horizontalFovDegrees *
+                (if (fullResSampling) sourceScale else 1f)
+
             // La proiezione: cilindrica per le panoramiche normali — è quella delle file
             // singole, e tiene le altezze naturali vicino all'orizzonte — ma equirettangolare
             // per la sferica, perché è l'unica che arriva ai poli ed è l'unica che un

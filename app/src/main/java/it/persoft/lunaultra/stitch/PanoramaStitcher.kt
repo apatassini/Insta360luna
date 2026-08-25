@@ -1500,7 +1500,8 @@ class PanoramaStitcher(
         val s = when {
             fullCost <= BLEND_HEAP_BUDGET_BYTES -> 1
             fullCost / 4 <= BLEND_HEAP_BUDGET_BYTES -> 2
-            else -> 4
+            fullCost / 16 <= BLEND_HEAP_BUDGET_BYTES -> 4
+            else -> 8
         }
         val gw = (sbw + s - 1) / s
         val gh = (sbh + s - 1) / s
@@ -2140,7 +2141,7 @@ class PanoramaStitcher(
          * ridotta al passo massimo restano le correzioni e le griglie piccole, non le
          * piramidi piene. Prudente per eccesso.
          */
-        const val BLEND_PREDICTED_BYTES_PER_PX = 6f
+        const val BLEND_PREDICTED_BYTES_PER_PX = 3f
 
         /** Quanti fili lavorano insieme alla cucitura: tutti i core, con un tetto sano. */
         const val MAX_STITCH_WORKERS = 8
@@ -2170,9 +2171,10 @@ class PanoramaStitcher(
 
         /**
          * Il tetto assoluto della tela, per il buon senso: oltre, il solo salvataggio JPEG
-         * dura minuti e nessuno schermo la guarda comunque tutta.
+         * dura minuti. Alto abbastanza da non tagliare mai prima della memoria: su una fila
+         * da 180° tagliava a 65 px/grado quando gli originali ne portavano 115.
          */
-        const val CANVAS_HARD_CAP_LONG_SIDE = 16_000
+        const val CANVAS_HARD_CAP_LONG_SIDE = 24_000
 
         /** Una riga con più buchi di così è già dentro il foro, non sul suo bordo. */
         const val MAX_EMPTY_FRACTION = 0.10f

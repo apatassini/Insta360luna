@@ -896,7 +896,11 @@ class PanoramaStitcher(
                 )
             }
             if (results.isEmpty()) {
-                postpone("sovrapposizione troppo povera, resta dov'era")
+                postpone(
+                    "nessuna misura affidabile — o la sovrapposizione è troppo povera, o " +
+                        "l'unica risposta stava sul bordo della finestra di ricerca: resta " +
+                        "agli angoli del gimbal, che sono un dato",
+                )
                 continue
             }
 
@@ -1738,6 +1742,10 @@ class PanoramaStitcher(
             floatArrayOf(0f, 0.12f, 0.12f, 0.05f),
         )
 
+        // Con gli angoli veri i campioni sono già solo quelli della sovrapposizione prevista:
+        // la risposta giusta li conserva quasi tutti, e chi li perde per strada va penalizzato.
+        val expectedSamples = if (wideSearch) 0 else directions.size
+
         var dPan = 0f
         var dTilt = 0f
         var confidence = -1f
@@ -1790,7 +1798,10 @@ class PanoramaStitcher(
                             panCorrectionDegrees = candPan,
                             tiltCorrectionDegrees = candTilt,
                         )
-                        val ncc = sampledNcc(directions, fixedValues, movingLevel, movingScale, candidate, lens)
+                        val ncc = sampledNcc(
+                            directions, fixedValues, movingLevel, movingScale, candidate, lens,
+                            expectedSamples = expectedSamples,
+                        )
                         if (ncc > bestNcc) {
                             bestNcc = ncc
                             bestPan = candPan
@@ -1815,6 +1826,22 @@ class PanoramaStitcher(
             confidence = best[2]
         }
         if (confidence < REG_MIN_NCC) return@coroutineScope null
+
+        // Un ottimo che sta sul bordo della finestra non è una misura: è il bordo.
+        //
+        // Quando gli angoli li ha dati il gimbal, sappiamo già dove guardava la camera a meno
+        // di un grado o due. Se l'unica risposta che la correlazione sa dare è «spostati di
+        // nove gradi e mezzo», con la finestra che finisce a dieci, quella risposta non l'ha
+        // trovata: ci è finita contro. Meglio nessuna correzione — cioè gli angoli meccanici,
+        // che sono un dato — di una correzione inventata dal bordo di una ricerca.
+        //
+        // Nella ricerca larga il ragionamento non vale: lì la finestra è larga apposta perché
+        // il passo fra le foto non lo sa nessuno, e una risposta grossa può essere giusta.
+        if (!wideSearch &&
+            (abs(dPan) >= maxPan * REG_WALL_FRACTION || abs(dTilt) >= maxTilt * REG_WALL_FRACTION)
+        ) {
+            return@coroutineScope null
+        }
         Offset(dPan, dTilt, confidence.coerceIn(0f, 1f))
     }
 
@@ -1830,6 +1857,12 @@ class PanoramaStitcher(
         movingScale: Float,
         candidate: FramePlacement,
         lens: PinholeLens,
+        /**
+         * Quanti campioni conserverebbe la risposta giusta. Zero significa «non pesare», ed
+         * è il caso della ricerca larga, dove i campioni sono tutto il fotogramma fermo e la
+         * sovrapposizione vera è per definizione una frazione ignota.
+         */
+        expectedSamples: Int,
     ): Float {
         var n = 0
         var sumF = 0f
@@ -1858,7 +1891,25 @@ class PanoramaStitcher(
         val varF = n * sumFF - sumF * sumF
         val varM = n * sumMM - sumM * sumM
         if (varF < 1f || varM < 1f) return -2f
-        return (n * sumFM - sumF * sumM) / sqrt(varF * varM)
+        val ncc = (n * sumFM - sumF * sumM) / sqrt(varF * varM)
+        if (expectedSamples <= 0) return ncc
+
+        // Il punteggio si pesa con quanta sovrapposizione resta, e questo era il difetto.
+        //
+        // Ogni candidato veniva giudicato **su un insieme diverso di campioni**: spostando il
+        // fotogramma mobile una parte dei punti esce dall'inquadratura e non vota più. Chi si
+        // spostava tanto finiva per essere valutato su poche centinaia di punti invece che su
+        // migliaia — e una correlazione su pochi punti è per pura statistica più alta e più
+        // ballerina di una su tanti. Il massimo si spostava così verso il bordo della finestra
+        // di ricerca, dove i campioni sono meno: si trovavano nove gradi e mezzo di correzione
+        // su un gimbal che sa dove stava guardando a meno di un grado.
+        //
+        // Moltiplicare per la frazione di campioni conservati rimette i candidati sullo stesso
+        // piano: perdere un quarto dei punti costa un quarto del punteggio, e la risposta
+        // giusta — che li conserva quasi tutti — torna a vincere.
+        val coverage = n.toFloat() / expectedSamples
+        if (coverage < REG_MIN_COVERAGE) return -2f
+        return ncc * coverage
     }
 
     /** Direzioni campione nella sovrapposizione fra due fotogrammi, per il pareggio di esposizione. */
@@ -3458,6 +3509,24 @@ class PanoramaStitcher(
 
         /** Una correlazione finale più bassa non è un allineamento, è un caso. */
         const val REG_MIN_NCC = 0.30f
+
+        /**
+         * Quanta sovrapposizione deve restare a un candidato perché il suo punteggio conti.
+         *
+         * Sotto metà dei campioni previsti non si sta più misurando lo stesso pezzo di mondo:
+         * si sta correlando quel che rimane, e quel che rimane dà sempre ragione a chi si è
+         * spostato di più.
+         */
+        const val REG_MIN_COVERAGE = 0.5f
+
+        /**
+         * Quanto vicino al bordo della finestra una risposta smette di essere una misura.
+         *
+         * Con gli angoli del gimbal la finestra è ±10°, e un errore di puntamento vero sta
+         * sotto i due. Sette gradi non sono una correzione: sono il segno che la correlazione
+         * non ha trovato niente e si è appoggiata al limite di quello che le era concesso.
+         */
+        const val REG_WALL_FRACTION = 0.7f
 
         /** Due vicini che suggeriscono correzioni più lontane di così sono in disaccordo. */
         const val ANCHOR_AGREEMENT_DEGREES = 0.8f

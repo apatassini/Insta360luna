@@ -92,6 +92,11 @@ class PanoramaStitcher(
     private val onProgress: (Float, String) -> Unit = { _, _ -> },
     /** La ricetta: le manopole regolabili dell'unione. Il default è la ricetta completa. */
     private val tuning: StitchTuning = StitchTuning(),
+    /**
+     * Quanta memoria c'è davvero. Senza, si resta sulla vecchia stima prudente — e il log lo
+     * dichiara, invece di far passare un'ipotesi per una misura.
+     */
+    private val memory: MemoryBudget = MemoryBudget.unmeasured(),
 ) {
 
     /**
@@ -311,6 +316,7 @@ class PanoramaStitcher(
                         "cucitura dalla copia di lavoro a $workingLongSide px"
                     },
             )
+            notes += memory.describe()
             notes += composeDetail
             notes += ("Tempi: allineamento %.0f s · cucitura %.0f s — riconoscimento %.0f s · " +
                 "fusione %.0f s · pittura %.0f s · apertura originali %.0f s").format(
@@ -344,6 +350,8 @@ class PanoramaStitcher(
                 }
             }
 
+            // Le copie di lavoro sono già state liberate una per una a fine cucitura; questa
+            // è la rete per chi non fosse arrivato fin lì. Riciclare due volte non fa niente.
             frames.forEach { it.bitmap.recycle() }
             onProgress(1f, "Panoramica pronta")
 
@@ -507,10 +515,10 @@ class PanoramaStitcher(
         // Il conto sopra pesa i vettori di heap Java. La tela invece è un Bitmap, e i Bitmap
         // vivono in memoria nativa: fuori da quel tetto, ma non fuori dal telefono. Quattro
         // byte per pixel su una panoramica a tre file sono quasi un gigabyte, e non contarli
-        // significa scoprirlo quando il sistema chiude l'app. Il tetto qui sotto è dichiarato
-        // provvisorio apposta: sparirà quando la tela smetterà di essere un Bitmap e diventerà
-        // un file scritto a bande, che è la vera soluzione.
-        val canvasAllowance = heapMb.toLong() * 1024L * 1024L * CANVAS_NATIVE_HEAP_MULTIPLE
+        // significa scoprirlo quando il sistema chiude l'applicazione. Quanto ce ne stia non
+        // si indovina: lo dice [MemoryBudget], che chiede al sistema quanta memoria è libera
+        // davvero e sotto quale soglia comincia a chiudere applicazioni.
+        val canvasAllowance = memory.canvasBytes
         val canvasPerDensitySquared = ownerArea * 4f
         val canvasAffordable = if (canvasPerDensitySquared > 0f) {
             kotlin.math.sqrt(canvasAllowance / canvasPerDensitySquared.toDouble()).toFloat()
@@ -2126,10 +2134,16 @@ class PanoramaStitcher(
                 )
                 val last = detail.removeLastOrNull()
                 if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
-                // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori e il suo
-                // originale a piena risoluzione si liberano.
+                // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori, il suo
+                // originale a piena risoluzione **e la sua copia di lavoro** si liberano.
+                //
+                // La copia di lavoro se ne andava solo dopo il ritaglio, cioè nel momento
+                // peggiore: nove copie da trenta megabyte tenute in vita mentre in memoria
+                // c'erano già la tela e la sua copia ritagliata. Da qui in avanti nessuno la
+                // guarda più, e trecento megabyte in meno sul picco sono trecento megabyte.
                 frame.releaseWorkingData()
                 frame.closeFullResolution()
+                frame.bitmap.recycle()
             }
         } finally {
             closeGpu(gpu)
@@ -3530,16 +3544,6 @@ class PanoramaStitcher(
          * costa più di quello che rende. A 65° la cilindrica ha già raddoppiato la scala
          * verticale rispetto all'orizzonte; a 75° l'ha quadruplicata e si ferma.
          */
-        /**
-         * Quante volte il tetto della heap Java può valere la tela in memoria nativa.
-         *
-         * È un numero di buon senso, non una misura: Android non dice quanta memoria nativa
-         * concede, e il tetto della heap è l'unica cosa che scala con la memoria del
-         * telefono. Due volte significa un gigabyte su un telefono da 512 MB di heap — che
-         * è tanto, ma è quello che una panoramica onesta di nove foto chiede davvero.
-         */
-        const val CANVAS_NATIVE_HEAP_MULTIPLE = 2L
-
         const val CYLINDRICAL_COMFORT_DEGREES = 65f
         const val MERCATOR_COMFORT_DEGREES = 72f
 

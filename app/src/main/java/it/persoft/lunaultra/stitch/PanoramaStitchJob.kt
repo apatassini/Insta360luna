@@ -363,7 +363,9 @@ class PanoramaStitchJob(
         tuning: StitchTuning = StitchTuning(),
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
-        val stitcher = PanoramaStitcher(onProgress, tuning)
+        // La memoria si misura adesso, non all'avvio: quanta ne sia libera dipende da cosa
+        // stava facendo il telefono un minuto fa.
+        val stitcher = PanoramaStitcher(onProgress, tuning, MemoryBudget.measure(context))
         val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir, wideSearch).getOrThrow()
         val unaligned = outcome.report.refinements.count { it.contains("resta dov'era") }
         if (unaligned > 0) {
@@ -444,6 +446,7 @@ class PanoramaStitchJob(
                     onProgress((index + fraction) / variants.size, "$header: $message")
                 },
                 tuning = variant.tuning,
+                memory = MemoryBudget.measure(context),
             ).stitch(trio, horizontalFovDegrees, fillNadir = false, wideSearch = wideSearch)
             outcome.onSuccess { out ->
                 val name = save(

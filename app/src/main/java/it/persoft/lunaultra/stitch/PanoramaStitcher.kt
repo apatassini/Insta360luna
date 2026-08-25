@@ -194,15 +194,34 @@ class PanoramaStitcher(
                     val median = if (measured.isEmpty()) null else measured.sorted()[measured.size / 2]
                     val enough = measured.size >= (frames.size + 1) / 2
                     if (tuning.levelHorizon && enough && median != null) {
-                        // I fotogrammi in cui l'orizzonte non si vede prendono la mediana degli
-                        // altri: meglio l'inclinazione dei vicini che uno zero di comodo.
-                        placements = placements.mapIndexed { i, placement ->
-                            placement.copy(tiltDegrees = pitches[i] ?: median)
-                        }
-                        levelNotes += "Orizzonte livellato: camera a %s (misurata su %d foto su %d)".format(
+                        // **Una sola inclinazione per tutti**, non una per fotogramma.
+                        //
+                        // Qui c'era il difetto che faceva il mare a onde. Una fila di scatti
+                        // la fa un gimbal che tiene l'inclinazione ferma: la camera guardava
+                        // in su di un tot, e di quel tot per tutti e tre gli scatti. Se le tre
+                        // misure dell'orizzonte danno +11,6°, +7,8° e niente, quei quattro
+                        // gradi di differenza non sono la camera che si è mossa — è il
+                        // rilevatore che in una foto ha trovato l'orizzonte e in un'altra il
+                        // bordo di una nuvola.
+                        //
+                        // Dare a ogni fotogramma la *sua* misura significa ruotare ogni
+                        // fotogramma di un angolo diverso. E un errore di rotazione attorno
+                        // all'asse orizzontale non sposta l'orizzonte: lo **incurva**, perché
+                        // un cerchio massimo inclinato di δ diventa una sinusoide di ampiezza
+                        // δ. Ogni foto prendeva la sua curva, e il mare andava a onde — una
+                        // gobba per fotogramma, esattamente come si vede.
+                        //
+                        // La mediana è una misura sola, sbagliata al massimo di quanto sbaglia
+                        // il rilevatore, e sbagliata **uguale per tutti**: una panoramica
+                        // storta in blocco, non ondulata. E lo scarto fra le misure finisce
+                        // nel log, perché è la cosa che dice se fidarsi.
+                        placements = placements.map { it.copy(tiltDegrees = median) }
+                        val spread = (measured.maxOrNull() ?: 0f) - (measured.minOrNull() ?: 0f)
+                        levelNotes += ("Orizzonte livellato: camera a %+.1f° per tutte (misure %s, " +
+                            "scarto fra le misure %.1f°)").format(
+                            median,
                             pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
-                            measured.size,
-                            frames.size,
+                            spread,
                         )
                     } else if (enough && median != null && abs(median) >= HORIZON_NOTABLE_DEGREES) {
                         // Di serie la tela resta centrata sul centro delle foto: è la scelta
@@ -2070,9 +2089,17 @@ class PanoramaStitcher(
         // Moltiplicare per la frazione di campioni conservati rimette i candidati sullo stesso
         // piano: perdere un quarto dei punti costa un quarto del punteggio, e la risposta
         // giusta — che li conserva quasi tutti — torna a vincere.
+        // La copertura fa da **finestra**, non da penalità.
+        //
+        // Chi perde troppi campioni non viene considerato affatto: non sta più misurando lo
+        // stesso pezzo di mondo. Ma fra quelli ammessi il punteggio resta la correlazione
+        // nuda, perché moltiplicarla anche per la copertura la abbassava sotto il minimo e il
+        // risultato era che non passava più niente — «concordanza 0%» su tutte le foto, cioè
+        // la ricerca grossolana che non contribuiva più. Due difese sullo stesso numero sono
+        // una di troppo: la finestra decide *dove* cercare, la soglia decide *se* fidarsi.
         val coverage = n.toFloat() / expectedSamples
         if (coverage < REG_MIN_COVERAGE) return -2f
-        return ncc * coverage
+        return ncc
     }
 
     /** Direzioni campione nella sovrapposizione fra due fotogrammi, per il pareggio di esposizione. */

@@ -96,13 +96,8 @@ class PanoramaStitcher(
             val heapMb = (Runtime.getRuntime().maxMemory() / (1024L * 1024L)).toInt()
             val workingLongSide = when {
                 heapMb >= 384 -> GENEROUS_WORKING_LONG_SIDE
-                heapMb >= 256 -> 2_000
+                heapMb >= 256 -> 2_400
                 else -> WORKING_LONG_SIDE
-            }
-            val canvasLongSide = when {
-                heapMb >= 384 -> GENEROUS_CANVAS_LONG_SIDE
-                heapMb >= 256 -> 6_000
-                else -> MAX_CANVAS_LONG_SIDE
             }
             onProgress(0.02f, "Leggo gli scatti ($workingLongSide px, heap $heapMb MB)")
             val frames = loadFrames(shots, workingLongSide)
@@ -110,20 +105,30 @@ class PanoramaStitcher(
             val lens = PinholeLens(first.width, first.height, horizontalFovDegrees)
 
             var placements = shots.map { FramePlacement(it.panDegrees, it.tiltDegrees) }
+            // La densità della tela non è più un numero fisso: si calcola dal budget di
+            // memoria vero, sapendo quanto costerà la cucitura di ogni fotogramma con la
+            // fusione ristretta alla sola sovrapposizione. È quello che decide quanto
+            // grande esce la panoramica.
+            val density = chooseDensity(placements, lens, heapMb)
             val canvas = PanoramaCanvas.covering(
                 placements = placements,
                 lens = lens,
-                requestedPixelsPerDegree = lens.imageWidth / lens.horizontalFovDegrees,
-                maximumLongSide = canvasLongSide,
+                requestedPixelsPerDegree = density,
+                maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
             )
 
             onProgress(0.10f, "Allineo i fotogrammi")
+            val refineStartedAt = System.currentTimeMillis()
             val refinement = refine(frames, placements, lens, canvas, wideSearch)
+            val refineSeconds = (System.currentTimeMillis() - refineStartedAt) / 1000f
             placements = refinement.placements
             frames.forEach { it.releaseWorkingData() }
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
-            var bitmap = compose(frames, placements, lens, canvas, refinement.aligned)
+            val composeDetail = mutableListOf<String>()
+            val composeStartedAt = System.currentTimeMillis()
+            var bitmap = compose(frames, placements, lens, canvas, refinement.aligned, composeDetail)
+            val composeSeconds = (System.currentTimeMillis() - composeStartedAt) / 1000f
             val patchedRows = if (fillNadir) {
                 onProgress(0.97f, "Chiudo il buco sotto")
                 fillNadirHole(bitmap)
@@ -135,7 +140,13 @@ class PanoramaStitcher(
             // copertura che non lo è. Si ritagliano, tranne che sulla sferica: lì la tela 2:1
             // È il formato, e chi la guarda a 360° la vuole intera.
             val notes = refinement.notes.toMutableList()
-            notes.add(0, "Risoluzione di lavoro $workingLongSide px, tela fino a $canvasLongSide px (heap $heapMb MB)")
+            notes.add(
+                0,
+                "Risoluzione di lavoro $workingLongSide px · tela ${canvas.width}×${canvas.height} " +
+                    "a %.1f px/grado (heap $heapMb MB)".format(canvas.pixelsPerDegree),
+            )
+            notes += composeDetail
+            notes += "Tempi: allineamento %.0f s · cucitura %.0f s".format(refineSeconds, composeSeconds)
             if (!fillNadir) {
                 onProgress(0.98f, "Ritaglio il nero ai bordi")
                 val before = "${bitmap.width}×${bitmap.height}"
@@ -164,6 +175,85 @@ class PanoramaStitcher(
                 ),
             )
         }
+    }
+
+    /**
+     * Quanti pixel per grado può permettersi la tela, dai conti e non da un numero fisso.
+     *
+     * La memoria della cucitura è prevedibile prima di cominciare: per ogni fotogramma
+     * servono i pesi dell'intera finestra (4 byte a pixel) e la fusione multibanda solo sul
+     * rettangolo che racchiude le sovrapposizioni con i fotogrammi già cuciti (~64 byte a
+     * pixel), più la mappa dei possessori sull'intera tela (1 byte a pixel). Tutte queste
+     * aree crescono col quadrato della densità: si prende il fotogramma più caro, si divide
+     * il budget, e la radice è la densità. Le sovrapposizioni si stimano dagli angoli
+     * pianificati, allargati di [OVERLAP_SLACK_DEGREES] perché la rifinitura li sposterà.
+     */
+    private fun chooseDensity(
+        placements: List<FramePlacement>,
+        lens: PinholeLens,
+        heapMb: Int,
+    ): Float {
+        val requested = lens.imageWidth / lens.horizontalFovDegrees
+        val wH = lens.horizontalFovDegrees + 2f * BBOX_MARGIN_DEGREES
+        val wV = lens.verticalFovDegrees + 2f * BBOX_MARGIN_DEGREES
+        val slackH = wH / 2f + OVERLAP_SLACK_DEGREES
+        val slackV = wV / 2f + OVERLAP_SLACK_DEGREES
+
+        // Il fotogramma più caro: finestra piena + rettangolo delle sue sovrapposizioni.
+        var worstBlendArea = 0f
+        for (k in placements.indices) {
+            var o0 = Float.MAX_VALUE
+            var o1 = -Float.MAX_VALUE
+            var o2 = Float.MAX_VALUE
+            var o3 = -Float.MAX_VALUE
+            for (j in 0 until k) {
+                val dx = slackH * 2f - abs(placements[k].effectivePan - placements[j].effectivePan)
+                val dy = slackV * 2f - abs(placements[k].effectiveTilt - placements[j].effectiveTilt)
+                if (dx <= 0f || dy <= 0f) continue
+                val ix0 = max(placements[k].effectivePan - slackH, placements[j].effectivePan - slackH)
+                val ix1 = min(placements[k].effectivePan + slackH, placements[j].effectivePan + slackH)
+                val iy0 = max(placements[k].effectiveTilt - slackV, placements[j].effectiveTilt - slackV)
+                val iy1 = min(placements[k].effectiveTilt + slackV, placements[j].effectiveTilt + slackV)
+                if (ix0 < o0) o0 = ix0
+                if (ix1 > o1) o1 = ix1
+                if (iy0 < o2) o2 = iy0
+                if (iy1 > o3) o3 = iy1
+            }
+            val area = if (o1 > o0) (o1 - o0) * (o3 - o2) else 0f
+            if (area > worstBlendArea) worstBlendArea = area
+        }
+
+        val spanH = min(
+            placements.maxOf { it.effectivePan } - placements.minOf { it.effectivePan } + wH,
+            PanoramaCanvas.FULL_TURN_DEGREES,
+        )
+        val spanV = min(
+            placements.maxOf { it.effectiveTilt } - placements.minOf { it.effectiveTilt } + wV,
+            180f,
+        )
+        val ownerArea = spanH * spanV
+
+        // Il budget: metà scarsa della heap, meno i pixel del fotogramma in lavorazione.
+        val frameBytes = lens.imageWidth.toLong() * lens.imageHeight * 4L
+        val budget = (heapMb.toLong() * 1024L * 1024L * 45L / 100L) - frameBytes - 32L * 1024L * 1024L
+        val perDensitySquared = wH * wV * 4f +
+            worstBlendArea * BLEND_PREDICTED_BYTES_PER_PX +
+            ownerArea / (OWNER_SCALE * OWNER_SCALE)
+        val affordable = if (budget > 0 && perDensitySquared > 0f) {
+            kotlin.math.sqrt(budget / perDensitySquared.toDouble()).toFloat()
+        } else {
+            0f
+        }
+
+        // Mai sotto quello che i vecchi tetti fissi avrebbero concesso: il calcolo può solo
+        // migliorare le cose, non peggiorarle.
+        val legacyCap = when {
+            heapMb >= 384 -> 8_000
+            heapMb >= 256 -> 6_000
+            else -> MAX_CANVAS_LONG_SIDE
+        }
+        val legacyFloor = min(requested, legacyCap / max(spanH, spanV))
+        return min(requested, max(affordable, legacyFloor))
     }
 
     /** Un livello della piramide di luminanza: i dati e la sua misura. */
@@ -812,15 +902,23 @@ class PanoramaStitcher(
         lens: PinholeLens,
         canvas: PanoramaCanvas,
         aligned: BooleanArray,
+        detail: MutableList<String>,
     ): Bitmap {
         val output = Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
         // Nero, non trasparente: un JPEG non ha trasparenza e diventerebbe bianco.
         output.eraseColor(0xFF000000.toInt())
         val gains = exposureGains(frames, placements, lens, canvas, aligned)
+        detail += "Guadagni di esposizione: " +
+            gains.mapIndexed { i, g -> "%.2f%s".format(g, if (!aligned[i]) "≈" else "") }
+                .joinToString(" · ") + " (≈ = stimato su angoli ipotizzati)"
 
         // Chi possiede ogni pixel della tela, quantificato: il peso della sfumatura del
-        // fotogramma che l'ha dipinto. Serve a decidere le maschere dei fotogrammi successivi.
-        val ownerWeight = ByteArray(canvas.width * canvas.height)
+        // fotogramma che l'ha dipinto. Serve a decidere le maschere dei fotogrammi
+        // successivi. A mezza risoluzione: la decisione di possesso non ha bisogno del
+        // pixel esatto, e su una tela grande questa mappa era il vettore più pesante.
+        val ownerWidth = (canvas.width + OWNER_SCALE - 1) / OWNER_SCALE
+        val ownerHeight = (canvas.height + OWNER_SCALE - 1) / OWNER_SCALE
+        val ownerWeight = ByteArray(ownerWidth * ownerHeight)
 
         frames.forEachIndexed { index, frame ->
             currentCoroutineContext().ensureActive()
@@ -828,7 +926,10 @@ class PanoramaStitcher(
                 0.35f + 0.6f * index / frames.size,
                 "Cucio ${frame.label} (${index + 1}/${frames.size})",
             )
-            pasteFrame(output, ownerWeight, frame, placements[index], gains[index], lens, canvas)
+            val startedAt = System.currentTimeMillis()
+            pasteFrame(output, ownerWeight, frame, placements[index], gains[index], lens, canvas, detail)
+            val last = detail.removeLastOrNull()
+            if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
             // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori si liberano.
             frame.releaseWorkingData()
         }
@@ -849,6 +950,7 @@ class PanoramaStitcher(
         gain: Float,
         lens: PinholeLens,
         canvas: PanoramaCanvas,
+        detail: MutableList<String>? = null,
     ) {
         val margin = BBOX_MARGIN_DEGREES
         val halfH = lens.horizontalFovDegrees / 2f + margin
@@ -875,11 +977,17 @@ class PanoramaStitcher(
         val count = bw * bh
         val columns = IntArray(bw) { bx -> ((c0 + bx) % canvas.width + canvas.width) % canvas.width }
 
-        // Il fotogramma nuovo, proiettato nel ritaglio. Colori impacchettati e non canali in
-        // virgola mobile: la fusione lavora un canale alla volta proprio per non tenere in
-        // memoria tre piani di float per due immagini insieme.
-        val newColor = IntArray(count)
+        // Ricognizione: i pesi del fotogramma nuovo — l'unico vettore a tutta finestra,
+        // quattro byte a pixel — e il perimetro della sovrapposizione con la tela già
+        // dipinta. La fusione multibanda costa cara e serve solo lì: tutto il resto del
+        // fotogramma si dipinge diretto, una riga alla volta, senza vettori giganti. È
+        // questo che permette alla tela di crescere: prima la fusione lavorava sull'intera
+        // finestra e la memoria imponeva panoramiche piccole.
         val newW = FloatArray(count)
+        var ov0x = Int.MAX_VALUE
+        var ov1x = -1
+        var ov0y = Int.MAX_VALUE
+        var ov1y = -1
         for (by in 0 until bh) {
             val latitude = canvas.latitudeAt(row0 + by)
             for (bx in 0 until bw) {
@@ -888,94 +996,262 @@ class PanoramaStitcher(
                 if (!point.inside) continue
                 val weight = featherWeight(point.x, point.y, frame.width, frame.height)
                 if (weight <= 0f) continue
-                val color = sample(frame, point.x, point.y)
+                newW[by * bw + bx] = weight
+                if (ownerWeight[ownerIndex(canvas.width, row0 + by, columns[bx])].toInt() != 0) {
+                    if (bx < ov0x) ov0x = bx
+                    if (bx > ov1x) ov1x = bx
+                    if (by < ov0y) ov0y = by
+                    if (by > ov1y) ov1y = by
+                }
+            }
+        }
+
+        // La sotto-finestra della fusione, con il contesto che serve alle piramidi.
+        val hasOverlap = ov1x >= 0
+        var sx0 = 0
+        var sx1 = -1
+        var sy0 = 0
+        var sy1 = -1
+        if (hasOverlap) {
+            sx0 = (ov0x - BLEND_CONTEXT_PX).coerceAtLeast(0)
+            sx1 = (ov1x + BLEND_CONTEXT_PX).coerceAtMost(bw - 1)
+            sy0 = (ov0y - BLEND_CONTEXT_PX).coerceAtLeast(0)
+            sy1 = (ov1y + BLEND_CONTEXT_PX).coerceAtMost(bh - 1)
+            blendSubWindow(
+                output, ownerWeight, frame, placement, gain, lens, canvas,
+                columns, row0, bw, newW, sx0, sx1, sy0, sy1,
+            )
+        }
+
+        // Il resto del fotogramma: pittura diretta riga per riga. Fuori dalla
+        // sotto-finestra ogni pixel nuovo cade su tela vuota per costruzione, quindi non
+        // c'è niente da fondere.
+        val rowPixels = IntArray(canvas.width)
+        for (by in 0 until bh) {
+            val insideBlendRows = hasOverlap && by in sy0..sy1
+            var touched = false
+            var readRow = false
+            var latitude = 0f
+            for (bx in 0 until bw) {
+                if (insideBlendRows && bx in sx0..sx1) continue
                 val i = by * bw + bx
-                newW[i] = weight
+                val weight = newW[i]
+                if (weight <= 0f) continue
+                if (!readRow) {
+                    readRow = true
+                    latitude = canvas.latitudeAt(row0 + by)
+                    output.getPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
+                }
+                val longitude = canvas.longitudeAt(columns[bx])
+                val point = projectToFrame(longitude, latitude, placement, lens)
+                if (!point.inside) continue
+                val color = sample(frame, point.x, point.y)
                 val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                 val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                 val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
-                newColor[i] = (r shl 16) or (g shl 8) or b
-            }
-        }
-
-        // Quello che c'è già sulla tela, nello stesso ritaglio.
-        val oldColor = IntArray(count)
-        readRegion(output, columns, row0, bw, bh, oldColor)
-        val oldW = FloatArray(count)
-        for (by in 0 until bh) {
-            val rowBase = (row0 + by) * canvas.width
-            for (bx in 0 until bw) {
-                oldW[by * bw + bx] = (ownerWeight[rowBase + columns[bx]].toInt() and 0xFF) / 255f
-            }
-        }
-
-        val baseColor = IntArray(count)
-        val mask = FloatArray(count)
-        var hasOverlap = false
-        for (i in 0 until count) {
-            baseColor[i] = oldColor[i] and 0xFFFFFF
-            when {
-                newW[i] <= 0f && oldW[i] <= 0f -> Unit
-                newW[i] <= 0f -> newColor[i] = baseColor[i]
-                oldW[i] <= 0f -> {
-                    baseColor[i] = newColor[i]
-                    mask[i] = 1f
-                }
-                else -> {
-                    hasOverlap = true
-                    if (newW[i] > oldW[i]) mask[i] = 1f
-                }
-            }
-        }
-
-        val outColor = IntArray(count)
-        if (!hasOverlap) {
-            // Nessuna sovrapposizione: si dipinge e basta.
-            for (i in 0 until count) {
-                outColor[i] = if (newW[i] > 0f) 0xFF000000.toInt() or newColor[i] else oldColor[i]
-            }
-        } else {
-            // I punti che nessuno copre restano neri sulla tela, ma dentro le piramidi il nero
-            // sanguinerebbe nelle bande larghe e scurirebbe il bordo vero della panoramica: si
-            // riempiono con il colore valido più vicino, solo per la durata della fusione.
-            val valid = BooleanArray(count) { newW[it] > 0f || oldW[it] > 0f }
-            fillHoles(baseColor, valid, bw, bh)
-            for (i in 0 until count) if (!valid[i]) newColor[i] = baseColor[i]
-
-            // Un canale per volta: la memoria della fusione è un piano, non tre.
-            java.util.Arrays.fill(outColor, 0xFF000000.toInt())
-            for (shift in intArrayOf(16, 8, 0)) {
-                val baseChannel = FloatArray(count) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
-                val overChannel = FloatArray(count) { ((newColor[it] shr shift) and 0xFF).toFloat() }
-                val blended = MultibandBlender.blend(
-                    baseChannels = arrayOf(baseChannel),
-                    overlayChannels = arrayOf(overChannel),
-                    mask = mask,
-                    width = bw,
-                    height = bh,
-                )[0]
-                for (i in 0 until count) {
-                    outColor[i] = outColor[i] or (blended[i].toChannel() shl shift)
-                }
-            }
-            for (i in 0 until count) {
-                if (newW[i] <= 0f && oldW[i] <= 0f) outColor[i] = oldColor[i]
-            }
-        }
-
-        writeRegion(output, columns, row0, bw, bh, outColor)
-        for (by in 0 until bh) {
-            val rowBase = (row0 + by) * canvas.width
-            for (bx in 0 until bw) {
-                val i = by * bw + bx
-                val winner = max(oldW[i], newW[i])
-                val quantized = (winner * 255f).roundToInt().coerceIn(0, 255)
-                val index = rowBase + columns[bx]
+                rowPixels[columns[bx]] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+                touched = true
+                val quantized = (weight * 255f).roundToInt().coerceIn(1, 255)
+                val index = ownerIndex(canvas.width, row0 + by, columns[bx])
                 if (quantized > (ownerWeight[index].toInt() and 0xFF)) {
                     ownerWeight[index] = quantized.toByte()
                 }
             }
+            if (touched) {
+                output.setPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
+            }
         }
+
+        detail?.add(
+            "%s: finestra %d×%d px · fusione su %s".format(
+                frame.label, bw, bh,
+                if (hasOverlap) "${sx1 - sx0 + 1}×${sy1 - sy0 + 1} px" else "niente (primo tocco di tela)",
+            ),
+        )
+    }
+
+    /**
+     * La fusione multibanda, ristretta alla sotto-finestra dove vecchio e nuovo si toccano —
+     * e calcolata su una versione ridotta quando la finestra è grande.
+     *
+     * L'idea che rende possibile la tela grande: della fusione multibanda serve solo la
+     * **correzione** — la differenza fra la fusione vera e il montaggio a taglio netto — ed
+     * è per natura a bassa frequenza, perché le bande fini cambiano mano in un pixel. Quindi
+     * si costruiscono vecchio, nuovo e maschera a passo [s], si fonde lì, si sottrae il
+     * montaggio netto ridotto, e la differenza si riapplica riga per riga al montaggio netto
+     * a piena risoluzione. Con `s = 1` è la fusione esatta di prima; con `s` maggiore la
+     * memoria cala col quadrato e il dettaglio fine resta pieno, perché viene dal montaggio,
+     * non dalla piramide.
+     */
+    private fun blendSubWindow(
+        output: Bitmap,
+        ownerWeight: ByteArray,
+        frame: Frame,
+        placement: FramePlacement,
+        gain: Float,
+        lens: PinholeLens,
+        canvas: PanoramaCanvas,
+        columns: IntArray,
+        row0: Int,
+        bw: Int,
+        windowNewW: FloatArray,
+        sx0: Int,
+        sx1: Int,
+        sy0: Int,
+        sy1: Int,
+    ) {
+        val sbw = sx1 - sx0 + 1
+        val sbh = sy1 - sy0 + 1
+        val subRow0 = row0 + sy0
+
+        // La scala della correzione: piena finché la memoria ci sta, poi a passi.
+        val fullCost = sbw.toLong() * sbh * BLEND_BYTES_PER_PX.toLong()
+        val s = when {
+            fullCost <= BLEND_HEAP_BUDGET_BYTES -> 1
+            fullCost / 4 <= BLEND_HEAP_BUDGET_BYTES -> 2
+            else -> 4
+        }
+        val gw = (sbw + s - 1) / s
+        val gh = (sbh + s - 1) / s
+        val gcount = gw * gh
+
+        // 1) Vecchio, nuovo e maschera, campionati al centro di ogni cella s×s.
+        val baseColor = IntArray(gcount)
+        val newColor = IntArray(gcount)
+        val mask = FloatArray(gcount)
+        val valid = BooleanArray(gcount)
+        val rowPixels = IntArray(canvas.width)
+        for (gy in 0 until gh) {
+            val by = min(gy * s + s / 2, sbh - 1)
+            val row = subRow0 + by
+            val latitude = canvas.latitudeAt(row)
+            output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
+            for (gx in 0 until gw) {
+                val bx = min(gx * s + s / 2, sbw - 1)
+                val col = columns[sx0 + bx]
+                val g = gy * gw + gx
+                val newWeight = windowNewW[(sy0 + by) * bw + (sx0 + bx)]
+                val oldWeight = (ownerWeight[ownerIndex(canvas.width, row, col)].toInt() and 0xFF) / 255f
+                val old = rowPixels[col] and 0xFFFFFF
+                baseColor[g] = old
+                valid[g] = newWeight > 0f || oldWeight > 0f
+                if (newWeight > 0f) {
+                    val longitude = canvas.longitudeAt(col)
+                    val point = projectToFrame(longitude, latitude, placement, lens)
+                    if (point.inside) {
+                        val color = sample(frame, point.x, point.y)
+                        val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val gch = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                        newColor[g] = (r shl 16) or (gch shl 8) or b
+                        if (oldWeight <= 0f) {
+                            baseColor[g] = newColor[g]
+                            mask[g] = 1f
+                        } else if (newWeight > oldWeight) {
+                            mask[g] = 1f
+                        }
+                    } else {
+                        newColor[g] = old
+                    }
+                } else {
+                    newColor[g] = old
+                }
+            }
+        }
+
+        // I punti che nessuno copre, riempiti col colore valido più vicino: il nero dentro
+        // le piramidi sanguinerebbe nelle bande larghe e scurirebbe il bordo vero.
+        fillHoles(baseColor, valid, gw, gh)
+        for (g in 0 until gcount) if (!valid[g]) newColor[g] = baseColor[g]
+
+        // 2) La fusione sulla versione ridotta, un canale per volta; della fusione si tiene
+        // solo la correzione rispetto al montaggio netto ridotto.
+        val correction = Array(3) { FloatArray(gcount) }
+        for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
+            val baseChannel = FloatArray(gcount) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
+            val overChannel = FloatArray(gcount) { ((newColor[it] shr shift) and 0xFF).toFloat() }
+            val blended = MultibandBlender.blend(
+                baseChannels = arrayOf(baseChannel),
+                overlayChannels = arrayOf(overChannel),
+                mask = mask,
+                width = gw,
+                height = gh,
+            )[0]
+            val target = correction[channel]
+            for (g in 0 until gcount) {
+                val hard = if (mask[g] > 0.5f) overChannel[g] else baseChannel[g]
+                target[g] = blended[g] - hard
+            }
+        }
+
+        // 3) Riga per riga a piena risoluzione: montaggio netto più correzione interpolata.
+        for (by in 0 until sbh) {
+            val row = subRow0 + by
+            val latitude = canvas.latitudeAt(row)
+            output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
+            var touched = false
+            val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
+            for (bx in 0 until sbw) {
+                val col = columns[sx0 + bx]
+                val newWeight = windowNewW[(sy0 + by) * bw + (sx0 + bx)]
+                val ownerIdx = ownerIndex(canvas.width, row, col)
+                val oldWeight = (ownerWeight[ownerIdx].toInt() and 0xFF) / 255f
+                if (newWeight <= 0f && oldWeight <= 0f) continue
+
+                var hard = rowPixels[col] and 0xFFFFFF
+                if (newWeight > 0f && (oldWeight <= 0f || newWeight > oldWeight)) {
+                    val longitude = canvas.longitudeAt(col)
+                    val point = projectToFrame(longitude, latitude, placement, lens)
+                    if (point.inside) {
+                        val color = sample(frame, point.x, point.y)
+                        val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                        hard = (r shl 16) or (g shl 8) or b
+                    }
+                }
+
+                val gxf = (bx.toFloat() / s) - 0.5f + 0.5f / s
+                var outPixel = 0xFF000000.toInt()
+                for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
+                    val value = ((hard shr shift) and 0xFF) +
+                        bilinearGrid(correction[channel], gw, gh, gxf, gyf)
+                    outPixel = outPixel or (value.roundToInt().coerceIn(0, 255) shl shift)
+                }
+                rowPixels[col] = outPixel
+                touched = true
+
+                val winner = max(oldWeight, newWeight)
+                val quantized = (winner * 255f).roundToInt().coerceIn(0, 255)
+                if (quantized > (ownerWeight[ownerIdx].toInt() and 0xFF)) {
+                    ownerWeight[ownerIdx] = quantized.toByte()
+                }
+            }
+            if (touched) {
+                output.setPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
+            }
+        }
+    }
+
+    /** Interpolazione bilineare su una griglia ridotta, ai bordi si ferma. */
+    private fun bilinearGrid(grid: FloatArray, gridWidth: Int, gridHeight: Int, x: Float, y: Float): Float {
+        val cx = x.coerceIn(0f, (gridWidth - 1).toFloat())
+        val cy = y.coerceIn(0f, (gridHeight - 1).toFloat())
+        val x0 = cx.toInt()
+        val y0 = cy.toInt()
+        val x1 = min(x0 + 1, gridWidth - 1)
+        val y1 = min(y0 + 1, gridHeight - 1)
+        val tx = cx - x0
+        val ty = cy - y0
+        val top = grid[y0 * gridWidth + x0] * (1f - tx) + grid[y0 * gridWidth + x1] * tx
+        val bottom = grid[y1 * gridWidth + x0] * (1f - tx) + grid[y1 * gridWidth + x1] * tx
+        return top * (1f - ty) + bottom * ty
+    }
+
+    /** L'indice nella mappa dei possessori, tenuta a mezza risoluzione per pesare la metà². */
+    private fun ownerIndex(canvasWidth: Int, row: Int, col: Int): Int {
+        val ownerWidth = (canvasWidth + OWNER_SCALE - 1) / OWNER_SCALE
+        return (row / OWNER_SCALE) * ownerWidth + (col / OWNER_SCALE)
     }
 
     /**
@@ -1210,10 +1486,11 @@ class PanoramaStitcher(
     ): FloatArray {
         val gains = FloatArray(frames.size) { 1f }
         for (index in 1 until frames.size) {
-            // Il pareggio di colore ha senso solo su una sovrapposizione vera: su un
-            // fotogramma non allineato confronterebbe due pezzi di mondo diversi e
-            // inventerebbe un guadagno — i colori falsati della prova a mano venivano da qui.
-            if (!aligned[index]) continue
+            // Anche i fotogrammi non allineati entrano nella catena: il loro guadagno è una
+            // stima su angoli ipotizzati — meno precisa, e il tetto della catena la tiene a
+            // freno — ma lasciarli a 1.0 li faceva spiccare come una pezza di un altro
+            // colore proprio dove l'unione era già zoppa. Misurato dal vivo: la foto «resta
+            // dov'era» usciva visibilmente più chiara del resto.
 
             val anchorIndex = (0 until index).minByOrNull {
                 angularDistance(
@@ -1376,8 +1653,39 @@ class PanoramaStitcher(
         const val MIN_CHAIN_GAIN = 0.75f
         const val MAX_CHAIN_GAIN = 1.35f
 
-        const val GENEROUS_WORKING_LONG_SIDE = 2_400
-        const val GENEROUS_CANVAS_LONG_SIDE = 8_000
+        const val GENEROUS_WORKING_LONG_SIDE = 3_200
+
+        /**
+         * Il costo per pixel della fusione multibanda a piena scala: vettori interi, canali
+         * in virgola mobile e piramidi. Decide quando [blendSubWindow] passa alla scala
+         * ridotta.
+         */
+        const val BLEND_BYTES_PER_PX = 64f
+
+        /** Il budget di heap concesso a una singola fusione, prima di ridurre la scala. */
+        const val BLEND_HEAP_BUDGET_BYTES = 64L * 1024L * 1024L
+
+        /**
+         * Il costo per pixel *previsto* della fusione per [chooseDensity]: con la scala
+         * ridotta al passo massimo restano le correzioni e le griglie piccole, non le
+         * piramidi piene. Prudente per eccesso.
+         */
+        const val BLEND_PREDICTED_BYTES_PER_PX = 16f
+
+        /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
+        const val OWNER_SCALE = 2
+
+        /** Il contesto attorno alla sovrapposizione che le piramidi vogliono vedere. */
+        const val BLEND_CONTEXT_PX = 96
+
+        /** Di quanto la rifinitura può spostare i fotogrammi: le sovrapposizioni si stimano larghe. */
+        const val OVERLAP_SLACK_DEGREES = 12f
+
+        /**
+         * Il tetto assoluto della tela, per il buon senso: oltre, il solo salvataggio JPEG
+         * dura minuti e nessuno schermo la guarda comunque tutta.
+         */
+        const val CANVAS_HARD_CAP_LONG_SIDE = 16_000
 
         /** Una riga con più buchi di così è già dentro il foro, non sul suo bordo. */
         const val MAX_EMPTY_FRACTION = 0.10f

@@ -945,11 +945,9 @@ class PanoramaStitcher(
             // Ma gli angoli del gimbal sono una misura meccanica buona a un grado, e i punti
             // di controllo cercano in sette decimi di grado: sono già alla scala giusta per
             // finire il lavoro da soli. Quindi si parte da zero correzione e si va avanti.
-            val trusted = results.isNotEmpty()
-
             // Due vicini concordi si mediano; discordi, vince il più sicuro di sé.
-            val proposal = when {
-                !trusted -> Offset(0f, 0f, 0f)
+            val measured = when {
+                results.isEmpty() -> Offset(0f, 0f, 0f)
                 results.size == 2 &&
                     abs(results[0].panDegrees - results[1].panDegrees) < ANCHOR_AGREEMENT_DEGREES &&
                     abs(results[0].tiltDegrees - results[1].tiltDegrees) < ANCHOR_AGREEMENT_DEGREES ->
@@ -960,6 +958,37 @@ class PanoramaStitcher(
                     )
                 else -> results.maxByOrNull { it.confidence }!!
             }
+
+            // Un fotogramma che chiede molto più di tutti gli altri sta sbagliando.
+            //
+            // Il gimbal non sbaglia a caso: se ha una deriva, ce l'ha su tutti gli scatti. Se
+            // otto fotogrammi su nove si sono accontentati di due decimi di grado, il nono che
+            // ne chiede quattro e mezzo non ha scoperto un errore meccanico che agli altri era
+            // sfuggito — ha trovato un massimo che non c'è. È il controllo che nessuna soglia
+            // fissa può fare, perché non guarda un numero assoluto: guarda se questo
+            // fotogramma è in compagnia degli altri.
+            //
+            // Attenzione a cosa **non** fa: se la deriva è sistematica e tutti chiedono tre
+            // gradi, la mediana è tre e tutti passano. Qui si scarta chi è solo.
+            val others = aligned.indices
+                .filter { aligned[it] && it != index }
+                .map { max(abs(placements[it].panCorrectionDegrees), abs(placements[it].tiltCorrectionDegrees)) }
+                .sorted()
+            val claim = max(abs(measured.panDegrees), abs(measured.tiltDegrees))
+            val lonely = results.isNotEmpty() && others.size >= OUTLIER_MIN_WITNESSES &&
+                claim > max(OUTLIER_FLOOR_DEGREES, others[others.size / 2] * OUTLIER_FACTOR)
+            if (lonely) {
+                notes += ("%s: la ricerca grossolana chiedeva %+.2f° / %+.2f° mentre gli altri " +
+                    "si sono accontentati di %.2f°: scartata, resta agli angoli del gimbal")
+                    .format(
+                        frames[index].label,
+                        measured.panDegrees,
+                        measured.tiltDegrees,
+                        others[others.size / 2],
+                    )
+            }
+            val trusted = results.isNotEmpty() && !lonely
+            val proposal = if (trusted) measured else Offset(0f, 0f, 0f)
 
             // La rifinitura finale la fanno i punti di controllo: con il piazzamento globale
             // già trovato dalla piramide, ogni punto cerca solo in un raggio piccolo — più
@@ -2848,6 +2877,17 @@ class PanoramaStitcher(
             output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
             var touched = false
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
+            // La correzione multibanda svanisce ai bordi della sotto-finestra.
+            //
+            // La fusione corregge solo dentro il rettangolo che contiene la sovrapposizione;
+            // fuori non corregge niente. Se sul bordo del rettangolo la correzione vale ancora
+            // qualcosa, quel salto **si vede** — ed è un rettangolo con i lati perfettamente
+            // orizzontali e verticali in mezzo al cielo, che è la cosa più innaturale che una
+            // panoramica possa mostrare. Con più file di foto le sotto-finestre sono tante e i
+            // rettangoli anche. Sfumando la correzione a zero sul bordo il salto sparisce, e
+            // quello che si perde è per costruzione la parte che serviva meno: il bordo della
+            // sotto-finestra è dove la sovrapposizione finisce.
+            val rowFade = edgeFade(by, sbh)
             for (bx in 0 until sbw) {
                 val col = columns[sx0 + bx]
                 val present = windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() != 0
@@ -2888,9 +2928,10 @@ class PanoramaStitcher(
                 // giro. Su una fusione da decine di milioni di pixel sono centinaia di
                 // milioni di oggetti, e il netturbino che li raccoglie ferma tutti i fili.
                 val grids = if (useNew) corrOver else corrBase
-                val red = correctedChannel(hard, 16, grids[0], gw, gh, gxf, gyf)
-                val green = correctedChannel(hard, 8, grids[1], gw, gh, gxf, gyf)
-                val blue = correctedChannel(hard, 0, grids[2], gw, gh, gxf, gyf)
+                val fade = rowFade * edgeFade(bx, sbw)
+                val red = correctedChannel(hard, 16, grids[0], gw, gh, gxf, gyf, fade)
+                val green = correctedChannel(hard, 8, grids[1], gw, gh, gxf, gyf, fade)
+                val blue = correctedChannel(hard, 0, grids[2], gw, gh, gxf, gyf, fade)
                 rowPixels[col] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
                 touched = true
 
@@ -3118,9 +3159,29 @@ class PanoramaStitcher(
         gridHeight: Int,
         gx: Float,
         gy: Float,
-    ): Int = (((hard shr shift) and 0xFF) + bilinearGrid(grid, gridWidth, gridHeight, gx, gy))
+        /** Quanto vale la correzione qui: uno dentro, zero sul bordo della sotto-finestra. */
+        weight: Float,
+    ): Int = (((hard shr shift) and 0xFF) + weight * bilinearGrid(grid, gridWidth, gridHeight, gx, gy))
         .roundToInt()
         .coerceIn(0, 255)
+
+    /**
+     * Uno dentro, zero sul bordo: la rampa che spegne la correzione ai margini.
+     *
+     * Il coseno rialzato invece di una rampa dritta perché una rampa lineare lascia due
+     * spigoli — la derivata salta all'inizio e alla fine — e l'occhio quegli spigoli li
+     * trova: è lo stesso motivo per cui la sfumatura dei fotogrammi è al quadrato e non
+     * lineare.
+     */
+    private fun edgeFade(position: Int, span: Int): Float {
+        if (span <= 2) return 1f
+        val margin = min(BLEND_CONTEXT_PX, span / 2)
+        if (margin <= 0) return 1f
+        val distance = min(position, span - 1 - position)
+        if (distance >= margin) return 1f
+        val t = (distance + 0.5f) / margin
+        return 0.5f - 0.5f * cos(t * PI_FLOAT)
+    }
 
     /** Interpolazione bilineare su una griglia ridotta, ai bordi si ferma. */
     private fun bilinearGrid(grid: FloatArray, gridWidth: Int, gridHeight: Int, x: Float, y: Float): Float {
@@ -3608,6 +3669,16 @@ class PanoramaStitcher(
          */
         const val REG_STRONG_NCC = 0.60f
 
+        /**
+         * Quanti fotogrammi già misurati servono perché «gli altri» siano una compagnia e non
+         * un aneddoto, e di quanto uno può staccarsi da loro prima di essere solo.
+         */
+        const val OUTLIER_MIN_WITNESSES = 3
+        const val OUTLIER_FACTOR = 4f
+
+        /** Sotto questo nessuno è un caso strano: è la deriva normale di un gimbal. */
+        const val OUTLIER_FLOOR_DEGREES = 1.5f
+
         /** Due vicini che suggeriscono correzioni più lontane di così sono in disaccordo. */
         const val ANCHOR_AGREEMENT_DEGREES = 0.8f
 
@@ -3789,8 +3860,14 @@ class PanoramaStitcher(
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2
 
-        /** Il contesto attorno alla sovrapposizione che le piramidi vogliono vedere. */
+        /**
+         * Il contesto attorno alla sovrapposizione che le piramidi vogliono vedere — ed è
+         * anche la larghezza su cui la correzione si spegne arrivando al bordo.
+         */
         const val BLEND_CONTEXT_PX = 96
+
+        /** Pi greco in virgola semplice, per la rampa del coseno rialzato. */
+        const val PI_FLOAT = 3.1415927f
 
         /** Di quanto la rifinitura può spostare i fotogrammi: le sovrapposizioni si stimano larghe. */
         const val OVERLAP_SLACK_DEGREES = 12f

@@ -373,7 +373,7 @@ class PanoramaStitchJob(
                     "alla posizione ipotizzata: lì la panoramica è incollata a secco.",
             )
         }
-        val name = save(outcome.bitmap, shotAtMs)
+        val name = save(outcome.bitmap, shotAtMs, sources = shots.map { it.file })
         outcome.bitmap.recycle()
 
         log.info(
@@ -446,7 +446,12 @@ class PanoramaStitchJob(
                 tuning = variant.tuning,
             ).stitch(trio, horizontalFovDegrees, fillNadir = false, wideSearch = wideSearch)
             outcome.onSuccess { out ->
-                val name = save(out.bitmap, shotAtMs, name = "Panorama_TEST_${variant.letter}_$stamp.jpg")
+                val name = save(
+                    out.bitmap,
+                    shotAtMs,
+                    name = "Panorama_TEST_${variant.letter}_$stamp.jpg",
+                    sources = trio.map { it.file },
+                )
                 out.bitmap.recycle()
                 saved++
                 lastReport = out.report
@@ -538,24 +543,87 @@ class PanoramaStitchJob(
      * Finisce in DCIM › Luna Ultra, la stessa cartella dove vanno le foto scaricate dalla
      * camera: la panoramica unita e gli scatti che l'hanno generata stanno insieme.
      */
-    private fun save(bitmap: Bitmap, shotAtMs: Long, name: String? = null): String {
+    /**
+     * Il passaporto degli scatti: dove e quando è stata fatta davvero la panoramica.
+     *
+     * Una panoramica non nasce nel momento in cui il telefono la cuce — può essere la sera, o
+     * il giorno dopo — ma nel momento e nel posto in cui sono stati fatti gli scatti. Quei
+     * dati esistono già, scritti nell'EXIF delle foto sorgenti dalla camera: copiarli da lì è
+     * più giusto che ricostruirli, perché sono la misura fatta sul posto invece di una stima.
+     *
+     * La data si prende dal **primo** scatto, che è l'istante in cui la panoramica è
+     * cominciata. La posizione invece dal primo scatto che ce l'ha: se la camera ha agganciato
+     * il satellite solo a metà sequenza, quella è comunque la posizione giusta, mentre non
+     * averne nessuna sarebbe solo una perdita.
+     */
+    private fun sourcePassport(sources: List<File>): Map<String, String> {
+        val passport = mutableMapOf<String, String>()
+        val readers = sources.mapNotNull { file ->
+            runCatching { androidx.exifinterface.media.ExifInterface(file) }.getOrNull()
+        }
+        if (readers.isEmpty()) return passport
+
+        readers.first().let { first ->
+            TIME_TAGS.forEach { tag -> first.getAttribute(tag)?.let { passport[tag] = it } }
+        }
+        // La posizione: il primo che ne ha una completa vince, e si prende in blocco — mezza
+        // coordinata senza il suo emisfero è peggio di nessuna coordinata.
+        readers.firstOrNull { it.latLong != null }?.let { located ->
+            LOCATION_TAGS.forEach { tag -> located.getAttribute(tag)?.let { passport[tag] = it } }
+        }
+        return passport
+    }
+
+    /** Scrive il passaporto sul file già compresso, senza toccare il resto dell'EXIF. */
+    private fun applyPassport(
+        exif: androidx.exifinterface.media.ExifInterface,
+        passport: Map<String, String>,
+    ): Boolean {
+        if (passport.isEmpty()) return false
+        passport.forEach { (tag, value) -> exif.setAttribute(tag, value) }
+        return true
+    }
+
+    /** Il momento dichiarato dagli scatti, se lo dichiarano: è quello che la galleria deve mostrare. */
+    private fun passportTimeMs(sources: List<File>): Long? = sources.firstNotNullOfOrNull { file ->
+        runCatching { androidx.exifinterface.media.ExifInterface(file).dateTimeOriginal }.getOrNull()
+    }
+
+    private fun save(
+        bitmap: Bitmap,
+        shotAtMs: Long,
+        name: String? = null,
+        sources: List<File> = emptyList(),
+    ): String {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ITALY).format(Date())
         @Suppress("NAME_SHADOWING")
         val name = name ?: "Panorama_Luna_$stamp.jpg"
+        val passport = sourcePassport(sources)
+        // Il momento vero della panoramica: quello scritto negli scatti se c'è, altrimenti
+        // quello che il job si porta dietro.
+        val takenAtMs = passportTimeMs(sources) ?: shotAtMs
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            saveToMediaStore(name, bitmap, shotAtMs)
+            saveToMediaStore(name, bitmap, takenAtMs, passport)
         } else {
-            saveToPublicDirectory(name, bitmap, shotAtMs)
+            saveToPublicDirectory(name, bitmap, takenAtMs, passport)
         }
         return name
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    private fun saveToMediaStore(name: String, bitmap: Bitmap, shotAtMs: Long) {
+    private fun saveToMediaStore(
+        name: String,
+        bitmap: Bitmap,
+        takenAtMs: Long,
+        passport: Map<String, String>,
+    ) {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, GALLERY_RELATIVE_PATH)
+            // La galleria ordina per questa, non per l'EXIF: senza, una panoramica cucita
+            // stasera da scatti di ieri finirebbe in cima all'album di stasera.
+            put(MediaStore.Images.Media.DATE_TAKEN, takenAtMs)
             // In sospeso finché non è scritto per intero: senza, la galleria mostrerebbe una
             // miniatura di un file a metà mentre la compressione è ancora in corso.
             put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -567,14 +635,15 @@ class PanoramaStitchJob(
             requireNotNull(output) { "Non riesco a scrivere nella galleria" }
             bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, output)
         }
-        // La panoramica eredita le coordinate del momento in cui è stata *scattata*:
-        // il job può girare giorni dopo, ma il posto è quello degli scatti.
-        locations?.let { diary ->
-            runCatching {
-                resolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
-                    val exif = androidx.exifinterface.media.ExifInterface(descriptor.fileDescriptor)
-                    if (diary.stamp(exif, shotAtMs)) exif.saveAttributes()
-                }
+        // Data, ora e posizione della panoramica vengono dagli scatti che la compongono: il
+        // job può girare giorni dopo, ma il momento e il posto sono i loro. Il diario delle
+        // posizioni del telefono resta il ripiego per quando le foto non portano coordinate.
+        runCatching {
+            resolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
+                val exif = androidx.exifinterface.media.ExifInterface(descriptor.fileDescriptor)
+                var touched = applyPassport(exif, passport)
+                if (exif.latLong == null && locations?.stamp(exif, takenAtMs) == true) touched = true
+                if (touched) exif.saveAttributes()
             }
         }
         values.clear()
@@ -582,18 +651,62 @@ class PanoramaStitchJob(
         resolver.update(uri, values, null, null)
     }
 
-    private fun saveToPublicDirectory(name: String, bitmap: Bitmap, shotAtMs: Long) {
+    private fun saveToPublicDirectory(
+        name: String,
+        bitmap: Bitmap,
+        takenAtMs: Long,
+        passport: Map<String, String>,
+    ) {
         val root = Environment.getExternalStoragePublicDirectory(GALLERY_ROOT)
         val directory = File(root, GALLERY_FOLDER).apply { mkdirs() }
         val target = File(directory, name)
         FileOutputStream(target).use { bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
-        locations?.stampFile(target, shotAtMs)
+        runCatching {
+            val exif = androidx.exifinterface.media.ExifInterface(target)
+            var touched = applyPassport(exif, passport)
+            if (exif.latLong == null && locations?.stamp(exif, takenAtMs) == true) touched = true
+            if (touched) exif.saveAttributes()
+        }
+        // Anche la data del file segue gli scatti: chi ordina per data di modifica — un
+        // gestore di file, un backup — deve vedere la stessa cosa che vede la galleria.
+        runCatching { target.setLastModified(takenAtMs) }
         // Prima di Android 10 un file appena scritto non compare finché qualcuno non lo
         // segnala: senza questa riga la panoramica esisterebbe ma la galleria non la vedrebbe.
         MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), arrayOf("image/jpeg"), null)
     }
 
     private companion object {
+        /**
+         * I tag del tempo, copiati dal primo scatto: è l'istante in cui la panoramica è
+         * cominciata. Sono cinque perché una data senza il suo fuso, o senza i decimi, è una
+         * data che due programmi diversi leggono in due momenti diversi.
+         */
+        val TIME_TAGS = listOf(
+            androidx.exifinterface.media.ExifInterface.TAG_DATETIME,
+            androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL,
+            androidx.exifinterface.media.ExifInterface.TAG_DATETIME_DIGITIZED,
+            androidx.exifinterface.media.ExifInterface.TAG_OFFSET_TIME,
+            androidx.exifinterface.media.ExifInterface.TAG_OFFSET_TIME_ORIGINAL,
+            androidx.exifinterface.media.ExifInterface.TAG_SUBSEC_TIME,
+            androidx.exifinterface.media.ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
+        )
+
+        /**
+         * I tag della posizione, copiati in blocco dal primo scatto che ne ha una: una
+         * latitudine senza il suo emisfero finisce dall'altra parte del mondo.
+         */
+        val LOCATION_TAGS = listOf(
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_LATITUDE,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_LATITUDE_REF,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_LONGITUDE,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_LONGITUDE_REF,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_ALTITUDE,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_ALTITUDE_REF,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_TIMESTAMP,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_DATESTAMP,
+            androidx.exifinterface.media.ExifInterface.TAG_GPS_PROCESSING_METHOD,
+        )
+
         /** La sottocartella degli scatti in attesa: separa i job dalle foto scaricate. */
         const val JOB_FOLDER = "Panoramiche"
 

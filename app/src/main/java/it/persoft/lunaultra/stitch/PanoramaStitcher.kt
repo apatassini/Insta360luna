@@ -3763,15 +3763,28 @@ class PanoramaStitcher(
             column += HORIZON_COLUMN_STEP
         }
 
+        // Le colonne che non vedono l'orizzonte si scartano, non fanno fallire la misura.
+        //
+        // Chiedere che più di metà delle colonne trovassero il salto era un requisito che in
+        // una foto vera non si avvera quasi mai: basta un albero in primo piano — e qui c'è
+        // — e metà delle colonne guardano rami, non mare. Il rilevatore falliva su otto foto
+        // su nove, e senza misure la panoramica non veniva raddrizzata: il mare restava
+        // curvo, che è il difetto da cui siamo partiti.
+        //
+        // Un orizzonte vero però ha una proprietà che i rami non hanno: le colonne che lo
+        // vedono sono **d'accordo fra loro**, tutte alla stessa altezza. Quindi non si chiede
+        // che siano tante: si prende la mediana, si tengono solo quelle che le stanno
+        // vicino, e si guarda quante ne restano. Le colonne dell'albero cadono ovunque e si
+        // eliminano da sole; quelle del mare si stringono attorno alla riga giusta.
         val sampled = width / HORIZON_COLUMN_STEP
-        if (rows.size < sampled * HORIZON_MIN_COVERAGE) return null
-        val sorted = rows.sorted()
-        val median = sorted[sorted.size / 2]
-        // Le colonne devono essere d'accordo: un orizzonte vero è alla stessa altezza quasi
-        // ovunque. Se sono sparse, quello che si è trovato non è un orizzonte.
-        val spread = sorted[(sorted.size * 3) / 4] - sorted[sorted.size / 4]
-        if (spread > height * HORIZON_MAX_SPREAD) return null
+        if (rows.size < sampled * HORIZON_MIN_FOUND) return null
+        val roughMedian = rows.sorted()[rows.size / 2]
+        val band = height * HORIZON_MAX_SPREAD
+        val agreeing = rows.filter { abs(it - roughMedian) <= band }
+        if (agreeing.size < rows.size * HORIZON_MIN_AGREEMENT) return null
+        if (agreeing.size < sampled * HORIZON_MIN_COVERAGE) return null
 
+        val median = agreeing.sorted()[agreeing.size / 2]
         val pitch = atan((median - height / 2f) / lens.focalPixels).toDegrees()
         return if (abs(pitch) > MAX_CAMERA_PITCH_DEGREES) null else pitch
     }
@@ -3929,8 +3942,8 @@ class PanoramaStitcher(
         // ---- La livella: l'orizzonte cercato nella foto per sapere come era messa la camera ----
 
         /** La fascia in cui può stare un orizzonte: non ai bordi, dove c'è altro. */
-        const val HORIZON_BAND_TOP = 0.25f
-        const val HORIZON_BAND_BOTTOM = 0.85f
+        const val HORIZON_BAND_TOP = 0.15f
+        const val HORIZON_BAND_BOTTOM = 0.90f
 
         /** Il salto si misura fra due bande distanti così: sull'acqua increspata il gradiente
          * fra righe adiacenti è solo rumore. */
@@ -3943,7 +3956,18 @@ class PanoramaStitcher(
         const val HORIZON_COLUMN_STEP = 4
 
         /** Quante colonne devono trovarlo perché sia credibile. */
-        const val HORIZON_MIN_COVERAGE = 0.55f
+        /**
+         * Quante colonne devono trovare *un* salto perché valga la pena guardare, quante di
+         * quelle devono poi essere d'accordo fra loro, e quante devono restare alla fine.
+         *
+         * Erano un numero solo, il 55% delle colonne, e voleva dire che una foto con un
+         * albero davanti non poteva mai misurare l'orizzonte. Ora il lavoro è diviso in tre
+         * domande: qualcosa si è trovato? quello che si è trovato si accorda? ne resta
+         * abbastanza? Un albero fa fallire la seconda su quelle colonne, non su tutte.
+         */
+        const val HORIZON_MIN_FOUND = 0.25f
+        const val HORIZON_MIN_AGREEMENT = 0.45f
+        const val HORIZON_MIN_COVERAGE = 0.18f
 
         /** Quanto possono essere in disaccordo le colonne, in frazione dell'altezza. */
         const val HORIZON_MAX_SPREAD = 0.06f

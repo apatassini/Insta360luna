@@ -140,6 +140,18 @@ data class StitchSettings(
      * combaciano al centro e divergono ai bordi.
      */
     val focalFreedomPercent: Int = 20,
+
+    /** Quanto deforma il campo locale: 1 leggera, 2 media, 3 forte. */
+    val warpStrength: Int = 2,
+
+    /**
+     * Il campo visivo orizzontale da usare al posto di quello dichiarato, in gradi.
+     *
+     * Zero significa «usa la specifica». Il log dell'unione riporta il campo *misurato*
+     * accanto a quello dichiarato: quando i due non coincidono, questo è il posto dove
+     * mettere il numero vero e smettere di ristimarlo a ogni unione.
+     */
+    val fovOverrideDegrees: Float = 0f,
 )
 
 @Serializable

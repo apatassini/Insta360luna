@@ -257,6 +257,44 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     onCheckedChange = { on -> viewModel.updateStitch { it.copy(localWarp = on) } },
                     icon = LunaIcons.Axis,
                 )
+                Text("Forza della deformazione locale")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(1 to "Leggera", 2 to "Media", 3 to "Forte").forEach { (level, label) ->
+                        FilterChip(
+                            selected = settings.stitch.warpStrength == level,
+                            onClick = { viewModel.updateStitch { it.copy(warpStrength = level) } },
+                            label = { Text(label) },
+                            enabled = settings.stitch.localWarp,
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "«Forte» non vuol dire solo di più: vuol dire più *locale*. Una foto vista " +
+                        "di scorcio e la stessa vista frontale hanno bisogno che il dettaglio " +
+                        "venga allargato progressivamente, non spostato in blocco — e solo un " +
+                        "campo stretto lo sa fare. Serve anche una buona quantità di punti di " +
+                        "controllo: se sono pochi, il campo non ha di che reggersi e resta fermo.",
+                )
+                NumberField(
+                    label = "Campo visivo reale (gradi, 0 = usa la specifica)",
+                    value = if (settings.stitch.fovOverrideDegrees > 0f) {
+                        settings.stitch.fovOverrideDegrees.toString()
+                    } else {
+                        "0"
+                    },
+                    onValueChange = { text ->
+                        text.toFloatOrNull()?.let { value ->
+                            viewModel.updateStitch { it.copy(fovOverrideDegrees = value) }
+                        }
+                    },
+                    keyboardType = KeyboardType.Decimal,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Text("Libertà sulla focale rispetto alla specifica")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     listOf(4 to "4%", 10 to "10%", 20 to "20%", 35 to "35%").forEach { (percent, label) ->

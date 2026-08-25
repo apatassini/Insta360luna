@@ -157,24 +157,7 @@ class PanoramaStitchJob(
                     ),
                 )
                 locations?.stampFile(draft, item.takenAtMs)
-                val target = File(dir, item.name)
-                val stored = runCatching {
-                    draft.inputStream().use { input ->
-                        FileOutputStream(target).use { output -> input.copyTo(output) }
-                    }
-                    check(target.length() == draft.length()) {
-                        "copia incompleta (${target.length()} su ${draft.length()} byte)"
-                    }
-                    target
-                }.getOrElse { denied ->
-                    // Anche la copia col nome buono può essere negata da qualche Android:
-                    // allora il job vive nella memoria dell'app. Meno in vista, ma vive.
-                    log.warn("Copia di ${item.name} in ${dir.path} negata: ${denied.message}", "Uso la memoria dell'app.")
-                    runCatching { target.delete() }
-                    val privateDir = File(context.getExternalFilesDir(null), "$JOB_FOLDER/$panoramaId")
-                        .apply { mkdirs() }
-                    draft.copyTo(File(privateDir, item.name), overwrite = true)
-                }
+                val stored = storeInJobDirectory(draft, item.name, dir, panoramaId)
                 draft.delete()
                 stored
             }
@@ -190,6 +173,76 @@ class PanoramaStitchJob(
             )
             files
         }.onFailure { log.warn("PANORAMICA NON MESSA IN CODA", it.message) }
+    }
+
+    /**
+     * Mette in coda delle foto **scelte a mano** dalla galleria della camera.
+     *
+     * È il banco di prova voluto: un gruppo di scatti difficili — il bambù di lato, la
+     * controluce, il muro vicino — si scarica una volta sola e resta lì come job. Da quel
+     * momento la stessa terna si può riunire quante volte si vuole, provando ricette diverse
+     * senza rifare né gli scatti né lo scaricamento.
+     *
+     * A differenza di una panoramica pianificata, qui gli angoli veri non ci sono e non si
+     * scrive nessun passaporto EXIF: sarebbe un angolo inventato spacciato per misura, e
+     * l'unione gli crederebbe. Senza passaporto l'unione sa di dover indovinare il passo e
+     * cerca largo, che è la cosa giusta da fare con delle foto raccolte a mano.
+     */
+    suspend fun collectChosenForJob(
+        items: List<MediaItem>,
+        panoramaId: String,
+        onProgress: (Float, String) -> Unit,
+    ): Result<List<File>> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(items.size >= 2) { "Servono almeno due foto per un job di unione" }
+            val dir = jobDirFor(panoramaId)
+            val workshop = File(context.cacheDir, "panojob").apply { mkdirs() }
+            val files = items.mapIndexed { index, item ->
+                val draft = File(workshop, item.name)
+                media.downloadInto(item, draft) { fraction ->
+                    onProgress(
+                        (index + fraction) / items.size,
+                        "Scarico la foto ${index + 1} di ${items.size}",
+                    )
+                }.getOrElse { throw IllegalStateException("Scaricamento di ${item.name} non riuscito: ${it.message}") }
+                locations?.stampFile(draft, item.takenAtMs)
+                val stored = storeInJobDirectory(draft, item.name, dir, panoramaId)
+                draft.delete()
+                stored
+            }
+            MediaScannerConnection.scanFile(context, files.map { it.absolutePath }.toTypedArray(), null, null)
+            log.info(
+                "JOB DI PROVA CREATO",
+                "${files.size} foto scelte a mano in ${dir.path}. Nessun angolo dichiarato: " +
+                    "l'unione assume una fila e cerca largo. Si rilancia quante volte si vuole.",
+            )
+            files
+        }.onFailure { log.warn("JOB DI PROVA NON CREATO", it.message) }
+    }
+
+    /**
+     * La copia finale nella cartella del job, con il ripiego sulla memoria dell'app.
+     *
+     * In DCIM alcuni Android negano la scrittura: allora il job vive nella cartella privata.
+     * Meno in vista, ma vive — ed è meglio di un job che non nasce.
+     */
+    private fun storeInJobDirectory(draft: File, name: String, dir: File, panoramaId: String): File {
+        val target = File(dir, name)
+        return runCatching {
+            draft.inputStream().use { input ->
+                FileOutputStream(target).use { output -> input.copyTo(output) }
+            }
+            check(target.length() == draft.length()) {
+                "copia incompleta (${target.length()} su ${draft.length()} byte)"
+            }
+            target
+        }.getOrElse { denied ->
+            log.warn("Copia di $name in ${dir.path} negata: ${denied.message}", "Uso la memoria dell'app.")
+            runCatching { target.delete() }
+            val privateDir = File(context.getExternalFilesDir(null), "$JOB_FOLDER/$panoramaId")
+                .apply { mkdirs() }
+            draft.copyTo(File(privateDir, name), overwrite = true)
+        }
     }
 
     /**

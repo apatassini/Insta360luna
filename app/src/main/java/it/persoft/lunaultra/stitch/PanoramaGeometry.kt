@@ -399,16 +399,23 @@ class LocalWarp private constructor(
             frameWidth: Int,
             frameHeight: Int,
             maximumShiftPixels: Float,
+            /**
+             * Quanto è stretta la campana, in frazioni del lato lungo: 4 è morbida e
+             * prudente, 10 segue il dettaglio locale. È la manopola che decide se la foto
+             * viene «deformata di più»: una campana stretta può rappresentare un
+             * allargamento progressivo — le stecche di bambù che vanno allargate man mano
+             * che ci si sposta — mentre una larga lo media via.
+             */
+            sigmaDivisor: Float = 6f,
         ): LocalWarp? {
             if (points.size < MIN_POINTS || frameWidth <= 1 || frameHeight <= 1) return null
             val cellWidth = frameWidth.toFloat() / (NODES_X - 1)
             val cellHeight = frameHeight.toFloat() / (NODES_Y - 1)
             val dx = FloatArray(NODES_X * NODES_Y)
             val dy = FloatArray(NODES_X * NODES_Y)
-            // La larghezza della campana: un sesto del lato lungo. Più stretta seguirebbe il
-            // singolo punto (e i suoi errori), più larga tornerebbe a essere una traslazione
-            // globale — che l'allineamento ha già tolto.
-            val sigma = max(frameWidth, frameHeight) / 6f
+            // Più stretta segue il singolo punto (e i suoi errori), più larga torna a essere
+            // una traslazione globale — che l'allineamento ha già tolto.
+            val sigma = max(frameWidth, frameHeight) / sigmaDivisor.coerceIn(2f, 16f)
             val twoSigmaSquared = 2f * sigma * sigma
             var worst = 0f
             for (ny in 0 until NODES_Y) {
@@ -441,9 +448,14 @@ class LocalWarp private constructor(
             return LocalWarp(NODES_X, NODES_Y, cellWidth, cellHeight, dx, dy, worst)
         }
 
-        /** Nodi della griglia: pochi, perché il campo deve essere morbido per costruzione. */
-        const val NODES_X = 9
-        const val NODES_Y = 7
+        /**
+         * Nodi della griglia. Devono essere abbastanza fitti da rappresentare la campana più
+         * stretta che si può chiedere: con dodici intervalli sul lato lungo il passo è un
+         * dodicesimo, e una campana da un decimo ci sta comoda. La morbidezza la garantisce
+         * la campana, non la scarsità dei nodi.
+         */
+        const val NODES_X = 13
+        const val NODES_Y = 9
 
         /** Sotto questi punti il campo sarebbe il ritratto del rumore. */
         const val MIN_POINTS = 24

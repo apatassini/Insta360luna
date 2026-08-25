@@ -634,8 +634,18 @@ class PanoramaStitcher(
                         point[11] - predicted.y,
                     )
                 }
-                val limit = max(frames[index].width, frames[index].height) * WARP_MAX_FRACTION
-                warps[index] = LocalWarp.from(residuals, frames[index].width, frames[index].height, limit)
+                // Leggera, media o forte: la campana si stringe e il limite si alza insieme.
+                // Una campana stretta con un limite basso non servirebbe a niente — potrebbe
+                // descrivere l'allargamento ma non arrivarci.
+                val (sigmaDivisor, maxFraction) = when (tuning.warpStrength.coerceIn(1, 3)) {
+                    1 -> 4f to 0.015f
+                    3 -> 10f to 0.040f
+                    else -> 6f to 0.025f
+                }
+                val limit = max(frames[index].width, frames[index].height) * maxFraction
+                warps[index] = LocalWarp.from(
+                    residuals, frames[index].width, frames[index].height, limit, sigmaDivisor,
+                )
             }
             // I fotogrammi ormai lontani non faranno più da vicini a nessuno: i loro vettori
             // di lavoro si liberano, così una griglia grande non accumula piramidi.
@@ -2506,13 +2516,6 @@ class PanoramaStitcher(
 
         /** Sotto questo scarto la focale misurata e quella dichiarata sono la stessa cosa. */
         const val FOCAL_NOTABLE_DEVIATION = 0.02f
-
-        /**
-         * Quanto può spostare la deformazione locale, in frazione del lato lungo. Il 2,5% a
-         * 3200 px sono ottanta pixel: abbastanza per la parallasse di una stanza, troppo poco
-         * per stravolgere una foto se i punti mentono.
-         */
-        const val WARP_MAX_FRACTION = 0.025f
 
         /** Sotto questo numero di celle in comune, il taglio sul minimo non ha dati per scegliere. */
         const val SEAM_MIN_CELLS = 24

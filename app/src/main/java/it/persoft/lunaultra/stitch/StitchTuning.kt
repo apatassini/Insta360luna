@@ -66,6 +66,17 @@ data class StitchTuning(
      * locale di Autopano.
      */
     val localWarp: Boolean = true,
+
+    /**
+     * Quanto forte deforma: 1 leggera, 2 media, 3 forte.
+     *
+     * Non è un capriccio di intensità: decide quanto **locale** è il campo. Forte vuol dire
+     * campana stretta e limite alto, cioè la capacità di rappresentare un allargamento
+     * progressivo — le stecche di bambù che vanno allargate man mano che si va verso il
+     * bordo, perché di lato erano viste in scorcio e nell'altra foto sono frontali. Leggera
+     * media tutto e lascia quel lavoro a metà.
+     */
+    val warpStrength: Int = 2,
 )
 
 /** Una ricetta della modalità test: lettera per il nome del file, titolo per il log. */
@@ -99,40 +110,36 @@ object StitchTestLab {
             localWarp = false,
             focalFreedom = 0.04f,
         )
+        // La base nuova: taglio sul minimo disaccordo e focale libera. Da qui in poi cambia
+        // solo quanto si deforma, che è la domanda aperta.
+        val modern = old.copy(seamMinimalDifference = true, focalFreedom = 0.20f)
+        // Con la deformazione forte servono punti fitti: un campo stretto senza punti che lo
+        // reggano resta fermo, e la prova direbbe «non serve a niente» per il motivo sbagliato.
+        val dense = modern.copy(localWarp = true, candidateScale = 2f)
         return listOf(
             StitchVariant(
-                "A", "Com'era: taglio a metà strada, niente deformazione locale",
+                "A", "Com'era: taglio a metà strada, nessuna deformazione",
                 test(old),
             ),
             StitchVariant(
-                "B", "Taglio sul minimo disaccordo (il resto come A)",
-                test(old.copy(seamMinimalDifference = true)),
+                "B", "Taglio sul minimo disaccordo + focale libera, ancora senza deformazione",
+                test(modern),
             ),
             StitchVariant(
-                "C", "Taglio minimo + focale libera fino al 20%",
-                test(old.copy(seamMinimalDifference = true, focalFreedom = 0.20f)),
+                "C", "Deformazione leggera",
+                test(dense.copy(warpStrength = 1)),
             ),
             StitchVariant(
-                "D", "Taglio minimo + focale libera + deformazione locale",
-                test(old.copy(seamMinimalDifference = true, focalFreedom = 0.20f, localWarp = true)),
+                "D", "Deformazione media",
+                test(dense.copy(warpStrength = 2)),
             ),
             StitchVariant(
-                "E", "Come D, con punti severi: qualità 95%, quantità doppia",
-                test(
-                    old.copy(
-                        seamMinimalDifference = true, focalFreedom = 0.20f, localWarp = true,
-                        keepNcc = 0.95f, candidateScale = 2f,
-                    ),
-                ),
+                "E", "Deformazione forte (campo stretto, fino al 4% del lato)",
+                test(dense.copy(warpStrength = 3)),
             ),
             StitchVariant(
-                "F", "Come D ma a taglio netto: mostra nudo dove cade la giunzione",
-                test(
-                    old.copy(
-                        seamMinimalDifference = true, focalFreedom = 0.20f, localWarp = true,
-                        multiband = false,
-                    ),
-                ),
+                "F", "Deformazione forte a taglio netto: mostra nuda la giunzione",
+                test(dense.copy(warpStrength = 3, multiband = false)),
             ),
         )
     }

@@ -345,6 +345,18 @@ fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
                         activeColor = Luna.Pano,
                         selected = gallery.selected.size >= 2,
                     )
+                    // Le stesse foto, ma messe da parte come lavoro invece che unite adesso:
+                    // si scaricano una volta sola e restano lì, e la stessa terna si riunisce
+                    // quante volte serve per confrontare le ricette.
+                    HudIconButton(
+                        icon = LunaIcons.Jobs,
+                        contentDescription = "Crea un job di unione con le foto selezionate",
+                        onClick = viewModel::createJobFromSelectedCamera,
+                        enabled = gallery.selected.size >= 2,
+                        size = 42.dp,
+                        activeColor = Luna.Pano,
+                        selected = gallery.selected.size >= 2,
+                    )
                     HudIconButton(
                         icon = LunaIcons.Delete,
                         contentDescription = "Elimina dalla camera",

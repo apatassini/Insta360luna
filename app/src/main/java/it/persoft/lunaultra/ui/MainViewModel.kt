@@ -1420,6 +1420,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Crea un job di unione dalle foto selezionate nella camera, senza unirle adesso.
+     *
+     * È il banco di prova fisso: le foto difficili si scaricano **una volta sola** e restano
+     * come job, e da lì la stessa terna si riunisce quante volte si vuole per confrontare le
+     * ricette. Senza questo, ogni prova costava una selezione e uno scaricamento da capo.
+     */
+    fun createJobFromSelectedCamera() {
+        if (stitchJob?.isActive == true) {
+            showMessage("Un'unione è già in corso")
+            return
+        }
+        val chosen = _gallery.value.items
+            .filter { it.path in _gallery.value.selected && !it.isVideo }
+            .sortedWith(compareBy({ it.takenAtMs }, { it.name }))
+        if (chosen.size < 2) {
+            showMessage("Seleziona almeno due foto (non video) per creare un job")
+            return
+        }
+        val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, sequence.value.panoramaAspect)
+        stitchJob = viewModelScope.launch {
+            _stitchState.value = StitchUiState.Working(0f, "Preparo un job con ${chosen.size} foto")
+            val panoramaId = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+            container.stitchJob.collectChosenForJob(
+                items = chosen,
+                panoramaId = panoramaId,
+                onProgress = { fraction, message ->
+                    _stitchState.value = StitchUiState.Working(fraction, message)
+                },
+            ).onSuccess { files ->
+                container.panoJobStore.update { list ->
+                    list.copy(
+                        jobs = list.jobs + PanoJob(
+                            id = panoramaId,
+                            createdAtMs = System.currentTimeMillis(),
+                            files = files.map { it.absolutePath },
+                            fovDegrees = fov.horizontalDegrees,
+                            spherical = false,
+                        ),
+                    )
+                }
+                _stitchState.value = StitchUiState.Queued(panoramaId, files.size)
+                clearSelection()
+                showMessage("Job di prova creato: ${files.size} foto, lo lanci dalla scheda dei lavori")
+            }.onFailure {
+                _stitchState.value = StitchUiState.Failed(it.message ?: "job non creato")
+                showMessage("Job non creato: ${it.message}")
+            }
+        }
+    }
+
+    /**
      * Unisce foto scelte dalla galleria del telefono, nell'ordine in cui sono state toccate.
      *
      * Il selettore di sistema restituisce le foto nell'ordine della scelta: toccarle una, due,
@@ -1460,7 +1512,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, seq.panoramaAspect)
         container.stitchJob.runOnFiles(
             files = files,
-            horizontalFovDegrees = fov.horizontalDegrees,
+            horizontalFovDegrees = effectiveFov(fov.horizontalDegrees),
             overlapPercent = seq.panoramaOverlapPercent,
             tuning = stitchTuning(),
             testMode = settings.value.stitch.testMode,
@@ -1570,7 +1622,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             container.stitchJob.runOnFiles(
                 files = files,
-                horizontalFovDegrees = job.fovDegrees,
+                horizontalFovDegrees = effectiveFov(job.fovDegrees),
                 overlapPercent = sequence.value.panoramaOverlapPercent,
                 fillNadir = job.spherical,
                 shotAtMs = job.createdAtMs,
@@ -1622,7 +1674,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             seamMinimalDifference = stitch.seamMinimalDifference,
             localWarp = stitch.localWarp,
             focalFreedom = stitch.focalFreedomPercent.coerceIn(0, 35) / 100f,
+            warpStrength = stitch.warpStrength,
         )
+    }
+
+    /**
+     * Il campo visivo da usare davvero: quello misurato a mano se c'è, altrimenti il
+     * dichiarato. Vale al momento dell'unione, non della creazione del job: così le prove
+     * su un job già fatto possono cambiare idea sul campo senza riscaricare le foto.
+     */
+    private fun effectiveFov(declaredDegrees: Float): Float {
+        val override = settings.value.stitch.fovOverrideDegrees
+        return if (override in 5f..170f) override else declaredDegrees
     }
 
     /** Annulla un job: sparisce dall'elenco, le foto restano dove sono. */

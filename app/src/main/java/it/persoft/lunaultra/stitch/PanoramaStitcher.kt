@@ -1822,7 +1822,7 @@ class PanoramaStitcher(
             val blendStartedAt = System.currentTimeMillis()
             seamNote = blendSubWindow(
                 output, ownerWeight, frame, placement, correction, lens, canvas,
-                columns, row0, bw, newW, sx0, sx1, sy0, sy1, full, warp,
+                columns, row0, bw, newW, sx0, sx1, sy0, sy1, full, warp, lonSin, lonCos,
             )
             blendMillis += System.currentTimeMillis() - blendStartedAt
         }
@@ -1837,6 +1837,7 @@ class PanoramaStitcher(
             var touched = false
             var readRow = false
             val projector = FrameProjector(placement, lens, warp)
+            val source = full?.let { SourceBlock(it) }
             projector.row(canvas.latitudeAt(row0 + by))
             for (bx in 0 until bw) {
                 if (insideBlendRows && bx in sx0..sx1) continue
@@ -1849,7 +1850,7 @@ class PanoramaStitcher(
                 }
                 projector.project(lonSin[bx], lonCos[bx])
                 if (!projector.inside) continue
-                val color = sampleColor(frame, full, projector.x, projector.y)
+                val color = sampleColor(frame, source, projector.x, projector.y)
                 val factor = correction.factorAt(projector.x, projector.y)
                 val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                 val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -1909,6 +1910,9 @@ class PanoramaStitcher(
         sy1: Int,
         full: Bitmap?,
         warp: LocalWarp?,
+        /** Seno e coseno di ogni colonna della finestra, tabulati una volta da [pasteFrame]. */
+        lonSin: FloatArray,
+        lonCos: FloatArray,
     ): String {
         val sbw = sx1 - sx0 + 1
         val sbh = sy1 - sy0 + 1
@@ -1967,7 +1971,9 @@ class PanoramaStitcher(
         parallelRows(0, gh, canvas.width) { gy, rowPixels ->
             val by = min(gy * s + s / 2, sbh - 1)
             val row = subRow0 + by
-            val latitude = canvas.latitudeAt(row)
+            val projector = FrameProjector(placement, lens, warp)
+            val source = full?.let { SourceBlock(it) }
+            projector.row(canvas.latitudeAt(row))
             output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
             for (gx in 0 until gw) {
                 val bx = min(gx * s + s / 2, sbw - 1)
@@ -1980,12 +1986,11 @@ class PanoramaStitcher(
                 oldWeightGrid[g] = oldWeight
                 var newWeight = 0f
                 if (present) {
-                    val longitude = canvas.longitudeAt(col)
-                    val point = projectWarped(longitude, latitude, placement, lens, warp)
-                    if (point.inside) {
-                        newWeight = featherWeight(point.x, point.y, frame.width, frame.height)
-                        val color = sampleColor(frame, full, point.x, point.y)
-                        val factor = correction.factorAt(point.x, point.y)
+                    projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
+                    if (projector.inside) {
+                        newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
+                        val color = sampleColor(frame, source, projector.x, projector.y)
+                        val factor = correction.factorAt(projector.x, projector.y)
                         val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val gch = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -2075,7 +2080,9 @@ class PanoramaStitcher(
         // mappa viva.
         parallelRows(subRow0, sbh, canvas.width) { by, rowPixels ->
             val row = subRow0 + by
-            val latitude = canvas.latitudeAt(row)
+            val projector = FrameProjector(placement, lens, warp)
+            val source = full?.let { SourceBlock(it) }
+            projector.row(canvas.latitudeAt(row))
             output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
             var touched = false
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
@@ -2090,10 +2097,9 @@ class PanoramaStitcher(
                 var newWeight = 0f
                 var useNew = false
                 if (present) {
-                    val longitude = canvas.longitudeAt(col)
-                    val point = projectWarped(longitude, latitude, placement, lens, warp)
-                    if (point.inside) {
-                        newWeight = featherWeight(point.x, point.y, frame.width, frame.height)
+                    projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
+                    if (projector.inside) {
+                        newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
                         // La stessa decisione della griglia ridotta, presa qui alla risoluzione
                         // vera: il taglio scelto sul minimo disaccordo, o la mediana geometrica
                         // se non c'era abbastanza sovrapposizione per sceglierlo.
@@ -2104,8 +2110,8 @@ class PanoramaStitcher(
                         }
                         if (newWeight > 0f && (oldWeight <= 0f || ownsNew)) {
                             useNew = true
-                            val color = sampleColor(frame, full, point.x, point.y)
-                            val factor = correction.factorAt(point.x, point.y)
+                            val color = sampleColor(frame, source, projector.x, projector.y)
+                            val factor = correction.factorAt(projector.x, projector.y)
                             val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                             val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                             val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -2666,64 +2672,14 @@ class PanoramaStitcher(
      * aperto, altrimenti dalla copia di lavoro. Le coordinate arrivano nello spazio della
      * copia di lavoro e si riportano all'originale con la sua scala.
      */
-    private fun sampleColor(frame: Frame, full: Bitmap?, x: Float, y: Float): Int =
-        if (full == null) {
+    private fun sampleColor(frame: Frame, source: SourceBlock?, x: Float, y: Float): Int =
+        if (source == null) {
             sample(frame, x, y)
         } else {
-            sampleBitmap(full, x * frame.fullScaleX, y * frame.fullScaleY)
+            source.sample(x * frame.fullScaleX, y * frame.fullScaleY)
         }
 
-    /**
-     * Interpolazione bilineare leggendo direttamente dal Bitmap nativo: nessun vettore in
-     * heap, e le letture sono sicure da più fili insieme.
-     */
-    /**
-     * Il quadratino di quattro pixel che serve all'interpolazione, uno per filo.
-     *
-     * `Bitmap.getPixel` è una chiamata nativa con i suoi controlli: farne quattro per ogni
-     * pixel della tela, su una panoramica da cento megapixel, fa mezzo miliardo di
-     * attraversamenti del confine fra Java e nativo. `getPixels` ne prende quattro in un
-     * colpo solo, e il buffer resta di proprietà del filo che lo usa — così non si alloca
-     * niente e non c'è niente da spartire.
-     */
-    private val sampleBuffer = ThreadLocal.withInitial { IntArray(4) }
 
-    private fun sampleBitmap(bitmap: Bitmap, x: Float, y: Float): Int {
-        // L'origine si tiene a un pixel dal bordo: così il quadratino 2×2 ci sta sempre
-        // dentro e si legge in una volta sola, senza casi particolari agli estremi.
-        val x0 = x.toInt().coerceIn(0, bitmap.width - 2)
-        val y0 = y.toInt().coerceIn(0, bitmap.height - 2)
-        val fx = (x - x0).coerceIn(0f, 1f)
-        val fy = (y - y0).coerceIn(0f, 1f)
-        val quad = sampleBuffer.get()!!
-        bitmap.getPixels(quad, 0, 2, x0, y0, 2, 2)
-        return bilinearQuad(quad[0], quad[1], quad[2], quad[3], fx, fy)
-    }
-
-    /**
-     * L'interpolazione dei tre canali di un quadratino, srotolata.
-     *
-     * Scritta come ciclo su `intArrayOf(16, 8, 0)` allocava un array a ogni pixel: su cento
-     * milioni di pixel sono cento milioni di oggetti da raccogliere, e il netturbino ferma
-     * tutti i fili mentre passa. È il genere di spreco che non si vede leggendo il codice e
-     * si vede benissimo nel contatore dei core.
-     */
-    private fun bilinearQuad(c00: Int, c10: Int, c01: Int, c11: Int, fx: Float, fy: Float): Int {
-        val r = channelAt(c00, c10, c01, c11, 16, fx, fy)
-        val g = channelAt(c00, c10, c01, c11, 8, fx, fy)
-        val b = channelAt(c00, c10, c01, c11, 0, fx, fy)
-        return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
-    }
-
-    private fun channelAt(c00: Int, c10: Int, c01: Int, c11: Int, shift: Int, fx: Float, fy: Float): Int {
-        val a = (c00 shr shift) and 0xFF
-        val b = (c10 shr shift) and 0xFF
-        val c = (c01 shr shift) and 0xFF
-        val d = (c11 shr shift) and 0xFF
-        val top = a + (b - a) * fx
-        val bottom = c + (d - c) * fx
-        return (top + (bottom - top) * fy).roundToInt().coerceIn(0, 255)
-    }
 
     /** Colore interpolato fra i quattro pixel attorno: senza, i bordi diventano una scaletta. */
     private fun sample(frame: Frame, x: Float, y: Float): Int {
@@ -2811,28 +2767,6 @@ class PanoramaStitcher(
         return if (abs(pitch) > MAX_CAMERA_PITCH_DEGREES) null else pitch
     }
 
-    /**
-     * La proiezione con la deformazione locale addosso.
-     *
-     * Prima la geometria dice quale pixel del fotogramma guarda questa direzione; poi il campo
-     * locale dice di quanto quella previsione è ancora fuori posto, e si va a prendere il pixel
-     * giusto. Il controllo dei bordi si rifà **dopo** lo spostamento: un pixel spinto fuori dal
-     * fotogramma non esiste, e prenderlo comunque significherebbe spalmare il bordo.
-     */
-    private fun projectWarped(
-        longitudeDegrees: Float,
-        latitudeDegrees: Float,
-        placement: FramePlacement,
-        lens: PinholeLens,
-        warp: LocalWarp?,
-    ): SourcePoint {
-        val point = projectToFrame(longitudeDegrees, latitudeDegrees, placement, lens)
-        if (warp == null || !point.inside) return point
-        val x = point.x + warp.shiftX(point.x, point.y)
-        val y = point.y + warp.shiftY(point.x, point.y)
-        val inside = x >= 0f && y >= 0f && x <= lens.imageWidth - 1f && y <= lens.imageHeight - 1f
-        return SourcePoint(x, y, inside)
-    }
 
     private fun luma(color: Int): Float =
         0.299f * ((color shr 16) and 0xFF) + 0.587f * ((color shr 8) and 0xFF) + 0.114f * (color and 0xFF)
@@ -3067,3 +3001,101 @@ fun sampleSizeFor(sourceWidth: Int, targetLongSide: Int): Int {
     return size
 }
 
+/**
+ * L'interpolazione dei tre canali di un quadratino, srotolata.
+ *
+ * Scritta come ciclo su `intArrayOf(16, 8, 0)` allocava un array a ogni pixel: su cento
+ * milioni di pixel sono cento milioni di oggetti da raccogliere, e il netturbino ferma tutti
+ * i fili mentre passa. È il genere di spreco che non si vede leggendo il codice e si vede
+ * benissimo nel contatore dei core.
+ */
+private fun bilinearQuad(c00: Int, c10: Int, c01: Int, c11: Int, fx: Float, fy: Float): Int {
+    val r = channelAt(c00, c10, c01, c11, 16, fx, fy)
+    val g = channelAt(c00, c10, c01, c11, 8, fx, fy)
+    val b = channelAt(c00, c10, c01, c11, 0, fx, fy)
+    return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+}
+
+private fun channelAt(c00: Int, c10: Int, c01: Int, c11: Int, shift: Int, fx: Float, fy: Float): Int {
+    val a = (c00 shr shift) and 0xFF
+    val b = (c10 shr shift) and 0xFF
+    val c = (c01 shr shift) and 0xFF
+    val d = (c11 shr shift) and 0xFF
+    val top = a + (b - a) * fx
+    val bottom = c + (d - c) * fx
+    return (top + (bottom - top) * fy).roundToInt().coerceIn(0, 255)
+}
+
+/**
+ * Una finestrella dell'originale tenuta in heap, per non attraversare il confine nativo a
+ * ogni pixel.
+ *
+ * Leggere dal Bitmap a piena risoluzione costava una chiamata nativa per pixel: cento
+ * milioni di attraversamenti, ed erano il grosso del tempo di pittura. La via d'uscita nasce
+ * da un fatto della geometria: la tela ha all'incirca la stessa densità dell'originale — 84
+ * pixel per grado contro 86 — quindi colonne vicine sulla tela cadono su colonne vicine
+ * nell'originale, e la scansione procede in modo ordinato. Tenere un blocco di sessantaquattro
+ * per sedici pixel fa sì che quasi ogni lettura lo trovi già in mano: si attraversa il confine
+ * una volta ogni sessanta pixel invece che a ognuno.
+ *
+ * Il blocco costa quattro chilobyte e appartiene a un filo solo, come il proiettore che gli
+ * sta accanto. Quando la richiesta esce dal blocco se ne prende un altro, spostato indietro
+ * di un margine perché la scansione va verso destra e conviene averne davanti.
+ */
+private class SourceBlock(private val bitmap: Bitmap) {
+    private val width = bitmap.width
+    private val height = bitmap.height
+    private val usable = width >= BLOCK_WIDTH && height >= BLOCK_HEIGHT
+    private val pixels = IntArray(BLOCK_WIDTH * BLOCK_HEIGHT)
+    private val quad = IntArray(4)
+    private var originX = -1
+    private var originY = -1
+
+    fun sample(x: Float, y: Float): Int {
+        // Un pixel di margine dal bordo: il quadratino 2×2 dell'interpolazione ci sta sempre
+        // dentro, e non servono casi particolari agli estremi.
+        val x0 = x.toInt().coerceIn(0, width - 2)
+        val y0 = y.toInt().coerceIn(0, height - 2)
+        val fx = (x - x0).coerceIn(0f, 1f)
+        val fy = (y - y0).coerceIn(0f, 1f)
+        if (!usable) {
+            // Un originale più piccolo del blocco: caso da nessuno, ma meglio funzionare.
+            bitmap.getPixels(quad, 0, 2, x0, y0, 2, 2)
+            return bilinearQuad(quad[0], quad[1], quad[2], quad[3], fx, fy)
+        }
+        ensureBlock(x0, y0)
+        val index = (y0 - originY) * BLOCK_WIDTH + (x0 - originX)
+        return bilinearQuad(
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + BLOCK_WIDTH],
+            pixels[index + BLOCK_WIDTH + 1],
+            fx,
+            fy,
+        )
+    }
+
+    /** Il blocco deve contenere anche il vicino a destra e quello sotto: li usa la bilineare. */
+    private fun ensureBlock(x0: Int, y0: Int) {
+        if (originX >= 0 &&
+            x0 >= originX && x0 + 1 < originX + BLOCK_WIDTH &&
+            y0 >= originY && y0 + 1 < originY + BLOCK_HEIGHT
+        ) {
+            return
+        }
+        originX = (x0 - BLOCK_LOOKBEHIND).coerceIn(0, width - BLOCK_WIDTH)
+        originY = (y0 - BLOCK_HEIGHT / 2).coerceIn(0, height - BLOCK_HEIGHT)
+        bitmap.getPixels(pixels, 0, BLOCK_WIDTH, originX, originY, BLOCK_WIDTH, BLOCK_HEIGHT)
+    }
+
+    private companion object {
+        /** Largo quanto basta perché una riga di scansione ci cammini dentro a lungo. */
+        const val BLOCK_WIDTH = 64
+
+        /** Alto abbastanza da assorbire la curvatura della riga proiettata. */
+        const val BLOCK_HEIGHT = 16
+
+        /** Quanto blocco si tiene alle spalle: la scansione va avanti, non indietro. */
+        const val BLOCK_LOOKBEHIND = 4
+    }
+}

@@ -428,6 +428,10 @@ class FrameProjector(
     private val maxX = lens.imageWidth - 1f
     private val maxY = lens.imageHeight - 1f
 
+    /** Seno e coseno della longitudine del centro: servono a chi ha le direzioni tabulate. */
+    private val sinPan: Float = panDegrees.toRadians().let { sin(it) }
+    private val cosPan: Float = panDegrees.toRadians().let { cos(it) }
+
     private var cosLat = 1f
     private var sinLat = 0f
 
@@ -459,7 +463,28 @@ class FrameProjector(
      * Proietta la colonna il cui scarto di longitudine dal centro del fotogramma ha questo
      * seno e questo coseno — tabulati una volta per tutte dal chiamante.
      */
-    fun project(sinLon: Float, cosLon: Float) {
+    fun project(sinLon: Float, cosLon: Float) = projectAt(sinLat, cosLat, sinLon, cosLon)
+
+    /**
+     * Proietta una direzione di cui si conoscono già seno e coseno di latitudine e
+     * longitudine **assolute**, senza passare per [row].
+     *
+     * È la strada dell'allineamento, dove le direzioni campione sono fisse e i candidati
+     * migliaia: tabularle una volta e togliere la longitudine del candidato con la formula
+     * di sottrazione — `sin(a−b) = sin a·cos b − cos a·sin b` — costa due moltiplicazioni al
+     * posto di due funzioni trigonometriche, per ognuna delle centinaia di milioni di volte
+     * che il confronto le chiede.
+     */
+    fun projectDirection(sinLat: Float, cosLat: Float, sinLon: Float, cosLon: Float) {
+        projectAt(
+            sinLat,
+            cosLat,
+            sinLon * cosPan - cosLon * sinPan,
+            cosLon * cosPan + sinLon * sinPan,
+        )
+    }
+
+    private fun projectAt(sinLat: Float, cosLat: Float, sinLon: Float, cosLon: Float) {
         val worldX = cosLat * sinLon
         val worldY = sinLat
         val worldZ = cosLat * cosLon

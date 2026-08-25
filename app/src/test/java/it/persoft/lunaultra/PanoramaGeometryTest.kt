@@ -322,6 +322,21 @@ class PanoramaGeometryTest {
                         assertEquals(expected.x, projector.x, 0.01f)
                         assertEquals(expected.y, projector.y, 0.01f)
                     }
+                    // E la strada delle direzioni tabulate, che toglie la longitudine del
+                    // candidato con la formula di sottrazione invece che per differenza.
+                    val latRad = Math.toRadians(latitude.toDouble())
+                    val lonRad = Math.toRadians(longitude.toDouble())
+                    projector.projectDirection(
+                        kotlin.math.sin(latRad).toFloat(),
+                        kotlin.math.cos(latRad).toFloat(),
+                        kotlin.math.sin(lonRad).toFloat(),
+                        kotlin.math.cos(lonRad).toFloat(),
+                    )
+                    assertEquals(expected.inside, projector.inside)
+                    if (expected.inside) {
+                        assertEquals(expected.x, projector.x, 0.02f)
+                        assertEquals(expected.y, projector.y, 0.02f)
+                    }
                 }
             }
         }

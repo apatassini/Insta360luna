@@ -1439,7 +1439,18 @@ class PanoramaStitcher(
                 val world = frameToWorld(x.toFloat(), y.toFloat(), fixedPlacement, lens)
                 val keep = wideSearch ||
                     projectToFrame(world[0], world[1], movingPlacement, lens).inside
-                if (keep) directions += floatArrayOf(world[0], world[1], x.toFloat(), y.toFloat())
+                if (keep) {
+                    // Seno e coseno di latitudine e longitudine, tabulati qui una volta sola:
+                    // le direzioni non cambiano più, mentre i candidati che le interrogano
+                    // sono migliaia. Calcolarli lì dentro voleva dire rifare lo stesso conto
+                    // centinaia di milioni di volte.
+                    val latRad = world[1].toRadians()
+                    val lonRad = world[0].toRadians()
+                    directions += floatArrayOf(
+                        world[0], world[1], x.toFloat(), y.toFloat(),
+                        sin(latRad), cos(latRad), sin(lonRad), cos(lonRad),
+                    )
+                }
                 x += REG_SAMPLE_STEP
             }
             y += REG_SAMPLE_STEP
@@ -1558,11 +1569,15 @@ class PanoramaStitcher(
         var sumFF = 0f
         var sumMM = 0f
         var sumFM = 0f
+        // Un proiettore per candidato: le costanti del piazzamento si calcolano una volta
+        // qui invece che a ogni direzione, e il risultato si posa nei suoi campi senza
+        // allocare niente.
+        val projector = FrameProjector(candidate, lens)
         for (i in directions.indices) {
             val direction = directions[i]
-            val point = projectToFrame(direction[0], direction[1], candidate, lens)
-            if (!point.inside) continue
-            val m = bilinear(movingLevel, point.x * movingScale, point.y * movingScale)
+            projector.projectDirection(direction[4], direction[5], direction[6], direction[7])
+            if (!projector.inside) continue
+            val m = bilinear(movingLevel, projector.x * movingScale, projector.y * movingScale)
             val f = fixedValues[i]
             n++
             sumF += f

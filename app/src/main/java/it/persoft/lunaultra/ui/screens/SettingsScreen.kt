@@ -242,6 +242,37 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "giunzioni. Trovata la migliore, si spegne il test e si regola qui sotto.",
                 )
                 ToggleRow(
+                    title = "Livella l'orizzonte",
+                    subtitle = "Cerca l'orizzonte nelle foto per sapere com'era inclinata la " +
+                        "camera. Serve alle unioni di foto scelte a mano, dove gli angoli veri " +
+                        "non ci sono e si darebbe per scontato che fosse in bolla",
+                    checked = settings.stitch.levelHorizon,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(levelHorizon = on) } },
+                    icon = LunaIcons.Center,
+                )
+                SliderRow(
+                    label = "Inclinazione della camera",
+                    value = settings.stitch.cameraPitchDegrees,
+                    onValueChange = { value ->
+                        viewModel.updateStitch { it.copy(cameraPitchDegrees = value.roundToInt().toFloat()) }
+                    },
+                    valueRange = -40f..40f,
+                    valueLabel = if (settings.stitch.cameraPitchDegrees == 0f) {
+                        "misurata"
+                    } else {
+                        "%+.0f°".format(settings.stitch.cameraPitchDegrees)
+                    },
+                    icon = LunaIcons.Axis,
+                )
+                Hint(
+                    "In una panoramica equirettangolare l'orizzonte è una riga dritta, e " +
+                        "sono le linee vicine — il bordo di un molo — a doversi incurvare. Se " +
+                        "esce il contrario, cioè il mare a conca e il molo dritto, vuol dire che " +
+                        "la camera guardava in su o in giù e nessuno lo sapeva: ogni foto " +
+                        "aggiunge un arco. Zero significa «misurala dall'orizzonte»; il valore a " +
+                        "mano serve quando l'orizzonte non si vede.",
+                )
+                ToggleRow(
                     title = "Taglio sul minimo disaccordo",
                     subtitle = "La giunzione passa dove le due foto già si assomigliano, non a " +
                         "metà strada: evita di tagliare in mezzo a un oggetto vicino",

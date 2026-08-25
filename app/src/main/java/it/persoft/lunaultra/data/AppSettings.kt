@@ -152,6 +152,16 @@ data class StitchSettings(
      * mettere il numero vero e smettere di ristimarlo a ogni unione.
      */
     val fovOverrideDegrees: Float = 0f,
+
+    /**
+     * Livellare l'orizzonte cercandolo nelle foto, per le unioni senza angoli veri.
+     * Senza, si dà per scontato che la camera fosse in bolla — e se non lo era, il mare
+     * esce a conca e le linee vicine restano dritte, cioè il contrario del giusto.
+     */
+    val levelHorizon: Boolean = true,
+
+    /** Inclinazione della camera imposta a mano, in gradi. Zero = misurala dall'orizzonte. */
+    val cameraPitchDegrees: Float = 0f,
 )
 
 @Serializable

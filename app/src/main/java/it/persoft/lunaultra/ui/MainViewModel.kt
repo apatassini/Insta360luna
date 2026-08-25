@@ -1675,6 +1675,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localWarp = stitch.localWarp,
             focalFreedom = stitch.focalFreedomPercent.coerceIn(0, 35) / 100f,
             warpStrength = stitch.warpStrength,
+            levelHorizon = stitch.levelHorizon,
+            cameraPitchDegrees = stitch.cameraPitchDegrees,
         )
     }
 

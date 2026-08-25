@@ -286,6 +286,25 @@ class PanoramaGeometryTest {
     }
 
     @Test
+    fun `l'orizzonte sotto il centro significa camera che guarda in su`() {
+        // La geometria della livella, verificata sui numeri veri delle foto del molo:
+        // 7040x5288 con l'orizzonte al 66,3% dell'altezza dà una camera a +11,9°. È la
+        // conversione che decide se il mare esce piatto o a conca.
+        val wide = PinholeLens(imageWidth = 7040, imageHeight = 5288, horizontalFovDegrees = 81.7f)
+        val horizonRow = 5288f * 0.663f
+        val pitch = Math.toDegrees(
+            kotlin.math.atan(((horizonRow - 5288f / 2f) / wide.focalPixels).toDouble()),
+        ).toFloat()
+        assertEquals(11.9f, pitch, 0.4f)
+
+        // Orizzonte esattamente al centro: camera in bolla, nessuna correzione.
+        val level = Math.toDegrees(
+            kotlin.math.atan(((5288f / 2f - 5288f / 2f) / wide.focalPixels).toDouble()),
+        ).toFloat()
+        assertEquals(0f, level, 0.001f)
+    }
+
+    @Test
     fun `la deformazione locale riproduce lo spostamento che le e' stato insegnato`() {
         // Tutti i punti dicono la stessa cosa: «sei fuori di cinque pixel a destra e tre in
         // alto». Il campo deve rispondere quello, ovunque ci siano punti a sostenerlo.

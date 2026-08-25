@@ -77,6 +77,23 @@ data class StitchTuning(
      * media tutto e lascia quel lavoro a metà.
      */
     val warpStrength: Int = 2,
+
+    /**
+     * Cercare l'orizzonte nelle foto per sapere come era inclinata la camera.
+     *
+     * Serve solo quando gli angoli veri non ci sono — le foto scelte a mano — perché lì si
+     * dà per scontato che la camera fosse in bolla. Se invece guardava in su di dodici
+     * gradi, l'orizzonte (che deve essere una riga dritta) esce come una successione di
+     * archi e il mare sembra una conca, mentre il molo vicino (che dovrebbe incurvarsi)
+     * resta dritto. Misurato una volta, il difetto sparisce.
+     */
+    val levelHorizon: Boolean = true,
+
+    /**
+     * L'inclinazione della camera imposta a mano, in gradi (positiva = guardava in su).
+     * Zero significa «misurala dall'orizzonte».
+     */
+    val cameraPitchDegrees: Float = 0f,
 )
 
 /** Una ricetta della modalità test: lettera per il nome del file, titolo per il log. */
@@ -109,36 +126,38 @@ object StitchTestLab {
             seamMinimalDifference = false,
             localWarp = false,
             focalFreedom = 0.04f,
+            levelHorizon = false,
         )
-        // La base nuova: taglio sul minimo disaccordo e focale libera. Da qui in poi cambia
-        // solo quanto si deforma, che è la domanda aperta.
-        val modern = old.copy(seamMinimalDifference = true, focalFreedom = 0.20f)
-        // Con la deformazione forte servono punti fitti: un campo stretto senza punti che lo
+        // Ogni gradino accende **una** cosa in più del precedente, così la lettera in cui il
+        // difetto sparisce dice da sola chi era il colpevole.
+        val levelled = old.copy(levelHorizon = true)
+        val modern = levelled.copy(seamMinimalDifference = true, focalFreedom = 0.20f)
+        // Con la deformazione servono punti fitti: un campo stretto senza punti che lo
         // reggano resta fermo, e la prova direbbe «non serve a niente» per il motivo sbagliato.
         val dense = modern.copy(localWarp = true, candidateScale = 2f)
         return listOf(
             StitchVariant(
-                "A", "Com'era: taglio a metà strada, nessuna deformazione",
+                "A", "Com'era: camera assunta in bolla, taglio a metà strada, nessuna deformazione",
                 test(old),
             ),
             StitchVariant(
-                "B", "Taglio sul minimo disaccordo + focale libera, ancora senza deformazione",
+                "B", "Livella l'orizzonte: l'inclinazione vera della camera, misurata",
+                test(levelled),
+            ),
+            StitchVariant(
+                "C", "Taglio sul minimo disaccordo + focale libera",
                 test(modern),
             ),
             StitchVariant(
-                "C", "Deformazione leggera",
-                test(dense.copy(warpStrength = 1)),
-            ),
-            StitchVariant(
-                "D", "Deformazione media",
+                "D", "Deformazione locale media",
                 test(dense.copy(warpStrength = 2)),
             ),
             StitchVariant(
-                "E", "Deformazione forte (campo stretto, fino al 4% del lato)",
+                "E", "Deformazione locale forte",
                 test(dense.copy(warpStrength = 3)),
             ),
             StitchVariant(
-                "F", "Deformazione forte a taglio netto: mostra nuda la giunzione",
+                "F", "Come E a taglio netto: mostra nuda la giunzione",
                 test(dense.copy(warpStrength = 3, multiband = false)),
             ),
         )

@@ -122,6 +122,39 @@ class PanoramaStitcher(
             val lens = PinholeLens(first.width, first.height, horizontalFovDegrees)
 
             var placements = shots.map { FramePlacement(it.panDegrees, it.tiltDegrees) }
+
+            // La livella. Quando gli angoli veri non ci sono — foto scelte a mano — la lista
+            // arriva con tutti i tilt a zero, cioè con l'ipotesi che la camera fosse in
+            // bolla. Se non lo era, l'orizzonte non esce dritto come deve: esce come un arco
+            // per fotogramma, il mare sembra una conca e le linee vicine restano dritte
+            // invece di incurvarsi. Misurato dall'orizzonte stesso, il difetto sparisce.
+            val levelNotes = mutableListOf<String>()
+            if (tuning.levelHorizon && shots.all { abs(it.tiltDegrees) < 0.01f }) {
+                val forced = tuning.cameraPitchDegrees
+                if (abs(forced) > 0.05f) {
+                    placements = placements.map { it.copy(tiltDegrees = forced) }
+                    levelNotes += "Orizzonte: camera a %+.1f° (impostata a mano)".format(forced)
+                } else {
+                    val pitches = frames.map { estimateCameraPitch(it, lens) }
+                    val measured = pitches.filterNotNull()
+                    if (measured.size >= (frames.size + 1) / 2) {
+                        // I fotogrammi in cui l'orizzonte non si vede prendono la mediana
+                        // degli altri: meglio l'inclinazione dei vicini che lo zero di
+                        // default, che è proprio l'ipotesi sbagliata da cui si parte.
+                        val median = measured.sorted()[measured.size / 2]
+                        placements = placements.mapIndexed { i, placement ->
+                            placement.copy(tiltDegrees = pitches[i] ?: median)
+                        }
+                        levelNotes += "Orizzonte: camera a %s (misurata su %d foto su %d)".format(
+                            pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
+                            measured.size,
+                            frames.size,
+                        )
+                    } else {
+                        levelNotes += "Orizzonte non trovato: la camera resta assunta in bolla"
+                    }
+                }
+            }
             // La cucitura campiona dagli originali a piena risoluzione (uno per volta, in
             // memoria nativa): la copia di lavoro serve solo all'allineamento. Quindi la
             // tela può chiedere la densità dei pixel veri, non quella della copia ridotta.
@@ -227,6 +260,7 @@ class PanoramaStitcher(
             // materiale in comune né per allinearsi né per nascondere una giunzione: meglio
             // dirlo, perché non è un difetto del programma ma di come sono state scattate.
             val verdict = refinement.verdict.toMutableList()
+            verdict.addAll(0, levelNotes)
             if (placements.size >= 2) {
                 var tightest = Float.MAX_VALUE
                 for (k in 1 until placements.size) {
@@ -2556,6 +2590,74 @@ class PanoramaStitcher(
     }
 
     /**
+     * L'inclinazione della camera, letta dall'orizzonte che si vede nella foto.
+     *
+     * È il parametro che mancava, e il difetto che produce è inconfondibile: il mare diventa
+     * una conca e il marciapiede vicino resta dritto, cioè l'esatto contrario di quello che
+     * deve succedere. In una panoramica equirettangolare l'orizzonte — che è un cerchio
+     * massimo — è una **riga dritta**, e una linea dritta vicina alla camera, come il bordo
+     * di un molo, è quella che si incurva. Se si dà per scontato che la camera fosse in
+     * bolla mentre guardava in su di dodici gradi, i due ruoli si scambiano: la riga
+     * orizzontale della foto, piazzata come se fosse all'altezza dell'occhio, diventa un
+     * arco con il colmo al centro del fotogramma, e ogni foto ne aggiunge uno.
+     *
+     * Misurarlo è possibile perché l'orizzonte, dove c'è, è il gradiente orizzontale più
+     * forte e più esteso della foto: cielo chiaro sopra, terra o acqua scura sotto, per
+     * quasi tutte le colonne alla stessa altezza. Si cerca in ogni colonna il salto verso
+     * il buio più netto, si prende la mediana delle colonne convincenti, e la si converte
+     * in gradi attraverso la focale. Se le colonne convincenti sono poche o non si mettono
+     * d'accordo — un interno, un muro, una foto senza orizzonte — non si inventa niente e
+     * si torna a zero.
+     *
+     * Sulle tre foto del molo misura +11,9°, +13,7° e +15,1°: la camera guardava in su, di
+     * un po' di più a ogni scatto.
+     */
+    private fun estimateCameraPitch(frame: Frame, lens: PinholeLens): Float? {
+        val gray = frame.gray
+        val width = frame.width
+        val height = frame.height
+        if (width < 32 || height < 32) return null
+
+        // L'orizzonte non sta mai agli estremi: cercarlo lì significa trovare il bordo della
+        // foto o una nuvola bassa.
+        val top = (height * HORIZON_BAND_TOP).toInt()
+        val bottom = (height * HORIZON_BAND_BOTTOM).toInt()
+        if (bottom - top < 8) return null
+
+        val rows = mutableListOf<Float>()
+        var column = 0
+        while (column < width) {
+            var bestDrop = 0f
+            var bestRow = -1
+            for (row in top until bottom) {
+                // Il salto verso il buio fra due bande di qualche riga: più stabile del
+                // gradiente fra righe adiacenti, che sull'acqua increspata è tutto rumore.
+                val above = gray[(row - HORIZON_SPAN) * width + column]
+                val below = gray[(row + HORIZON_SPAN) * width + column]
+                val drop = above - below
+                if (drop > bestDrop) {
+                    bestDrop = drop
+                    bestRow = row
+                }
+            }
+            if (bestDrop >= HORIZON_MIN_CONTRAST && bestRow >= 0) rows += bestRow.toFloat()
+            column += HORIZON_COLUMN_STEP
+        }
+
+        val sampled = width / HORIZON_COLUMN_STEP
+        if (rows.size < sampled * HORIZON_MIN_COVERAGE) return null
+        val sorted = rows.sorted()
+        val median = sorted[sorted.size / 2]
+        // Le colonne devono essere d'accordo: un orizzonte vero è alla stessa altezza quasi
+        // ovunque. Se sono sparse, quello che si è trovato non è un orizzonte.
+        val spread = sorted[(sorted.size * 3) / 4] - sorted[sorted.size / 4]
+        if (spread > height * HORIZON_MAX_SPREAD) return null
+
+        val pitch = atan((median - height / 2f) / lens.focalPixels).toDegrees()
+        return if (abs(pitch) > MAX_CAMERA_PITCH_DEGREES) null else pitch
+    }
+
+    /**
      * La proiezione con la deformazione locale addosso.
      *
      * Prima la geometria dice quale pixel del fotogramma guarda questa direzione; poi il campo
@@ -2649,6 +2751,31 @@ class PanoramaStitcher(
 
         /** Sotto questa sovrapposizione fra due scatti non c'è materiale per una cucitura buona. */
         const val MIN_HEALTHY_OVERLAP_DEGREES = 12f
+
+        // ---- La livella: l'orizzonte cercato nella foto per sapere come era messa la camera ----
+
+        /** La fascia in cui può stare un orizzonte: non ai bordi, dove c'è altro. */
+        const val HORIZON_BAND_TOP = 0.25f
+        const val HORIZON_BAND_BOTTOM = 0.85f
+
+        /** Il salto si misura fra due bande distanti così: sull'acqua increspata il gradiente
+         * fra righe adiacenti è solo rumore. */
+        const val HORIZON_SPAN = 3
+
+        /** Sotto questo salto di luminanza non è un orizzonte, è una sfumatura. */
+        const val HORIZON_MIN_CONTRAST = 18f
+
+        /** Una colonna ogni tot: l'orizzonte è largo, non serve guardarle tutte. */
+        const val HORIZON_COLUMN_STEP = 4
+
+        /** Quante colonne devono trovarlo perché sia credibile. */
+        const val HORIZON_MIN_COVERAGE = 0.55f
+
+        /** Quanto possono essere in disaccordo le colonne, in frazione dell'altezza. */
+        const val HORIZON_MAX_SPREAD = 0.06f
+
+        /** Oltre questa inclinazione non è più una camera che guarda un paesaggio. */
+        const val MAX_CAMERA_PITCH_DEGREES = 40f
 
         // La soglia di qualità dei punti (già 0,80 fisso) ora è in StitchTuning.keepNcc.
 

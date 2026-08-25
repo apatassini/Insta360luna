@@ -12,12 +12,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.atan
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlin.math.tan
 
 /** Uno scatto della panoramica: il file sul telefono e dove guardava la camera. */
 data class PanoramaShot(
@@ -148,7 +150,7 @@ class PanoramaStitcher(
             val composeStartedAt = System.currentTimeMillis()
             var bitmap = compose(
                 frames, placements, lens, canvas, refinement.aligned,
-                fullResSampling, refinement.photometric, composeDetail,
+                fullResSampling, refinement.photometric, refinement.warps, composeDetail,
             )
             val composeSeconds = (System.currentTimeMillis() - composeStartedAt) / 1000f
             val patchedRows = if (fillNadir) {
@@ -474,6 +476,11 @@ class PanoramaStitcher(
          * permette di separare l'esposizione dalla vignettatura.
          */
         val photometric: List<FloatArray>,
+        /**
+         * Il campo di deformazione locale di ogni fotogramma, dove si è potuto stimarlo.
+         * È quello che assorbe la parallasse: la rotazione da sola non può.
+         */
+        val warps: List<LocalWarp?>,
     )
 
     /**
@@ -501,6 +508,8 @@ class PanoramaStitcher(
         aligned[0] = true
         var worst = 0f
         val photometric = mutableListOf<FloatArray>()
+        val warps = arrayOfNulls<LocalWarp>(frames.size)
+        val focalEstimates = mutableListOf<Float>()
 
         for (index in 1 until frames.size) {
             currentCoroutineContext().ensureActive()
@@ -607,6 +616,27 @@ class PanoramaStitcher(
                 rollDegrees = rollDegrees,
                 focalScale = focalScale,
             )
+            if (focalScale != 1f) focalEstimates += focalScale
+
+            // Il campo di deformazione locale: con il piazzamento finale in mano si torna sui
+            // punti di controllo e si guarda dove la geometria li prevede *adesso*. Quello che
+            // resta fuori posto non è più errore di puntamento — è parallasse, ed è l'unica
+            // cosa che si può ancora togliere.
+            if (tuning.localWarp && kept.size >= LocalWarp.MIN_POINTS) {
+                val residuals = ArrayList<FloatArray>(kept.size)
+                for (point in kept) {
+                    val predicted = projectToFrame(point[8], point[9], placements[index], lens)
+                    if (!predicted.inside) continue
+                    residuals += floatArrayOf(
+                        predicted.x,
+                        predicted.y,
+                        point[10] - predicted.x,
+                        point[11] - predicted.y,
+                    )
+                }
+                val limit = max(frames[index].width, frames[index].height) * WARP_MAX_FRACTION
+                warps[index] = LocalWarp.from(residuals, frames[index].width, frames[index].height, limit)
+            }
             // I fotogrammi ormai lontani non faranno più da vicini a nessuno: i loro vettori
             // di lavoro si liberano, così una griglia grande non accumula piramidi.
             for (past in 0 until index) {
@@ -624,7 +654,7 @@ class PanoramaStitcher(
             val magnitude = max(abs(finalPan), abs(finalTilt))
             worst = max(worst, magnitude)
             notes += ("%s: %d punti di controllo, %d sopra l'%d%% · corretto %+.2f° / %+.2f° · " +
-                "rollio %+.2f° · focale ×%.3f · concordanza %.0f%%").format(
+                "rollio %+.2f° · focale ×%.3f · concordanza %.0f%%%s").format(
                 frames[index].label,
                 candidates,
                 kept.size,
@@ -634,9 +664,28 @@ class PanoramaStitcher(
                 rollDegrees,
                 focalScale,
                 offset.confidence * 100f,
+                warps[index]?.let { " · deformazione locale fino a %.1f px".format(it.worstShiftPixels) }.orEmpty(),
             )
         }
-        return Refinement(placements, notes, worst, aligned, photometric)
+
+        // Il campo visivo vero, misurato invece che creduto. I 20 mm equivalenti da cui nasce
+        // il numero dichiarato sono catalogo, non metrologia: se la focale stimata è
+        // sistematicamente più lunga, il campo vero è più stretto, e le foto combaciano al
+        // centro divergendo ai bordi — il difetto classico che nessun allineamento sistema,
+        // perché non è un errore di puntamento ma di scala.
+        if (focalEstimates.size >= 2) {
+            val median = focalEstimates.sorted()[focalEstimates.size / 2]
+            val trueFov = 2f * atan(tan(lens.horizontalFovDegrees.toRadians() / 2f) / median).toDegrees()
+            notes += if (abs(median - 1f) >= FOCAL_NOTABLE_DEVIATION) {
+                ("Campo visivo: dichiarato %.1f°, misurato %.1f° (focale ×%.3f su %d fotogrammi). " +
+                    "Se resta costante, è la specifica a essere ottimistica.")
+                    .format(lens.horizontalFovDegrees, trueFov, median, focalEstimates.size)
+            } else {
+                "Campo visivo: dichiarato %.1f°, misurato %.1f° — la specifica regge."
+                    .format(lens.horizontalFovDegrees, trueFov)
+            }
+        }
+        return Refinement(placements, notes, worst, aligned, photometric, warps.toList())
     }
 
     private class ControlPointTally(val candidates: Int, val kept: List<FloatArray>)
@@ -668,10 +717,15 @@ class PanoramaStitcher(
         val sol = solution ?: return null
         val rollDeg = Math.toDegrees(sol[2]).toFloat()
         val scaleAdjust = sol[3].toFloat()
-        // Valori fuori dal credibile per una camera su gimbal: meglio la sola traslazione
-        // che una rotazione inventata da punti cattivi.
-        if (abs(rollDeg) > MAX_ROLL_DEGREES || abs(scaleAdjust) > MAX_FOCAL_ADJUST) return null
-        return floatArrayOf(sol[0].toFloat(), sol[1].toFloat(), rollDeg, 1f + scaleAdjust)
+        // Un rollio impossibile per una camera su gimbal vuol dire punti cattivi: lì si torna
+        // alla sola traslazione. La focale invece non si butta, si **limita**: fin qui bastava
+        // che la focale vera fosse più di un 4% diversa dalla specifica perché *tutta* la
+        // correzione — traslazione e rollio compresi — venisse scartata in silenzio. Una
+        // specifica ottimistica non è un buon motivo per rinunciare all'allineamento.
+        if (abs(rollDeg) > MAX_ROLL_DEGREES) return null
+        val freedom = tuning.focalFreedom.coerceIn(0f, MAX_FOCAL_FREEDOM)
+        val limitedScale = scaleAdjust.coerceIn(-freedom, freedom)
+        return floatArrayOf(sol[0].toFloat(), sol[1].toFloat(), rollDeg, 1f + limitedScale)
     }
 
     /** Le equazioni normali 4×4 del modello, risolte con eliminazione di Gauss. */
@@ -973,6 +1027,15 @@ class PanoramaStitcher(
                                 ],
                                 (fx * fx + fy * fy) / (halfWf * halfWf + halfHf * halfHf),
                                 (mx * mx + my * my) / (halfWm * halfWm + halfHm * halfHm),
+                                // La direzione nel mondo del dettaglio (vista dal fotogramma
+                                // fermo, di cui ci fidiamo) e il pixel dove il fotogramma
+                                // mobile lo ha davvero trovato: con il piazzamento finale in
+                                // mano, la differenza fra previsione e ritrovamento è
+                                // esattamente il campo di deformazione locale.
+                                world[0],
+                                world[1],
+                                found[0],
+                                found[1],
                             )
                         }
                         local
@@ -1270,6 +1333,7 @@ class PanoramaStitcher(
         aligned: BooleanArray,
         fullResSampling: Boolean,
         photometric: List<FloatArray>,
+        warps: List<LocalWarp?>,
         detail: MutableList<String>,
     ): Bitmap {
         val output = Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
@@ -1309,7 +1373,7 @@ class PanoramaStitcher(
             val startedAt = System.currentTimeMillis()
             pasteFrame(
                 output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
-                fullResSampling, detail,
+                fullResSampling, warps.getOrNull(index), detail,
             )
             val last = detail.removeLastOrNull()
             if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
@@ -1336,6 +1400,7 @@ class PanoramaStitcher(
         lens: PinholeLens,
         canvas: PanoramaCanvas,
         fullResSampling: Boolean,
+        warp: LocalWarp?,
         detail: MutableList<String>? = null,
     ) {
         val full = if (fullResSampling) frame.openFullResolution() else null
@@ -1375,7 +1440,7 @@ class PanoramaStitcher(
             val latitude = canvas.latitudeAt(row0 + by)
             for (bx in 0 until bw) {
                 val longitude = canvas.longitudeAt(columns[bx])
-                val point = projectToFrame(longitude, latitude, placement, lens)
+                val point = projectWarped(longitude, latitude, placement, lens, warp)
                 if (!point.inside) continue
                 val weight = featherWeight(point.x, point.y, frame.width, frame.height)
                 if (weight <= 0f) continue
@@ -1407,14 +1472,15 @@ class PanoramaStitcher(
         var sx1 = -1
         var sy0 = 0
         var sy1 = -1
+        var seamNote = ""
         if (hasOverlap) {
             sx0 = (ov0x - BLEND_CONTEXT_PX).coerceAtLeast(0)
             sx1 = (ov1x + BLEND_CONTEXT_PX).coerceAtMost(bw - 1)
             sy0 = (ov0y - BLEND_CONTEXT_PX).coerceAtLeast(0)
             sy1 = (ov1y + BLEND_CONTEXT_PX).coerceAtMost(bh - 1)
-            blendSubWindow(
+            seamNote = blendSubWindow(
                 output, ownerWeight, frame, placement, correction, lens, canvas,
-                columns, row0, bw, newW, sx0, sx1, sy0, sy1, full,
+                columns, row0, bw, newW, sx0, sx1, sy0, sy1, full, warp,
             )
         }
 
@@ -1437,7 +1503,7 @@ class PanoramaStitcher(
                     output.getPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
                 }
                 val longitude = canvas.longitudeAt(columns[bx])
-                val point = projectToFrame(longitude, latitude, placement, lens)
+                val point = projectWarped(longitude, latitude, placement, lens, warp)
                 if (!point.inside) continue
                 val color = sampleColor(frame, full, point.x, point.y)
                 val factor = correction.factorAt(point.x, point.y)
@@ -1457,9 +1523,11 @@ class PanoramaStitcher(
         }
 
         detail?.add(
-            "%s: finestra %d×%d px · fusione su %s".format(
+            "%s: finestra %d×%d px · fusione su %s%s%s".format(
                 frame.label, bw, bh,
                 if (hasOverlap) "${sx1 - sx0 + 1}×${sy1 - sy0 + 1} px" else "niente (primo tocco di tela)",
+                if (seamNote.isEmpty()) "" else " · $seamNote",
+                warp?.let { " · deformazione locale fino a %.1f px".format(it.worstShiftPixels) }.orEmpty(),
             ),
         )
     }
@@ -1494,7 +1562,8 @@ class PanoramaStitcher(
         sy0: Int,
         sy1: Int,
         full: Bitmap?,
-    ) {
+        warp: LocalWarp?,
+    ): String {
         val sbw = sx1 - sx0 + 1
         val sbh = sy1 - sy0 + 1
         val subRow0 = row0 + sy0
@@ -1537,12 +1606,18 @@ class PanoramaStitcher(
                 bx.toFloat() / OWNER_SCALE, by.toFloat() / OWNER_SCALE,
             )
 
-        // 1) Vecchio, nuovo e maschera, campionati al centro di ogni cella s×s. I pesi del
-        // nuovo si ricalcolano in virgola mobile: il byte serve solo a dire «qui c'è».
+        // 1) Vecchio e nuovo, campionati al centro di ogni cella s×s, con quanto i due
+        // discordano lì. I pesi del nuovo si ricalcolano in virgola mobile: il byte serve
+        // solo a dire «qui c'è». La maschera non si decide ancora: prima serve sapere dove
+        // conviene tagliare, e per saperlo serve tutta la mappa del disaccordo.
         val baseColor = IntArray(gcount)
         val newColor = IntArray(gcount)
         val mask = FloatArray(gcount)
         val valid = BooleanArray(gcount)
+        val newWeightGrid = FloatArray(gcount)
+        val oldWeightGrid = FloatArray(gcount)
+        val difference = FloatArray(gcount)
+        val bothPresent = BooleanArray(gcount)
         parallelRows(0, gh, canvas.width) { gy, rowPixels ->
             val by = min(gy * s + s / 2, sbh - 1)
             val row = subRow0 + by
@@ -1556,10 +1631,11 @@ class PanoramaStitcher(
                 val oldWeight = oldWeightAt(bx, by)
                 val old = rowPixels[col] and 0xFFFFFF
                 baseColor[g] = old
+                oldWeightGrid[g] = oldWeight
                 var newWeight = 0f
                 if (present) {
                     val longitude = canvas.longitudeAt(col)
-                    val point = projectToFrame(longitude, latitude, placement, lens)
+                    val point = projectWarped(longitude, latitude, placement, lens, warp)
                     if (point.inside) {
                         newWeight = featherWeight(point.x, point.y, frame.width, frame.height)
                         val color = sampleColor(frame, full, point.x, point.y)
@@ -1568,11 +1644,12 @@ class PanoramaStitcher(
                         val gch = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
                         newColor[g] = (r shl 16) or (gch shl 8) or b
-                        if (oldWeight <= 0f) {
-                            baseColor[g] = newColor[g]
-                            mask[g] = 1f
-                        } else if (newWeight > oldWeight) {
-                            mask[g] = 1f
+                        if (oldWeight > 0f) {
+                            bothPresent[g] = true
+                            difference[g] =
+                                (abs(r - ((old shr 16) and 0xFF)) +
+                                    abs(gch - ((old shr 8) and 0xFF)) +
+                                    abs(b - (old and 0xFF))).toFloat()
                         }
                     } else {
                         newColor[g] = old
@@ -1580,7 +1657,39 @@ class PanoramaStitcher(
                 } else {
                     newColor[g] = old
                 }
+                newWeightGrid[g] = newWeight
                 valid[g] = newWeight > 0f || oldWeight > 0f
+            }
+        }
+
+        // Dove tagliare. La mediana geometrica taglia a metà strada, dove capita: se lì
+        // passa il bordo fra una tenda vicina e un muro lontano, i due lati del taglio
+        // mostrano quel bordo in due posti diversi — la parallasse — e il muro sembra
+        // continuare sopra la tenda. Il taglio sul minimo disaccordo cerca invece il
+        // percorso lungo il quale le due foto già si assomigliano: lì la cucitura non ha
+        // niente da tradire.
+        val seam = if (tuning.seamMinimalDifference) {
+            findSeam(difference, bothPresent, newWeightGrid, oldWeightGrid, gw, gh)
+        } else {
+            null
+        }
+        for (gy in 0 until gh) {
+            for (gx in 0 until gw) {
+                val g = gy * gw + gx
+                if (newWeightGrid[g] <= 0f) continue
+                if (oldWeightGrid[g] <= 0f) {
+                    // Tela vuota: il nuovo non ha rivali, e il montaggio parte da lui —
+                    // altrimenti il nero entrerebbe nelle bande larghe.
+                    baseColor[g] = newColor[g]
+                    mask[g] = 1f
+                    continue
+                }
+                val ownsNew = if (seam != null) {
+                    seam.ownsNew(gx.toFloat(), gy.toFloat())
+                } else {
+                    newWeightGrid[g] > oldWeightGrid[g]
+                }
+                if (ownsNew) mask[g] = 1f
             }
         }
 
@@ -1630,15 +1739,24 @@ class PanoramaStitcher(
                 val oldWeight = oldWeightAt(bx, by)
                 if (!present && oldWeight <= 0f) continue
 
+                val gxf = (bx.toFloat() / s) - 0.5f + 0.5f / s
                 var hard = rowPixels[col] and 0xFFFFFF
                 var newWeight = 0f
                 var useNew = false
                 if (present) {
                     val longitude = canvas.longitudeAt(col)
-                    val point = projectToFrame(longitude, latitude, placement, lens)
+                    val point = projectWarped(longitude, latitude, placement, lens, warp)
                     if (point.inside) {
                         newWeight = featherWeight(point.x, point.y, frame.width, frame.height)
-                        if (newWeight > 0f && (oldWeight <= 0f || newWeight > oldWeight)) {
+                        // La stessa decisione della griglia ridotta, presa qui alla risoluzione
+                        // vera: il taglio scelto sul minimo disaccordo, o la mediana geometrica
+                        // se non c'era abbastanza sovrapposizione per sceglierlo.
+                        val ownsNew = if (seam != null) {
+                            seam.ownsNew(gxf, gyf)
+                        } else {
+                            newWeight > oldWeight
+                        }
+                        if (newWeight > 0f && (oldWeight <= 0f || ownsNew)) {
                             useNew = true
                             val color = sampleColor(frame, full, point.x, point.y)
                             val factor = correction.factorAt(point.x, point.y)
@@ -1652,7 +1770,6 @@ class PanoramaStitcher(
                 if (newWeight <= 0f && oldWeight <= 0f) continue
 
                 val grids = if (useNew) corrOver else corrBase
-                val gxf = (bx.toFloat() / s) - 0.5f + 0.5f / s
                 var outPixel = 0xFF000000.toInt()
                 for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
                     val value = ((hard shr shift) and 0xFF) +
@@ -1671,6 +1788,14 @@ class PanoramaStitcher(
             if (touched) {
                 output.setPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
             }
+        }
+        return when {
+            seam == null && tuning.seamMinimalDifference ->
+                "taglio a metà strada (sovrapposizione su più lati)"
+            seam == null -> "taglio a metà strada"
+            else -> "taglio sul minimo disaccordo, %s".format(
+                if (seam.vertical) "verticale" else "orizzontale",
+            )
         }
     }
 
@@ -1710,6 +1835,163 @@ class PanoramaStitcher(
                 }
             }
         }
+    }
+
+    /**
+     * Dove passa la giunzione fra il nuovo fotogramma e la tela già dipinta.
+     *
+     * Il confine è una spezzata: per ogni passo lungo la banda di sovrapposizione, la
+     * posizione in cui si scavalca. Fra un passo e il successivo può spostarsi di una cella,
+     * quindi il percorso è continuo per costruzione — non ci sono salti che diventerebbero
+     * scalini nell'immagine.
+     */
+    private class Seam(
+        /** Vero se la banda è alta e stretta e il taglio scende: una colonna per riga. */
+        val vertical: Boolean,
+        val boundary: FloatArray,
+        /** Da che parte del confine sta il fotogramma nuovo. */
+        val newOnHighSide: Boolean,
+    ) {
+        fun ownsNew(gridX: Float, gridY: Float): Boolean {
+            val along = if (vertical) gridY else gridX
+            val across = if (vertical) gridX else gridY
+            val limit = boundaryAt(along)
+            return if (newOnHighSide) across > limit else across < limit
+        }
+
+        /** Il confine fra due passi, interpolato: il taglio non fa gradini. */
+        private fun boundaryAt(position: Float): Float {
+            if (boundary.isEmpty()) return 0f
+            val p = position.coerceIn(0f, (boundary.size - 1).toFloat())
+            val i0 = p.toInt().coerceIn(0, boundary.size - 1)
+            val i1 = min(i0 + 1, boundary.size - 1)
+            val f = p - i0
+            return boundary[i0] * (1f - f) + boundary[i1] * f
+        }
+    }
+
+    /**
+     * Il percorso di taglio che attraversa la sovrapposizione spendendo il meno possibile.
+     *
+     * È il cuore di come cuciono i programmi seri (enblend, il motore di Hugin, e lo «spline»
+     * di Autopano). L'osservazione è questa: la parallasse non si può togliere — se il gimbal
+     * non ruota attorno al centro ottico, vicino e lontano si spostano di diverso, e nessuna
+     * rotazione li rimette d'accordo insieme. Ma si può **scegliere dove tagliare**. Se il
+     * taglio passa dove le due foto già mostrano la stessa cosa — un muro uniforme, un bordo
+     * che in entrambe cade nello stesso posto — allora del disaccordo non resta traccia
+     * visibile; se passa in mezzo a un oggetto vicino, quell'oggetto si sdoppia o si tronca.
+     *
+     * Il costo di una cella è quanto le due immagini discordano lì. La programmazione dinamica
+     * trova, fra tutti i percorsi continui che attraversano la banda, quello di costo minimo:
+     * ogni passo può spostarsi al più di una cella rispetto al precedente, e si accumula il
+     * meglio da dietro. Le celle dove uno dei due non c'è sono proibite per costo, così il
+     * percorso resta dentro la sovrapposizione vera.
+     */
+    private fun findSeam(
+        difference: FloatArray,
+        bothPresent: BooleanArray,
+        newWeight: FloatArray,
+        oldWeight: FloatArray,
+        gw: Int,
+        gh: Int,
+    ): Seam? {
+        var shared = 0
+        for (present in bothPresent) if (present) shared++
+        if (shared < SEAM_MIN_CELLS) return null
+
+        // Il taglio attraversa la banda per il verso lungo: fra due foto affiancate la
+        // sovrapposizione è una striscia alta e stretta, e il taglio scende dall'alto in basso.
+        val vertical = gh >= gw
+        val steps = if (vertical) gh else gw
+        val choices = if (vertical) gw else gh
+        if (steps < 2 || choices < 2) return null
+
+        // Da che parte sta il nuovo, e se la domanda ha una risposta sola.
+        //
+        // Il segnale è quanto il vantaggio del nuovo sulla tela — la differenza dei pesi di
+        // sfumatura — cresce spostandosi lungo la banda. Se cresce, il nuovo sta dalla parte
+        // alta; se cala, dalla parte bassa. È una covarianza, e la sua forza dice anche
+        // quanto fidarsi: quando la sovrapposizione è su **due** lati (l'ultimo scatto di un
+        // giro che si richiude, o una griglia dove il fotogramma tocca il vicino di fianco e
+        // quello sopra) il nuovo domina in mezzo e la tela alle due estremità — la covarianza
+        // si annulla, e vuol dire che un taglio solo non può separarli. Lì si torna alla
+        // mediana geometrica, che quel caso lo gestisce da sempre.
+        var cells = 0
+        var meanAcross = 0f
+        for (gy in 0 until gh) {
+            for (gx in 0 until gw) {
+                if (!bothPresent[gy * gw + gx]) continue
+                meanAcross += (if (vertical) gx else gy).toFloat()
+                cells++
+            }
+        }
+        if (cells == 0) return null
+        meanAcross /= cells
+        var covariance = 0f
+        var strength = 0f
+        for (gy in 0 until gh) {
+            for (gx in 0 until gw) {
+                val g = gy * gw + gx
+                if (!bothPresent[g]) continue
+                val across = (if (vertical) gx else gy).toFloat() - meanAcross
+                val advantage = newWeight[g] - oldWeight[g]
+                covariance += advantage * across
+                strength += abs(advantage) * abs(across)
+            }
+        }
+        if (strength <= 0f || abs(covariance) / strength < SEAM_MIN_POLARITY) return null
+        val newOnHighSide = covariance > 0f
+
+        val cost = FloatArray(steps * choices)
+        for (step in 0 until steps) {
+            for (k in 0 until choices) {
+                val g = if (vertical) step * gw + k else k * gw + step
+                cost[step * choices + k] = if (bothPresent[g]) difference[g] else SEAM_FORBIDDEN
+            }
+        }
+
+        // La somma in doppia precisione: su una banda lunga migliaia di passi, le celle
+        // proibite accumulano milioni e in virgola semplice le differenze di colore — che
+        // sono l'unica cosa che conta — si perderebbero nell'arrotondamento.
+        val best = DoubleArray(steps * choices)
+        val cameFrom = IntArray(steps * choices)
+        for (k in 0 until choices) best[k] = cost[k].toDouble()
+        for (step in 1 until steps) {
+            val previous = (step - 1) * choices
+            val current = step * choices
+            for (k in 0 until choices) {
+                var cheapest = Double.MAX_VALUE
+                var chosen = k
+                for (delta in -1..1) {
+                    val previousK = k + delta
+                    if (previousK < 0 || previousK >= choices) continue
+                    val value = best[previous + previousK]
+                    if (value < cheapest) {
+                        cheapest = value
+                        chosen = previousK
+                    }
+                }
+                best[current + k] = cost[current + k] + cheapest
+                cameFrom[current + k] = chosen
+            }
+        }
+
+        var end = 0
+        var cheapest = Double.MAX_VALUE
+        val lastStep = (steps - 1) * choices
+        for (k in 0 until choices) {
+            if (best[lastStep + k] < cheapest) {
+                cheapest = best[lastStep + k]
+                end = k
+            }
+        }
+        val boundary = FloatArray(steps)
+        var k = end
+        for (step in steps - 1 downTo 0) {
+            boundary[step] = k.toFloat()
+            k = cameFrom[step * choices + k]
+        }
+        return Seam(vertical, boundary, newOnHighSide)
     }
 
     /** Interpolazione bilineare su una griglia ridotta, ai bordi si ferma. */
@@ -2076,6 +2358,29 @@ class PanoramaStitcher(
         return result
     }
 
+    /**
+     * La proiezione con la deformazione locale addosso.
+     *
+     * Prima la geometria dice quale pixel del fotogramma guarda questa direzione; poi il campo
+     * locale dice di quanto quella previsione è ancora fuori posto, e si va a prendere il pixel
+     * giusto. Il controllo dei bordi si rifà **dopo** lo spostamento: un pixel spinto fuori dal
+     * fotogramma non esiste, e prenderlo comunque significherebbe spalmare il bordo.
+     */
+    private fun projectWarped(
+        longitudeDegrees: Float,
+        latitudeDegrees: Float,
+        placement: FramePlacement,
+        lens: PinholeLens,
+        warp: LocalWarp?,
+    ): SourcePoint {
+        val point = projectToFrame(longitudeDegrees, latitudeDegrees, placement, lens)
+        if (warp == null || !point.inside) return point
+        val x = point.x + warp.shiftX(point.x, point.y)
+        val y = point.y + warp.shiftY(point.x, point.y)
+        val inside = x >= 0f && y >= 0f && x <= lens.imageWidth - 1f && y <= lens.imageHeight - 1f
+        return SourcePoint(x, y, inside)
+    }
+
     private fun luma(color: Int): Float =
         0.299f * ((color shr 16) and 0xFF) + 0.587f * ((color shr 8) and 0xFF) + 0.114f * (color and 0xFF)
 
@@ -2193,9 +2498,37 @@ class PanoramaStitcher(
         /** Quanti fili lavorano insieme alla cucitura: tutti i core, con un tetto sano. */
         const val MAX_STITCH_WORKERS = 8
 
-        /** Oltre questi valori la stima non è più credibile e si torna alla sola traslazione. */
+        /** Oltre questo rollio la stima non è più credibile e si torna alla sola traslazione. */
         const val MAX_ROLL_DEGREES = 4f
-        const val MAX_FOCAL_ADJUST = 0.04f
+
+        /** Il tetto assoluto della libertà sulla focale, qualunque cosa dica la ricetta. */
+        const val MAX_FOCAL_FREEDOM = 0.35f
+
+        /** Sotto questo scarto la focale misurata e quella dichiarata sono la stessa cosa. */
+        const val FOCAL_NOTABLE_DEVIATION = 0.02f
+
+        /**
+         * Quanto può spostare la deformazione locale, in frazione del lato lungo. Il 2,5% a
+         * 3200 px sono ottanta pixel: abbastanza per la parallasse di una stanza, troppo poco
+         * per stravolgere una foto se i punti mentono.
+         */
+        const val WARP_MAX_FRACTION = 0.025f
+
+        /** Sotto questo numero di celle in comune, il taglio sul minimo non ha dati per scegliere. */
+        const val SEAM_MIN_CELLS = 24
+
+        /**
+         * Il costo di una cella dove uno dei due non c'è: alto abbastanza da tenere il taglio
+         * dentro la sovrapposizione, basso abbastanza da non far esplodere la somma.
+         */
+        const val SEAM_FORBIDDEN = 10_000f
+
+        /**
+         * Quanto deve essere netta la separazione fra nuovo e tela perché un taglio solo la
+         * possa rappresentare. Sotto, la sovrapposizione è su due lati e si torna alla
+         * mediana geometrica.
+         */
+        const val SEAM_MIN_POLARITY = 0.15f
 
         /** Sotto questi campioni la fotometria globale non si fida e resta la catena. */
         const val PHOTOMETRIC_MIN_SAMPLES = 40

@@ -241,6 +241,43 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "E completa con punti severi · F taglio netto, per vedere dove cadono le " +
                         "giunzioni. Trovata la migliore, si spegne il test e si regola qui sotto.",
                 )
+                ToggleRow(
+                    title = "Taglio sul minimo disaccordo",
+                    subtitle = "La giunzione passa dove le due foto già si assomigliano, non a " +
+                        "metà strada: evita di tagliare in mezzo a un oggetto vicino",
+                    checked = settings.stitch.seamMinimalDifference,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(seamMinimalDifference = on) } },
+                    icon = LunaIcons.Center,
+                )
+                ToggleRow(
+                    title = "Deformazione locale",
+                    subtitle = "Assorbe la parallasse: il gimbal non ruota attorno al centro " +
+                        "dell'obiettivo, e ciò che è vicino si sposta più di ciò che è lontano",
+                    checked = settings.stitch.localWarp,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(localWarp = on) } },
+                    icon = LunaIcons.Axis,
+                )
+                Text("Libertà sulla focale rispetto alla specifica")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(4 to "4%", 10 to "10%", 20 to "20%", 35 to "35%").forEach { (percent, label) ->
+                        FilterChip(
+                            selected = settings.stitch.focalFreedomPercent == percent,
+                            onClick = { viewModel.updateStitch { it.copy(focalFreedomPercent = percent) } },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "Il campo visivo nasce dai «20 mm equivalenti» dichiarati, che sono catalogo " +
+                        "e non misura. Se la focale vera è più lunga, le foto combaciano al centro " +
+                        "e divergono ai bordi. Nel log dell'unione c'è la riga «Campo visivo: " +
+                        "dichiarato … misurato …»: se lo scarto è costante, la specifica è ottimistica.",
+                )
                 Text("Qualità minima dei punti di controllo")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     listOf(80, 90, 95, 100).forEach { percent ->

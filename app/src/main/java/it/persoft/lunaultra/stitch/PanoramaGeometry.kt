@@ -5,6 +5,7 @@ import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -337,6 +338,122 @@ fun frameToWorld(
     val latitude = asin(yw.coerceIn(-1f, 1f)).toDegrees()
     val longitude = atan2(xn, zw).toDegrees() + placement.effectivePan
     return floatArrayOf(longitude, latitude)
+}
+
+/**
+ * Il campo di spostamento locale di un fotogramma: quello che la rotazione non può sistemare.
+ *
+ * Un gimbal non ruota attorno al centro ottico dell'obiettivo, ma attorno a un asse che gli sta
+ * qualche centimetro dietro. Fra uno scatto e l'altro la camera quindi non gira soltanto: si
+ * **sposta**. E quando la camera si sposta, quello che è vicino scorre più di quello che è
+ * lontano — è la parallasse, la stessa per cui il dito davanti al naso salta chiudendo un occhio
+ * per volta. Nessuna rotazione, per quanto ben stimata, rimette d'accordo due profondità nello
+ * stesso momento: se allinei il bambù in fondo, la tenda davanti resta fuori posto, e viceversa.
+ *
+ * Quello che si può fare è quello che fa Autopano: prendere i punti di controllo rimasti fuori
+ * posto **dopo** l'allineamento globale e trasformarli in un campo di spostamento morbido, da
+ * applicare al campionamento. Localmente le due foto tornano a coincidere; il campo è liscio, e
+ * dove non ci sono punti va a zero, così non inventa niente.
+ *
+ * La griglia è piccola apposta — poche celle sul fotogramma — e ogni nodo è una media pesata dei
+ * punti vicini con una campana: nessun punto singolo può creare uno strappo, e un punto sbagliato
+ * pesa quanto i suoi vicini gli concedono.
+ */
+class LocalWarp private constructor(
+    private val nodesX: Int,
+    private val nodesY: Int,
+    private val cellWidth: Float,
+    private val cellHeight: Float,
+    private val dx: FloatArray,
+    private val dy: FloatArray,
+    /** Lo spostamento più grande del campo, in pixel: serve solo al racconto nel log. */
+    val worstShiftPixels: Float,
+) {
+    fun shiftX(x: Float, y: Float): Float = sample(dx, x, y)
+    fun shiftY(x: Float, y: Float): Float = sample(dy, x, y)
+
+    private fun sample(grid: FloatArray, x: Float, y: Float): Float {
+        val gx = (x / cellWidth).coerceIn(0f, (nodesX - 1).toFloat())
+        val gy = (y / cellHeight).coerceIn(0f, (nodesY - 1).toFloat())
+        val x0 = gx.toInt().coerceAtMost(nodesX - 1)
+        val y0 = gy.toInt().coerceAtMost(nodesY - 1)
+        val x1 = min(x0 + 1, nodesX - 1)
+        val y1 = min(y0 + 1, nodesY - 1)
+        val fx = gx - x0
+        val fy = gy - y0
+        val top = grid[y0 * nodesX + x0] * (1f - fx) + grid[y0 * nodesX + x1] * fx
+        val bottom = grid[y1 * nodesX + x0] * (1f - fx) + grid[y1 * nodesX + x1] * fx
+        return top * (1f - fy) + bottom * fy
+    }
+
+    companion object {
+        /**
+         * Costruisce il campo dai punti rimasti fuori posto.
+         *
+         * Ogni voce di [points] è `[x nel fotogramma, y nel fotogramma, spostamento x,
+         * spostamento y]`: dove la geometria prevedeva il dettaglio, e di quanto si è
+         * sbagliata. Restituisce null quando i punti sono troppo pochi per fidarsi.
+         */
+        fun from(
+            points: List<FloatArray>,
+            frameWidth: Int,
+            frameHeight: Int,
+            maximumShiftPixels: Float,
+        ): LocalWarp? {
+            if (points.size < MIN_POINTS || frameWidth <= 1 || frameHeight <= 1) return null
+            val cellWidth = frameWidth.toFloat() / (NODES_X - 1)
+            val cellHeight = frameHeight.toFloat() / (NODES_Y - 1)
+            val dx = FloatArray(NODES_X * NODES_Y)
+            val dy = FloatArray(NODES_X * NODES_Y)
+            // La larghezza della campana: un sesto del lato lungo. Più stretta seguirebbe il
+            // singolo punto (e i suoi errori), più larga tornerebbe a essere una traslazione
+            // globale — che l'allineamento ha già tolto.
+            val sigma = max(frameWidth, frameHeight) / 6f
+            val twoSigmaSquared = 2f * sigma * sigma
+            var worst = 0f
+            for (ny in 0 until NODES_Y) {
+                val nodeY = ny * cellHeight
+                for (nx in 0 until NODES_X) {
+                    val nodeX = nx * cellWidth
+                    var sumWeight = 0f
+                    var sumX = 0f
+                    var sumY = 0f
+                    for (point in points) {
+                        val ex = point[0] - nodeX
+                        val ey = point[1] - nodeY
+                        val weight = exp(-(ex * ex + ey * ey) / twoSigmaSquared)
+                        sumWeight += weight
+                        sumX += weight * point[2]
+                        sumY += weight * point[3]
+                    }
+                    // Sotto un minimo di sostegno il nodo resta fermo: meglio non correggere
+                    // che correggere per sentito dire da un punto lontano.
+                    val index = ny * NODES_X + nx
+                    if (sumWeight < MIN_SUPPORT) continue
+                    val vx = (sumX / sumWeight).coerceIn(-maximumShiftPixels, maximumShiftPixels)
+                    val vy = (sumY / sumWeight).coerceIn(-maximumShiftPixels, maximumShiftPixels)
+                    dx[index] = vx
+                    dy[index] = vy
+                    worst = max(worst, sqrt(vx * vx + vy * vy))
+                }
+            }
+            if (worst < MIN_USEFUL_SHIFT) return null
+            return LocalWarp(NODES_X, NODES_Y, cellWidth, cellHeight, dx, dy, worst)
+        }
+
+        /** Nodi della griglia: pochi, perché il campo deve essere morbido per costruzione. */
+        const val NODES_X = 9
+        const val NODES_Y = 7
+
+        /** Sotto questi punti il campo sarebbe il ritratto del rumore. */
+        const val MIN_POINTS = 24
+
+        /** Il peso complessivo sotto il quale un nodo non ha davvero nessuno che lo sostenga. */
+        const val MIN_SUPPORT = 0.75f
+
+        /** Un campo che sposta meno di così non vale il conto in più al campionamento. */
+        const val MIN_USEFUL_SHIFT = 0.35f
+    }
 }
 
 /** La differenza fra due longitudini, riportata nel giro corto: 350° − 10° fa −20, non 340. */

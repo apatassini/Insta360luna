@@ -28,24 +28,60 @@ data class StitchTuning(
     /** Stimare anche rollio e scala focale dal bundle adjustment, oltre allo spostamento. */
     val rollFocal: Boolean = true,
 
+    /**
+     * Quanto la focale stimata può allontanarsi da quella dichiarata dalla specifica.
+     *
+     * I 20 mm equivalenti da cui nasce il campo visivo sono un numero di catalogo, non una
+     * misura: se la focale vera è più lunga del 10%, le foto combaciano al centro e
+     * divergono ai bordi — ed è esattamente il difetto che si vede. Fin qui il margine era
+     * il 4%, e oltre quello *l'intera* correzione veniva buttata via.
+     */
+    val focalFreedom: Float = 0.20f,
+
     /** Stimare guadagni e vignettatura dai punti di controllo (spento: catena dei guadagni). */
     val photometric: Boolean = true,
 
     /** La sfumatura multibanda sulle giunzioni; spenta, il montaggio resta a taglio netto. */
     val multiband: Boolean = true,
+
+    /**
+     * Dove passa la giunzione: sul minimo disaccordo, non sulla mediana geometrica.
+     *
+     * È la differenza fra tagliare a metà strada — dove capita, anche in mezzo a una tenda —
+     * e cercare il percorso lungo il quale le due foto già si assomigliano. La parallasse
+     * non si annulla con nessuna rotazione, ma un taglio che passa dove le due immagini
+     * concordano non si vede: è il principio di enblend, ed è quello che manca quando il
+     * bambù dietro sembra continuare sopra la tenda davanti.
+     */
+    val seamMinimalDifference: Boolean = true,
+
+    /**
+     * La deformazione locale che assorbe quello che la rotazione non può assorbire.
+     *
+     * Il gimbal non ruota attorno al centro ottico dell'obiettivo: fra un'inquadratura e
+     * l'altra la camera *trasla* di qualche centimetro, e gli oggetti vicini si spostano
+     * più di quelli lontani. Nessuna rotazione rimette d'accordo due profondità insieme.
+     * Dai punti di controllo che restano fuori posto dopo l'allineamento globale si ricava
+     * un campo di spostamento morbido, e si applica al campionamento: è il «deghosting»
+     * locale di Autopano.
+     */
+    val localWarp: Boolean = true,
 )
 
 /** Una ricetta della modalità test: lettera per il nome del file, titolo per il log. */
 data class StitchVariant(val letter: String, val title: String, val tuning: StitchTuning)
 
 /**
- * Le ricette che la modalità test prova in fila, dalla più antica alla diagnostica.
+ * Le ricette che la modalità test prova in fila, ognuna diversa dalla precedente per **una
+ * cosa sola**.
  *
- * Tutte lavorano a [TEST_WORKING_LONG_SIDE] px e campionano dalla copia di lavoro: piccole
- * e veloci apposta, per poterle confrontare in galleria una accanto all'altra. La «storica»
- * è la ricetta delle versioni che univano bene: niente rollio/focale, niente fotometria,
- * solo piramide, punti di controllo e multibanda. Da lì in poi si riaccende una cosa alla
- * volta, così la ricetta che rompe si vede da quale lettera in poi compare il difetto.
+ * La prima scala di prove faceva variare fotometria, rollio e sfumatura, e le sei uscite si
+ * somigliavano tutte: la risposta giusta a una domanda sbagliata. Se le ricette differiscono
+ * e il risultato no, il colpevole sta in quello che **condividono** — la geometria e il punto
+ * in cui cade il taglio. Questa scala fa variare quelli.
+ *
+ * Tutte lavorano a [TEST_WORKING_LONG_SIDE] px e campionano dalla copia di lavoro: piccole e
+ * veloci apposta, per confrontarle in galleria una accanto all'altra.
  */
 object StitchTestLab {
     const val TEST_WORKING_LONG_SIDE = 1024
@@ -56,30 +92,47 @@ object StitchTestLab {
             workingLongSide = TEST_WORKING_LONG_SIDE,
             sampleFromOriginals = false,
         )
+        // Il punto di partenza: com'era prima di questa tornata — taglio sulla mediana
+        // geometrica, nessuna deformazione locale, focale quasi bloccata sulla specifica.
+        val old = base.copy(
+            seamMinimalDifference = false,
+            localWarp = false,
+            focalFreedom = 0.04f,
+        )
         return listOf(
             StitchVariant(
-                "A", "Storica: solo piramide e punti, multibanda",
-                test(base.copy(rollFocal = false, photometric = false, multiband = true)),
+                "A", "Com'era: taglio a metà strada, niente deformazione locale",
+                test(old),
             ),
             StitchVariant(
-                "B", "Storica + fotometria (guadagni e vignettatura)",
-                test(base.copy(rollFocal = false, photometric = true, multiband = true)),
+                "B", "Taglio sul minimo disaccordo (il resto come A)",
+                test(old.copy(seamMinimalDifference = true)),
             ),
             StitchVariant(
-                "C", "Rollio e focale, senza fotometria",
-                test(base.copy(rollFocal = true, photometric = false, multiband = true)),
+                "C", "Taglio minimo + focale libera fino al 20%",
+                test(old.copy(seamMinimalDifference = true, focalFreedom = 0.20f)),
             ),
             StitchVariant(
-                "D", "Completa: rollio/focale + fotometria (ricetta attuale)",
-                test(base.copy(rollFocal = true, photometric = true, multiband = true)),
+                "D", "Taglio minimo + focale libera + deformazione locale",
+                test(old.copy(seamMinimalDifference = true, focalFreedom = 0.20f, localWarp = true)),
             ),
             StitchVariant(
-                "E", "Completa con punti severi: qualità 95%, quantità doppia",
-                test(base.copy(rollFocal = true, photometric = true, multiband = true, keepNcc = 0.95f, candidateScale = 2f)),
+                "E", "Come D, con punti severi: qualità 95%, quantità doppia",
+                test(
+                    old.copy(
+                        seamMinimalDifference = true, focalFreedom = 0.20f, localWarp = true,
+                        keepNcc = 0.95f, candidateScale = 2f,
+                    ),
+                ),
             ),
             StitchVariant(
-                "F", "Taglio netto: come D ma senza sfumatura — mostra dove cadono le giunzioni",
-                test(base.copy(rollFocal = true, photometric = true, multiband = false)),
+                "F", "Come D ma a taglio netto: mostra nudo dove cade la giunzione",
+                test(
+                    old.copy(
+                        seamMinimalDifference = true, focalFreedom = 0.20f, localWarp = true,
+                        multiband = false,
+                    ),
+                ),
             ),
         )
     }

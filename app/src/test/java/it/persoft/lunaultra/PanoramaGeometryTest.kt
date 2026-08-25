@@ -1,6 +1,7 @@
 package it.persoft.lunaultra
 
 import it.persoft.lunaultra.stitch.FramePlacement
+import it.persoft.lunaultra.stitch.LocalWarp
 import it.persoft.lunaultra.stitch.PanoramaCanvas
 import it.persoft.lunaultra.stitch.PinholeLens
 import it.persoft.lunaultra.stitch.angularDistance
@@ -282,5 +283,49 @@ class PanoramaGeometryTest {
             canvas.latitudeAt(canvas.height - 1) >= -90.01f,
         )
         assertEquals(180f, canvas.verticalDegrees, 0.5f)
+    }
+
+    @Test
+    fun `la deformazione locale riproduce lo spostamento che le e' stato insegnato`() {
+        // Tutti i punti dicono la stessa cosa: «sei fuori di cinque pixel a destra e tre in
+        // alto». Il campo deve rispondere quello, ovunque ci siano punti a sostenerlo.
+        val points = buildList {
+            for (y in 100..1100 step 100) {
+                for (x in 100..1500 step 100) {
+                    add(floatArrayOf(x.toFloat(), y.toFloat(), 5f, -3f))
+                }
+            }
+        }
+        val warp = LocalWarp.from(points, 1600, 1200, maximumShiftPixels = 40f)
+        assertTrue("con centocinquanta punti concordi il campo deve esistere", warp != null)
+        assertEquals(5f, warp!!.shiftX(800f, 600f), 0.3f)
+        assertEquals(-3f, warp.shiftY(800f, 600f), 0.3f)
+    }
+
+    @Test
+    fun `la deformazione locale non si fida di quattro punti`() {
+        val points = listOf(
+            floatArrayOf(100f, 100f, 9f, 9f),
+            floatArrayOf(200f, 200f, 9f, 9f),
+            floatArrayOf(300f, 300f, 9f, 9f),
+            floatArrayOf(400f, 400f, 9f, 9f),
+        )
+        assertTrue(LocalWarp.from(points, 1600, 1200, maximumShiftPixels = 40f) == null)
+    }
+
+    @Test
+    fun `la deformazione locale non sposta mai oltre il limite`() {
+        // Punti che pretendono duecento pixel: il limite li riporta alla ragione. Serve a
+        // impedire che una manciata di corrispondenze sbagliate stravolga un fotogramma.
+        val points = buildList {
+            for (y in 100..1100 step 100) {
+                for (x in 100..1500 step 100) {
+                    add(floatArrayOf(x.toFloat(), y.toFloat(), 200f, -200f))
+                }
+            }
+        }
+        val warp = LocalWarp.from(points, 1600, 1200, maximumShiftPixels = 40f)!!
+        assertEquals(40f, warp.shiftX(800f, 600f), 0.01f)
+        assertEquals(-40f, warp.shiftY(800f, 600f), 0.01f)
     }
 }

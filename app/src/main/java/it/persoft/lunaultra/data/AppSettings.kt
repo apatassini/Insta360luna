@@ -121,6 +121,25 @@ data class StitchSettings(
     val controlQualityPercent: Int = 80,
     /** Quantità di punti di controllo: 1 = normale, 2 = doppia, 4 = quadrupla. */
     val controlDensity: Int = 1,
+
+    /**
+     * Far passare la giunzione dove le due foto già si assomigliano, invece che a metà
+     * strada. È quello che impedisce a un taglio di cadere in mezzo a un oggetto vicino.
+     */
+    val seamMinimalDifference: Boolean = true,
+
+    /**
+     * La deformazione locale che assorbe la parallasse: il gimbal non ruota attorno al
+     * centro ottico, e quello che è vicino si sposta più di quello che è lontano.
+     */
+    val localWarp: Boolean = true,
+
+    /**
+     * Di quanto la focale misurata può discostarsi da quella dichiarata, in percento. I
+     * 20 mm equivalenti sono un dato di catalogo: se la focale vera è più lunga, le foto
+     * combaciano al centro e divergono ai bordi.
+     */
+    val focalFreedomPercent: Int = 20,
 )
 
 @Serializable

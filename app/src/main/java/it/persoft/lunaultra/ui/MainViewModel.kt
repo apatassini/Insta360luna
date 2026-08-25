@@ -1619,6 +1619,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return StitchTuning(
             keepNcc = stitch.controlQualityPercent.coerceIn(50, 99) / 100f,
             candidateScale = stitch.controlDensity.coerceIn(1, 4).toFloat(),
+            seamMinimalDifference = stitch.seamMinimalDifference,
+            localWarp = stitch.localWarp,
+            focalFreedom = stitch.focalFreedomPercent.coerceIn(0, 35) / 100f,
         )
     }
 

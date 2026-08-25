@@ -1851,6 +1851,20 @@ class PanoramaStitcher(
         ) {
             return@coroutineScope null
         }
+
+        // E la prova deve essere forte quanto è grossa la pretesa.
+        //
+        // Gli angoli del gimbal non sono un'ipotesi da battere a pari merito: sono una misura
+        // meccanica, buona a un grado. Per scostarsene di mezzo grado basta poco; per
+        // scostarsene di quattro serve una correlazione che non lasci dubbi. Una correzione di
+        // quasi cinque gradi accettata al trentuno per cento di concordanza — cioè appena
+        // sopra il minimo — non è un allineamento, è una scommessa fatta con i soldi di chi
+        // guarda la panoramica.
+        if (!wideSearch) {
+            val claim = (max(abs(dPan), abs(dTilt)) / MAX_SEARCH_DEGREES).coerceIn(0f, 1f)
+            val needed = REG_MIN_NCC + (REG_STRONG_NCC - REG_MIN_NCC) * claim
+            if (confidence < needed) return@coroutineScope null
+        }
         Offset(dPan, dTilt, confidence.coerceIn(0f, 1f))
     }
 
@@ -3549,6 +3563,13 @@ class PanoramaStitcher(
          * non ha trovato niente e si è appoggiata al limite di quello che le era concesso.
          */
         const val REG_WALL_FRACTION = 0.7f
+
+        /**
+         * La concordanza che serve per spostare un fotogramma di un errore di puntamento
+         * intero ([MAX_SEARCH_DEGREES]). Fra zero e lì la richiesta sale in proporzione:
+         * mezzo grado si concede quasi gratis, quattro no.
+         */
+        const val REG_STRONG_NCC = 0.60f
 
         /** Due vicini che suggeriscono correzioni più lontane di così sono in disaccordo. */
         const val ANCHOR_AGREEMENT_DEGREES = 0.8f

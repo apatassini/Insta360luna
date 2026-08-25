@@ -229,13 +229,12 @@ class PanoramaStitcher(
             // singole, e tiene le altezze naturali vicino all'orizzonte — ma equirettangolare
             // per la sferica, perché è l'unica che arriva ai poli ed è l'unica che un
             // visualizzatore 360° sa leggere.
-            val projection = if (fillNadir) StitchProjection.EQUIRECTANGULAR else tuning.projection
             val provisional = PanoramaCanvas.covering(
                 placements = placements,
                 lens = lens,
                 requestedPixelsPerDegree = chooseDensity(placements, lens, heapMb, requestedDensity),
                 maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
-                projection = projection,
+                projection = projectionFor(placements, lens, fillNadir),
             )
 
             onProgress(0.10f, "Allineo i fotogrammi")
@@ -259,6 +258,7 @@ class PanoramaStitcher(
             // foto spariva. Con correzioni di un grado non si notava; con una correzione di
             // venticinque gradi se ne perdeva un quarto. «Manca anche una parte della foto»
             // era esattamente questo.
+            val projection = projectionFor(placements, lens, fillNadir)
             val canvas = PanoramaCanvas.covering(
                 placements = placements,
                 lens = lens,
@@ -266,6 +266,16 @@ class PanoramaStitcher(
                 maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
                 projection = projection,
             )
+            if (projection != tuning.projection && !fillNadir) {
+                levelNotes += ("Proiezione: %s invece di %s — la panoramica arriva a %.0f° dall'orizzonte, " +
+                    "e oltre il limite della %s la tela si stira all'infinito e le file esterne " +
+                    "verrebbero schiacciate sull'ultima riga.").format(
+                    projection.label,
+                    tuning.projection.label,
+                    verticalReach(placements, lens),
+                    tuning.projection.label.lowercase(),
+                )
+            }
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
             val composeDetail = mutableListOf<String>()
@@ -288,8 +298,12 @@ class PanoramaStitcher(
             val notes = refinement.notes.toMutableList()
             notes.add(
                 0,
-                "Tela ${canvas.width}×${canvas.height} a %.1f px/grado · %s (heap $heapMb MB) · "
-                    .format(canvas.pixelsPerDegree, canvas.projection.label) +
+                "Tela ${canvas.width}×${canvas.height} a %.1f px/grado · %s (%d MB in memoria, heap $heapMb MB) · "
+                    .format(
+                        canvas.pixelsPerDegree,
+                        canvas.projection.label,
+                        canvas.width.toLong() * canvas.height * 4L / (1024L * 1024L),
+                    ) +
                     if (fullResSampling) {
                         "cucitura dagli originali a piena risoluzione (×%.1f rispetto ai %d px di lavoro)"
                             .format(sourceScale, workingLongSide)
@@ -383,6 +397,52 @@ class PanoramaStitcher(
      * il budget, e la radice è la densità. Le sovrapposizioni si stimano dagli angoli
      * pianificati, allargati di [OVERLAP_SLACK_DEGREES] perché la rifinitura li sposterà.
      */
+    /**
+     * Quanto in alto e in basso arriva la panoramica, in gradi dall'orizzonte.
+     *
+     * È il numero che decide se una proiezione è utilizzabile: ognuna ha una latitudine oltre
+     * la quale non ci arriva, e la tela non lo dice — ci arriva e basta, clampando.
+     */
+    private fun verticalReach(placements: List<FramePlacement>, lens: PinholeLens): Float {
+        val half = lens.verticalFovDegrees / 2f
+        val top = placements.maxOf { it.effectiveTilt } + half
+        val bottom = placements.minOf { it.effectiveTilt } - half
+        return max(abs(top), abs(bottom))
+    }
+
+    /**
+     * La proiezione che la tela può davvero reggere, che non sempre è quella chiesta.
+     *
+     * La cilindrica è la scelta giusta per una fila sola: vicino all'orizzonte tiene le
+     * altezze naturali. Ma `y = R·tan(latitudine)` esplode, e a settantacinque gradi si ferma
+     * del tutto. Su una panoramica a tre file — dove si arriva a settantotto gradi — succedono
+     * due cose, entrambe brutte: la tela diventa **tre volte più alta** per rappresentare
+     * pixel che nessuno guarderà, e tutto quello che sta oltre il limite viene schiacciato
+     * sull'ultima riga, cioè la fila di sopra e quella di sotto **spariscono**.
+     *
+     * Quindi la scelta di chi scatta vale finché la geometria la regge, e oltre si scende
+     * alla prima che ce la fa — dicendolo nel log, perché un cambio silenzioso di proiezione
+     * è esattamente il genere di cosa che poi non si spiega guardando il risultato.
+     */
+    private fun projectionFor(
+        placements: List<FramePlacement>,
+        lens: PinholeLens,
+        fillNadir: Boolean,
+    ): StitchProjection {
+        // La sferica non ha scelta: è l'unica che arriva ai poli e l'unica che un
+        // visualizzatore 360° sa leggere.
+        if (fillNadir) return StitchProjection.EQUIRECTANGULAR
+        val reach = verticalReach(placements, lens)
+        val comfort = when (tuning.projection) {
+            StitchProjection.CYLINDRICAL -> CYLINDRICAL_COMFORT_DEGREES
+            StitchProjection.MERCATOR -> MERCATOR_COMFORT_DEGREES
+            StitchProjection.EQUIRECTANGULAR -> StitchProjection.EQUIRECTANGULAR.limitDegrees
+        }
+        if (reach <= comfort) return tuning.projection
+        if (reach <= MERCATOR_COMFORT_DEGREES) return StitchProjection.MERCATOR
+        return StitchProjection.EQUIRECTANGULAR
+    }
+
     private fun chooseDensity(
         placements: List<FramePlacement>,
         lens: PinholeLens,
@@ -442,6 +502,22 @@ class PanoramaStitcher(
             0f
         }
 
+        // E poi c'è la tela stessa, che fin qui non era contata da nessuna parte.
+        //
+        // Il conto sopra pesa i vettori di heap Java. La tela invece è un Bitmap, e i Bitmap
+        // vivono in memoria nativa: fuori da quel tetto, ma non fuori dal telefono. Quattro
+        // byte per pixel su una panoramica a tre file sono quasi un gigabyte, e non contarli
+        // significa scoprirlo quando il sistema chiude l'app. Il tetto qui sotto è dichiarato
+        // provvisorio apposta: sparirà quando la tela smetterà di essere un Bitmap e diventerà
+        // un file scritto a bande, che è la vera soluzione.
+        val canvasAllowance = heapMb.toLong() * 1024L * 1024L * CANVAS_NATIVE_HEAP_MULTIPLE
+        val canvasPerDensitySquared = ownerArea * 4f
+        val canvasAffordable = if (canvasPerDensitySquared > 0f) {
+            kotlin.math.sqrt(canvasAllowance / canvasPerDensitySquared.toDouble()).toFloat()
+        } else {
+            Float.MAX_VALUE
+        }
+
         // Mai sotto quello che i vecchi tetti fissi avrebbero concesso: il calcolo può solo
         // migliorare le cose, non peggiorarle.
         val legacyCap = when {
@@ -450,11 +526,20 @@ class PanoramaStitcher(
             else -> MAX_CANVAS_LONG_SIDE
         }
         val legacyFloor = min(requested, legacyCap / max(spanH, spanV))
-        return min(requested, max(affordable, legacyFloor))
+        // Il tetto della tela non ha pavimento di cortesia: se non ci sta, non ci sta.
+        return min(min(requested, max(affordable, legacyFloor)), canvasAffordable)
     }
 
-    /** Un livello della piramide di luminanza: i dati e la sua misura. */
-    private class GrayLevel(val data: FloatArray, val width: Int, val height: Int)
+    /**
+     * Un livello della piramide di luminanza: i dati e la sua misura.
+     *
+     * I dati sono **byte**, non float. Una luminanza sta fra zero e duecentocinquantacinque:
+     * un byte la contiene per intero, un float ne usa quattro e non aggiunge un'informazione
+     * che nell'immagine di partenza non c'è. Su nove foto la differenza era fra entrare in
+     * memoria e non entrarci — e in più questi vettori si leggono in lungo e in largo, quindi
+     * quattro volte meno byte sono quattro volte meno letture dalla RAM.
+     */
+    private class GrayLevel(val data: ByteArray, val width: Int, val height: Int)
 
     private class Frame(
         val bitmap: Bitmap,
@@ -467,7 +552,7 @@ class PanoramaStitcher(
         val height get() = bitmap.height
 
         private var pixelsCache: IntArray? = null
-        private var grayCache: FloatArray? = null
+        private var grayCache: ByteArray? = null
         private var levelsCache: List<GrayLevel>? = null
 
         private var fullCache: Bitmap? = null
@@ -518,15 +603,40 @@ class PanoramaStitcher(
                 pixelsCache = it
             }
 
-        /** La luminanza, calcolata una volta: l'allineamento lavora qui sopra. */
-        val gray: FloatArray
-            get() = grayCache ?: run {
-                val source = pixels
-                FloatArray(source.size) { i ->
-                    val c = source[i]
-                    0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
-                }.also { grayCache = it }
+        /**
+         * La luminanza, calcolata una volta: l'allineamento lavora qui sopra.
+         *
+         * Si costruisce **una riga per volta** dal Bitmap, senza passare dal vettore di tutti
+         * i pixel. Quel vettore pesava trenta megabyte per foto e serviva solo a fabbricare
+         * questa luminanza: con nove foto erano duecentosettanta megabyte di heap tenuti in
+         * ostaggio per un calcolo che si fa in transito. Il buffer di una riga si riusa, e le
+         * chiamate native passano da una a un paio di migliaia — che su nove milioni di pixel
+         * non si misurano.
+         */
+        val gray: ByteArray
+            get() = grayCache ?: buildGray().also { grayCache = it }
+
+        private fun buildGray(): ByteArray {
+            val out = ByteArray(width * height)
+            val row = IntArray(width)
+            for (y in 0 until height) {
+                bitmap.getPixels(row, 0, width, 0, y, width, 1)
+                val base = y * width
+                for (x in 0 until width) {
+                    val c = row[x]
+                    // Gli stessi pesi di sempre (0,299 · 0,587 · 0,114), in interi per
+                    // arrivare direttamente al byte senza passare per la virgola mobile.
+                    out[base + x] = (
+                        (
+                            299 * ((c shr 16) and 0xFF) +
+                                587 * ((c shr 8) and 0xFF) +
+                                114 * (c and 0xFF)
+                            ) / 1000
+                        ).toByte()
+                }
             }
+            return out
+        }
 
         /**
          * Libera i vettori di heap Java. Il Bitmap resta: è lui la copia buona, in memoria
@@ -557,17 +667,20 @@ class PanoramaStitcher(
                 val prev = levels.last()
                 val nw = (prev.width + 1) / 2
                 val nh = (prev.height + 1) / 2
-                val data = FloatArray(nw * nh)
+                val data = ByteArray(nw * nh)
                 for (y in 0 until nh) {
                     val sy = min(y * 2, prev.height - 1)
                     val sy1 = min(sy + 1, prev.height - 1)
                     for (x in 0 until nw) {
                         val sx = min(x * 2, prev.width - 1)
                         val sx1 = min(sx + 1, prev.width - 1)
-                        data[y * nw + x] = (
-                            prev.data[sy * prev.width + sx] + prev.data[sy * prev.width + sx1] +
-                                prev.data[sy1 * prev.width + sx] + prev.data[sy1 * prev.width + sx1]
-                            ) / 4f
+                        // La media dei quattro, arrotondata: la somma di quattro byte sta
+                        // comoda in un intero, e il risultato torna a essere un byte.
+                        val sum = (prev.data[sy * prev.width + sx].toInt() and 0xFF) +
+                            (prev.data[sy * prev.width + sx1].toInt() and 0xFF) +
+                            (prev.data[sy1 * prev.width + sx].toInt() and 0xFF) +
+                            (prev.data[sy1 * prev.width + sx1].toInt() and 0xFF)
+                        data[y * nw + x] = ((sum + 2) / 4).toByte()
                     }
                 }
                 levels += GrayLevel(data, nw, nh)
@@ -588,45 +701,54 @@ class PanoramaStitcher(
         shots: List<PanoramaShot>,
         workingLongSide: Int,
     ): List<Frame> = coroutineScope {
-        shots.map { shot ->
-            async(Dispatchers.IO) {
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(shot.file.absolutePath, bounds)
-                val options = BitmapFactory.Options().apply {
-                    inSampleSize = sampleSizeFor(bounds.outWidth, workingLongSide)
-                    inPreferredConfig = Bitmap.Config.ARGB_8888
+        // A scaglioni, non tutte insieme.
+        //
+        // Il decodificatore riduce solo per potenze di due, quindi per ogni scatto esistono
+        // per un attimo **due** Bitmap: quello appena decodificato, un po' più grande del
+        // dovuto, e quello riscalato alla misura di lavoro. Con nove scatti in parallelo sono
+        // diciotto immagini insieme in memoria nativa, per un lavoro che dura due secondi. A
+        // quattro per volta i core restano occupati lo stesso e il picco si divide.
+        shots.chunked(LOAD_BATCH).flatMap { batch ->
+            batch.map { shot ->
+                async(Dispatchers.IO) {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(shot.file.absolutePath, bounds)
+                    val options = BitmapFactory.Options().apply {
+                        inSampleSize = sampleSizeFor(bounds.outWidth, workingLongSide)
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    }
+                    val raw = BitmapFactory.decodeFile(shot.file.absolutePath, options)
+                        ?: throw IllegalStateException("Non riesco a leggere ${shot.file.name}")
+                    // Le foto del telefono in verticale arrivano coricate con l'EXIF che dice di
+                    // girarle: il decodificatore lo ignora, e un fotogramma sdraiato manda a
+                    // monte l'unione.
+                    val decoded = runCatching {
+                        it.persoft.lunaultra.media.applyExifOrientation(
+                            raw,
+                            androidx.exifinterface.media.ExifInterface(shot.file),
+                        )
+                    }.getOrDefault(raw)
+                    // Il decodificatore riduce solo per potenze di due: una foto da 4000 pixel
+                    // scende a 2000, non a 1600, e quel 25% in più di lato è il 56% in più di
+                    // memoria — moltiplicato per gli scatti è la differenza fra unire e morire.
+                    val longSide = max(decoded.width, decoded.height)
+                    val bitmap = if (longSide > workingLongSide) {
+                        val scale = workingLongSide.toFloat() / longSide
+                        val scaled = Bitmap.createScaledBitmap(
+                            decoded,
+                            (decoded.width * scale).roundToInt().coerceAtLeast(1),
+                            (decoded.height * scale).roundToInt().coerceAtLeast(1),
+                            true,
+                        )
+                        decoded.recycle()
+                        scaled
+                    } else {
+                        decoded
+                    }
+                    Frame(bitmap, shot.label, shot.file, max(bounds.outWidth, bounds.outHeight))
                 }
-                val raw = BitmapFactory.decodeFile(shot.file.absolutePath, options)
-                    ?: throw IllegalStateException("Non riesco a leggere ${shot.file.name}")
-                // Le foto del telefono in verticale arrivano coricate con l'EXIF che dice di
-                // girarle: il decodificatore lo ignora, e un fotogramma sdraiato manda a
-                // monte l'unione.
-                val decoded = runCatching {
-                    it.persoft.lunaultra.media.applyExifOrientation(
-                        raw,
-                        androidx.exifinterface.media.ExifInterface(shot.file),
-                    )
-                }.getOrDefault(raw)
-                // Il decodificatore riduce solo per potenze di due: una foto da 4000 pixel
-                // scende a 2000, non a 1600, e quel 25% in più di lato è il 56% in più di
-                // memoria — moltiplicato per gli scatti è la differenza fra unire e morire.
-                val longSide = max(decoded.width, decoded.height)
-                val bitmap = if (longSide > workingLongSide) {
-                    val scale = workingLongSide.toFloat() / longSide
-                    val scaled = Bitmap.createScaledBitmap(
-                        decoded,
-                        (decoded.width * scale).roundToInt().coerceAtLeast(1),
-                        (decoded.height * scale).roundToInt().coerceAtLeast(1),
-                        true,
-                    )
-                    decoded.recycle()
-                    scaled
-                } else {
-                    decoded
-                }
-                Frame(bitmap, shot.label, shot.file, max(bounds.outWidth, bounds.outHeight))
-            }
-        }.awaitAll()
+            }.awaitAll()
+        }
     }
 
     private class Refinement(
@@ -663,6 +785,31 @@ class PanoramaStitcher(
      * ricerca locale a piena risoluzione, che su una palma a ventaglio si aggancia alla foglia
      * sbagliata con grande convinzione — misurato, e si vedeva.
      */
+    /**
+     * I vicini con cui un fotogramma si confronta: i più vicini in angolo fra quelli che lo
+     * precedono, e comunque solo quelli che lo toccano davvero.
+     *
+     * Serve in due posti — a scegliere gli ancoraggi e a decidere chi può liberare la memoria
+     * — e devono dare la stessa risposta, altrimenti si libera qualcosa che serve ancora.
+     */
+    private fun anchorsOf(
+        index: Int,
+        placements: List<FramePlacement>,
+        lens: PinholeLens,
+    ): List<Int> = (0 until index)
+        .map { anchor ->
+            anchor to angularDistance(
+                placements[anchor].effectivePan,
+                placements[anchor].effectiveTilt,
+                placements[index].panDegrees,
+                placements[index].tiltDegrees,
+            )
+        }
+        .filter { (_, distance) -> distance < max(lens.horizontalFovDegrees, lens.verticalFovDegrees) }
+        .sortedBy { (_, distance) -> distance }
+        .take(MAX_ANCHORS)
+        .map { (anchor, _) -> anchor }
+
     private suspend fun refine(
         frames: List<Frame>,
         initial: List<FramePlacement>,
@@ -689,19 +836,7 @@ class PanoramaStitcher(
 
             // I vicini già sistemati più vicini in angolo: quello di fianco e, se c'è, quello
             // della fila accanto — così le file della griglia si richiudono fra loro.
-            val anchors = (0 until index)
-                .map { anchor ->
-                    anchor to angularDistance(
-                        placements[anchor].effectivePan,
-                        placements[anchor].effectiveTilt,
-                        placements[index].panDegrees,
-                        placements[index].tiltDegrees,
-                    )
-                }
-                .filter { (_, distance) -> distance < max(lens.horizontalFovDegrees, lens.verticalFovDegrees) }
-                .sortedBy { (_, distance) -> distance }
-                .take(MAX_ANCHORS)
-                .map { (anchor, _) -> anchor }
+            val anchors = anchorsOf(index, placements, lens)
             if (anchors.isEmpty()) continue
 
             val results = anchors.mapNotNull { anchor ->
@@ -860,18 +995,20 @@ class PanoramaStitcher(
                     residuals, frames[index].width, frames[index].height, limit, sigmaDivisor,
                 )
             }
-            // I fotogrammi ormai lontani non faranno più da vicini a nessuno: i loro vettori
-            // di lavoro si liberano, così una griglia grande non accumula piramidi.
-            for (past in 0 until index) {
-                val distance = angularDistance(
-                    placements[past].effectivePan,
-                    placements[past].effectiveTilt,
-                    placements[index].effectivePan,
-                    placements[index].effectiveTilt,
-                )
-                if (distance > 2f * max(lens.horizontalFovDegrees, lens.verticalFovDegrees)) {
-                    frames[past].releaseWorkingData()
-                }
+            // Chi non farà più da vicino a nessuno libera i suoi vettori di lavoro.
+            //
+            // La regola di prima chiedeva la distanza dal fotogramma corrente — «più lontano
+            // di due campi visivi» — e su una griglia non scattava mai, perché in una griglia
+            // nessuna foto è mai davvero lontana da un'altra. Risultato: le luminanze di
+            // tutte le foto restavano in memoria fino alla fine, e con nove foto la memoria
+            // finiva. La domanda giusta non è «quanto è lontano da qui», è **«qualcuno più
+            // avanti lo userà ancora?»**, e si risponde con la stessa funzione che sceglie i
+            // vicini. Sbagliare previsione non fa danno: la luminanza è pigra e si rifà dal
+            // Bitmap, che è sempre lì.
+            val stillNeeded = HashSet<Int>()
+            for (future in index + 1 until frames.size) stillNeeded += anchorsOf(future, placements, lens)
+            for (past in 0..index) {
+                if (past !in stillNeeded) frames[past].releaseWorkingData()
             }
 
             val magnitude = max(abs(finalPan), abs(finalTilt))
@@ -1263,8 +1400,10 @@ class PanoramaStitcher(
                         var xx = cx
                         while (xx < cx + step) {
                             val i = yy * fixed.width + xx
-                            val dx = abs(gray[i + 2] - gray[i - 2])
-                            val dy = abs(gray[i + 2 * fixed.width] - gray[i - 2 * fixed.width])
+                            val dx = abs(gray.luminance(i + 2) - gray.luminance(i - 2))
+                            val dy = abs(
+                                gray.luminance(i + 2 * fixed.width) - gray.luminance(i - 2 * fixed.width),
+                            )
                             val score = min(dx, dy)
                             if (score > bestScore) {
                                 bestScore = score
@@ -1328,11 +1467,11 @@ class PanoramaStitcher(
                                 world[1] - worldFound[1],
                                 ((found[0] - lens.imageWidth / 2f) / lens.focalPixels).toDegrees(),
                                 ((lens.imageHeight / 2f - found[1]) / lens.focalPixels).toDegrees(),
-                                gray[candidate[1] * fixed.width + candidate[0]],
-                                movingGray[
+                                gray.luminance(candidate[1] * fixed.width + candidate[0]),
+                                movingGray.luminance(
                                     found[1].toInt().coerceIn(0, moving.height - 1) * moving.width +
                                         found[0].toInt().coerceIn(0, moving.width - 1),
-                                ],
+                                ),
                                 (fx * fx + fy * fy) / (halfWf * halfWf + halfHf * halfHf),
                                 (mx * mx + my * my) / (halfWm * halfWm + halfHm * halfHm),
                                 // La direzione nel mondo del dettaglio (vista dal fotogramma
@@ -1362,11 +1501,11 @@ class PanoramaStitcher(
      * è piccolo e la completezza costa poco.
      */
     private fun matchControlPoint(
-        template: FloatArray,
+        template: ByteArray,
         templateWidth: Int,
         sourceX: Int,
         sourceY: Int,
-        target: FloatArray,
+        target: ByteArray,
         targetWidth: Int,
         targetHeight: Int,
         centerX: Float,
@@ -1379,7 +1518,7 @@ class PanoramaStitcher(
         var mean = 0f
         for (dy in -r..r) {
             for (dx in -r..r) {
-                val v = template[(sourceY + dy) * templateWidth + sourceX + dx]
+                val v = template.luminance((sourceY + dy) * templateWidth + sourceX + dx)
                 patch[(dy + r) * side + dx + r] = v
                 mean += v
             }
@@ -1406,7 +1545,7 @@ class PanoramaStitcher(
                 var sum = 0f
                 for (dy in -r..r) {
                     val rowBase = (py + dy) * targetWidth + px
-                    for (dx in -r..r) sum += target[rowBase + dx]
+                    for (dx in -r..r) sum += target.luminance(rowBase + dx)
                 }
                 val targetMean = sum / patch.size
                 var cross = 0f
@@ -1415,7 +1554,7 @@ class PanoramaStitcher(
                     val rowBase = (py + dy) * targetWidth + px
                     val patchBase = (dy + r) * side + r
                     for (dx in -r..r) {
-                        val d = target[rowBase + dx] - targetMean
+                        val d = target.luminance(rowBase + dx) - targetMean
                         cross += d * patch[patchBase + dx]
                         targetNorm += d * d
                     }
@@ -1655,8 +1794,9 @@ class PanoramaStitcher(
         val tx = cx - x0
         val ty = cy - y0
         val base = y0 * level.width + x0
-        val top = level.data[base] * (1f - tx) + level.data[base + 1] * tx
-        val bottom = level.data[base + level.width] * (1f - tx) + level.data[base + level.width + 1] * tx
+        val top = level.data.luminance(base) * (1f - tx) + level.data.luminance(base + 1) * tx
+        val bottom = level.data.luminance(base + level.width) * (1f - tx) +
+            level.data.luminance(base + level.width + 1) * tx
         return top * (1f - ty) + bottom * ty
     }
 
@@ -3150,8 +3290,8 @@ class PanoramaStitcher(
             for (row in top until bottom) {
                 // Il salto verso il buio fra due bande di qualche riga: più stabile del
                 // gradiente fra righe adiacenti, che sull'acqua increspata è tutto rumore.
-                val above = gray[(row - HORIZON_SPAN) * width + column]
-                val below = gray[(row + HORIZON_SPAN) * width + column]
+                val above = gray.luminance((row - HORIZON_SPAN) * width + column)
+                val below = gray.luminance((row + HORIZON_SPAN) * width + column)
                 val drop = above - below
                 if (drop > bestDrop) {
                     bestDrop = drop
@@ -3182,6 +3322,9 @@ class PanoramaStitcher(
     private companion object {
         /** Lato lungo di lavoro degli scatti: oltre, si paga memoria per dettaglio che si butta. */
         const val WORKING_LONG_SIDE = 1600
+
+        /** Quanti scatti si decodificano insieme: oltre, il picco di memoria non paga più. */
+        const val LOAD_BATCH = 4
 
         /** Tetto del lato lungo della tela, perché il risultato entri nella memoria di un telefono. */
         const val MAX_CANVAS_LONG_SIDE = 5000
@@ -3380,6 +3523,26 @@ class PanoramaStitcher(
         const val MIN_PHOTO_GAIN = 0.5f
         const val MAX_PHOTO_GAIN = 2.0f
 
+        /**
+         * Fin dove una proiezione si può usare senza che la tela cominci a mentire.
+         *
+         * Non sono i limiti matematici (75° e 80°): sono i gradi oltre i quali lo stiramento
+         * costa più di quello che rende. A 65° la cilindrica ha già raddoppiato la scala
+         * verticale rispetto all'orizzonte; a 75° l'ha quadruplicata e si ferma.
+         */
+        /**
+         * Quante volte il tetto della heap Java può valere la tela in memoria nativa.
+         *
+         * È un numero di buon senso, non una misura: Android non dice quanta memoria nativa
+         * concede, e il tetto della heap è l'unica cosa che scala con la memoria del
+         * telefono. Due volte significa un gigabyte su un telefono da 512 MB di heap — che
+         * è tanto, ma è quello che una panoramica onesta di nove foto chiede davvero.
+         */
+        const val CANVAS_NATIVE_HEAP_MULTIPLE = 2L
+
+        const val CYLINDRICAL_COMFORT_DEGREES = 65f
+        const val MERCATOR_COMFORT_DEGREES = 72f
+
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2
 
@@ -3479,6 +3642,15 @@ private fun channelAt(c00: Int, c10: Int, c01: Int, c11: Int, shift: Int, fx: Fl
  * sta accanto. Quando la richiesta esce dal blocco se ne prende un altro, spostato indietro
  * di un margine perché la scansione va verso destra e conviene averne davanti.
  */
+/**
+ * La luminanza di un pixel tenuto in byte, letta come numero.
+ *
+ * Un byte in Kotlin è **con segno**: letto così com'è, un pixel chiaro diventa un numero
+ * negativo e ogni confronto va a rovescio. La maschera lo riporta fra zero e
+ * duecentocinquantacinque, che è quello che quel byte ha sempre voluto dire.
+ */
+private fun ByteArray.luminance(index: Int): Float = (this[index].toInt() and 0xFF).toFloat()
+
 private class SourceBlock(private val bitmap: Bitmap) {
     private val width = bitmap.width
     private val height = bitmap.height

@@ -535,6 +535,67 @@ La pittura in GPU ha una condizione in più: l'originale deve entrare in una tex
 3200 px di lavoro il lato lungo è ~7040, sotto il limite di 8192; se un giorno non lo fosse,
 quel fotogramma si dipinge in CPU e il log lo scrive.
 
+Misurato su Adreno 750, tre foto da 37 Mpx, una manopola per volta:
+
+| | CPU | su GPU | di cui disegno | di cui riporto |
+|---|---|---|---|---|
+| riconoscimento | 4 s | **1 s** | 0,5 s | 0,8 s |
+| pittura | 9 s | **1 s** | 0,4 s | 1,0 s |
+
+Autocontrollo: peso Δ0,0 su 255, colore Δ0,1 su 255 su 196 campioni su 196. Le due strade
+danno lo stesso pixel a un livello di differenza — cioè l'arrotondamento dell'interpolazione,
+niente altro.
+
+Il riporto sulla tela (CPU) è ora **il doppio** del disegno: la pipeline fra le due — disegnare
+la fascia *n+1* mentre si riporta la *n* — recupererebbe al massimo il minore dei due, mezzo
+secondo. Non è più lì che sta il tempo: con entrambe accese il pezzo grosso della cucitura
+diventa la **fusione multibanda**, 7-8 s.
+
+### 7.2 La memoria, che è un vincolo diverso dal tempo
+
+Con nove foto l'unione moriva di `OutOfMemoryError` mentre allocava 30.771.216 byte — cioè
+3200 × 2404 × 4, **un vettore di lavoro di una foto**. Il tetto è la heap Java (512 MB con
+`largeHeap`); i Bitmap non ci stanno dentro, vivono in memoria nativa.
+
+Per foto si tenevano:
+
+| | prima | dopo |
+|---|---|---|
+| `pixels` (IntArray) | 30,8 MB | **0** — la luminanza si costruisce riga per riga dal Bitmap |
+| `gray` | 30,8 MB (float) | **7,7 MB** (byte) |
+| piramide (liv. 1-3) | 10,1 MB | **2,5 MB** |
+| **totale per foto** | **71,7 MB** | **10,2 MB** |
+| **nove foto** | **645 MB** ✗ | **92 MB** ✓ |
+
+Tre correzioni, nessuna delle quali tocca la risoluzione del risultato:
+
+**La luminanza in byte.** Sta fra 0 e 255: un float ne usa quattro e non aggiunge
+un'informazione che nell'immagine di partenza non c'è. In più questi vettori si leggono in
+lungo e in largo, quindi meno byte significa anche meno letture dalla RAM — la registrazione a
+piramide è limitata dalla banda, non dal calcolo.
+
+**Il vettore dei pixel non si costruisce.** Serviva solo a fabbricare la luminanza, e per
+quello basta un buffer di una riga riusato.
+
+**Liberare all'ultimo uso.** La regola vecchia era «più lontano di due campi visivi dal
+fotogramma corrente», e su una griglia non scattava mai — in una griglia nessuna foto è mai
+davvero lontana. La domanda giusta è «qualcuno più avanti lo userà ancora come vicino?», e si
+risponde con la stessa funzione che sceglie i vicini. Sbagliare previsione non fa danno: la
+luminanza è pigra e si rifà dal Bitmap.
+
+**La proiezione su più file.** Con tre file si arriva a ~78° dall'orizzonte. La cilindrica si
+ferma a 75°: la tela diventerebbe 36.000 px di altezza invece di 13.000, **e le file esterne
+verrebbero schiacciate sull'ultima riga**. Oltre i 65° si scende da sola a Mercatore, oltre i
+72° a equirettangolare, scrivendolo nel log.
+
+**Quello che resta.** La tela di una 3×3 è 17.217 × 13.166 = 227 Mpx = **907 MB di Bitmap
+nativo**, e quei 227 Mpx sono onesti: nove foto da 37 Mpx con il 30% di sovrapposizione fanno
+~230 Mpx di contenuto unico. Non c'è niente da tagliare — c'è da smettere di tenerla tutta in
+RAM: tela su file mappato in memoria e JPEG scritto a bande di 16 righe (Android non ha un
+encoder incrementale pubblico, va scritto). Memoria O(larghezza × 16) per qualunque
+dimensione. Fino ad allora `chooseDensity` conta anche i byte della tela, con un tetto
+dichiaratamente provvisorio di due volte la heap.
+
 ---
 
 ## 8. Le manopole e le ricette

@@ -1050,8 +1050,19 @@ class PanoramaStitcher(
                 continue
             }
 
+            // Prima i dettagli riconosciuti, che vedono a qualunque distanza; la piramide
+            // resta come ripiego per le scene in cui di dettagli non ce ne sono (una parete,
+            // una nebbia). Quando i dettagli rispondono, la piramide non gira nemmeno — ed è
+            // anche il motivo per cui l'allineamento diventa più veloce invece che più lento.
+            var byFeatures = 0
             val results = anchors.mapNotNull { anchor ->
-                registerPair(
+                registerByFeatures(
+                    moving = frames[index],
+                    fixed = frames[anchor],
+                    movingPlacement = placements[index],
+                    fixedPlacement = placements[anchor],
+                    lens = lens,
+                )?.also { byFeatures++ } ?: registerPair(
                     moving = frames[index],
                     fixed = frames[anchor],
                     movingPlacement = placements[index],
@@ -1273,6 +1284,10 @@ class PanoramaStitcher(
 
             val magnitude = max(abs(finalPan), abs(finalTilt))
             worst = max(worst, magnitude)
+            if (byFeatures > 0) {
+                notes += "${frames[index].label}: allineato riconoscendo i dettagli " +
+                    "($byFeatures ${if (byFeatures == 1) "vicino" else "vicini"} su ${anchors.size})"
+            }
             if (index in postponed) {
                 notes += "${frames[index].label}: al primo giro non c'era niente da misurare, " +
                     "ripreso con i vicini allineati nel frattempo"
@@ -1894,6 +1909,133 @@ class PanoramaStitcher(
     }
 
     private class Offset(val panDegrees: Float, val tiltDegrees: Float, val confidence: Float)
+
+    /**
+     * L'allineamento grossolano fatto riconoscendo dettagli, non correlando pixel.
+     *
+     * È la strada principale, e la piramide resta solo come ripiego. Il motivo sta nei log:
+     * su una scena di mare e cielo la correlazione a piramide non ha niente a cui aggrapparsi
+     * in orizzontale — mare resta mare, cielo resta cielo — e il suo massimo è rumore. I punti
+     * di controllo invece funzionano ma cercano in sette decimi di grado: un ramo fuori posto
+     * di due gradi non lo vedono nemmeno, scartano quel punto, e restituiscono «tutto a posto»
+     * misurando solo dove il problema non c'era.
+     *
+     * Qui ogni dettaglio diventa una firma di 256 bit che dipende da com'è fatto, non da dove
+     * sta: due dettagli si abbinano a qualunque distanza. Poi si vota. Gli abbinamenti giusti
+     * concordano tutti sullo stesso spostamento angolare; quelli sbagliati cadono ognuno per
+     * conto suo, e non fanno maggioranza da nessuna parte.
+     */
+    private fun registerByFeatures(
+        moving: Frame,
+        fixed: Frame,
+        movingPlacement: FramePlacement,
+        fixedPlacement: FramePlacement,
+        lens: PinholeLens,
+    ): Offset? {
+        // Dove si sovrappongono, nei pixel dell'uno e in quelli dell'altro.
+        var fx0 = Int.MAX_VALUE
+        var fy0 = Int.MAX_VALUE
+        var fx1 = -1
+        var fy1 = -1
+        var mx0 = Int.MAX_VALUE
+        var my0 = Int.MAX_VALUE
+        var mx1 = -1
+        var my1 = -1
+        var y = FEATURE_SCAN_STEP / 2
+        while (y < fixed.height) {
+            var x = FEATURE_SCAN_STEP / 2
+            while (x < fixed.width) {
+                val world = frameToWorld(x.toFloat(), y.toFloat(), fixedPlacement, lens)
+                val point = projectToFrame(world[0], world[1], movingPlacement, lens)
+                if (point.inside) {
+                    if (x < fx0) fx0 = x
+                    if (x > fx1) fx1 = x
+                    if (y < fy0) fy0 = y
+                    if (y > fy1) fy1 = y
+                    val px = point.x.toInt()
+                    val py = point.y.toInt()
+                    if (px < mx0) mx0 = px
+                    if (px > mx1) mx1 = px
+                    if (py < my0) my0 = py
+                    if (py > my1) my1 = py
+                }
+                x += FEATURE_SCAN_STEP
+            }
+            y += FEATURE_SCAN_STEP
+        }
+        if (fx1 < 0 || mx1 < 0) return null
+
+        // Nel fotogramma mobile si cerca più largo della sovrapposizione prevista: è lì che
+        // sta tutto il senso di questo metodo, cioè poter trovare un dettaglio anche dove la
+        // geometria non se lo aspettava.
+        val slack = (max(moving.width, moving.height) * FEATURE_SEARCH_FRACTION).toInt()
+        val fixedPoints = FeatureMatcher.detect(
+            fixed.gray, fixed.width, fixed.height, fx0, fy0, fx1, fy1, FEATURE_CELL,
+        )
+        val movingPoints = FeatureMatcher.detect(
+            moving.gray, moving.width, moving.height,
+            mx0 - slack, my0 - slack, mx1 + slack, my1 + slack, FEATURE_CELL,
+        )
+        if (fixedPoints.size < FEATURE_MIN_POINTS || movingPoints.size < FEATURE_MIN_POINTS) return null
+
+        val matches = FeatureMatcher.match(fixedPoints, movingPoints)
+        if (matches.size < FEATURE_MIN_INLIERS) return null
+
+        // Da ogni abbinamento, di quanto il fotogramma mobile dovrebbe spostarsi perché quel
+        // dettaglio finisca dove il fotogramma fermo dice che sta.
+        val panShift = FloatArray(matches.size)
+        val tiltShift = FloatArray(matches.size)
+        for (i in matches.indices) {
+            val m = matches[i]
+            val here = frameToWorld(m.fixedX.toFloat(), m.fixedY.toFloat(), fixedPlacement, lens)
+            val there = frameToWorld(m.movingX.toFloat(), m.movingY.toFloat(), movingPlacement, lens)
+            panShift[i] = wrapDegrees(here[0] - there[0])
+            tiltShift[i] = here[1] - there[1]
+        }
+
+        // Il voto, in due tempi. Prima si cerca la casella più affollata di una griglia grossa
+        // — è la maggioranza, e non si lascia spostare da qualche voto lontano. Poi si prende
+        // la media di chi sta dentro quella casella e nelle vicinanze, che è la misura fine.
+        var bestCount = 0
+        var bestPan = 0f
+        var bestTilt = 0f
+        for (i in matches.indices) {
+            if (abs(panShift[i]) > FEATURE_MAX_DEGREES || abs(tiltShift[i]) > FEATURE_MAX_DEGREES) continue
+            var count = 0
+            for (j in matches.indices) {
+                if (abs(panShift[j] - panShift[i]) <= FEATURE_VOTE_DEGREES &&
+                    abs(tiltShift[j] - tiltShift[i]) <= FEATURE_VOTE_DEGREES
+                ) {
+                    count++
+                }
+            }
+            if (count > bestCount) {
+                bestCount = count
+                bestPan = panShift[i]
+                bestTilt = tiltShift[i]
+            }
+        }
+        if (bestCount < FEATURE_MIN_INLIERS) return null
+
+        var sumPan = 0f
+        var sumTilt = 0f
+        var inliers = 0
+        for (i in matches.indices) {
+            if (abs(panShift[i] - bestPan) <= FEATURE_VOTE_DEGREES &&
+                abs(tiltShift[i] - bestTilt) <= FEATURE_VOTE_DEGREES
+            ) {
+                sumPan += panShift[i]
+                sumTilt += tiltShift[i]
+                inliers++
+            }
+        }
+        if (inliers < FEATURE_MIN_INLIERS) return null
+        val ratio = inliers.toFloat() / matches.size
+        if (ratio < FEATURE_MIN_RATIO) return null
+
+        return Offset(sumPan / inliers, sumTilt / inliers, ratio.coerceIn(0f, 1f))
+    }
+
 
     /**
      * Lo spostamento che fa combaciare [moving] con [fixed], dalla nebbia al dettaglio.
@@ -3889,6 +4031,39 @@ class PanoramaStitcher(
 
         /** Sotto questo nessuno è un caso strano: è la deriva normale di un gimbal. */
         const val OUTLIER_FLOOR_DEGREES = 1.5f
+
+        // ---- Allineamento riconoscendo i dettagli ----
+
+        /** Il passo con cui si cerca dove i due fotogrammi si sovrappongono. */
+        const val FEATURE_SCAN_STEP = 32
+
+        /** Una cella di griglia per dettaglio: sparge i punti invece di ammucchiarli. */
+        const val FEATURE_CELL = 64
+
+        /**
+         * Quanto si cerca **oltre** la sovrapposizione prevista, in frazione del lato.
+         *
+         * È tutto il senso del metodo: poter ritrovare un dettaglio anche dove la geometria
+         * non se lo aspettava. Un quinto del fotogramma sono sedici gradi, cioè molto più di
+         * qualunque errore vero — e molto più dei sette decimi in cui guardano i punti di
+         * controllo, che è il motivo per cui un ramo fuori di duecento pixel restava invisibile.
+         */
+        const val FEATURE_SEARCH_FRACTION = 0.20f
+
+        /** Sotto questi dettagli per fotogramma non c'è materiale per un voto. */
+        const val FEATURE_MIN_POINTS = 24
+
+        /** Quanti devono concordare perché sia una maggioranza e non una coincidenza. */
+        const val FEATURE_MIN_INLIERS = 15
+
+        /** E che frazione degli abbinamenti devono essere: pochi concordi fra mille no. */
+        const val FEATURE_MIN_RATIO = 0.20f
+
+        /** Quanto vicini devono cadere due voti per contarsi insieme. */
+        const val FEATURE_VOTE_DEGREES = 0.6f
+
+        /** Oltre questo non è più un errore di puntamento, è un abbinamento sbagliato. */
+        const val FEATURE_MAX_DEGREES = 12f
 
         /** Sotto questo scarto l'orizzonte è già dritto: raddrizzarlo sposterebbe solo rumore. */
         const val HORIZON_LEVEL_DEADBAND = 0.3f

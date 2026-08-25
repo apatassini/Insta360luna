@@ -1,6 +1,7 @@
 package it.persoft.lunaultra
 
 import it.persoft.lunaultra.stitch.FramePlacement
+import it.persoft.lunaultra.stitch.FrameProjector
 import it.persoft.lunaultra.stitch.LocalWarp
 import it.persoft.lunaultra.stitch.PanoramaCanvas
 import it.persoft.lunaultra.stitch.PinholeLens
@@ -284,6 +285,46 @@ class PanoramaGeometryTest {
             canvas.latitudeAt(canvas.height - 1) >= -90.01f,
         )
         assertEquals(180f, canvas.verticalDegrees, 0.5f)
+    }
+
+    @Test
+    fun `il proiettore veloce dice esattamente quello che dice quello leggibile`() {
+        // Sono due strade per lo stesso conto: quella leggibile serve all'allineamento, dove
+        // le chiamate sono migliaia, quella veloce alla cucitura, dove sono centinaia di
+        // milioni. Averne due significa poterle far divergere senza accorgersene — e una
+        // divergenza qui non è un rallentamento, è una panoramica sbagliata. Questo test è
+        // l'unica cosa che lo impedisce.
+        val placements = listOf(
+            FramePlacement(panDegrees = 0f, tiltDegrees = 0f),
+            FramePlacement(panDegrees = 57f, tiltDegrees = 12f),
+            FramePlacement(panDegrees = -40f, tiltDegrees = -25f, rollDegrees = 2.5f),
+            FramePlacement(panDegrees = 30f, tiltDegrees = 8f, rollDegrees = -1.2f, focalScale = 1.04f),
+            FramePlacement(
+                panDegrees = 100f, tiltDegrees = -5f,
+                panCorrectionDegrees = 3.2f, tiltCorrectionDegrees = -1.1f,
+                rollDegrees = 0.7f, focalScale = 0.97f,
+            ),
+        )
+        placements.forEach { placement ->
+            val projector = FrameProjector(placement, lens)
+            for (latitude in -40..40 step 5) {
+                projector.row(latitude.toFloat())
+                for (longitude in -180..180 step 7) {
+                    val expected = projectToFrame(longitude.toFloat(), latitude.toFloat(), placement, lens)
+                    val delta = Math.toRadians((longitude - placement.effectivePan).toDouble())
+                    projector.project(kotlin.math.sin(delta).toFloat(), kotlin.math.cos(delta).toFloat())
+                    assertEquals(
+                        "dentro/fuori deve coincidere a $longitude°/$latitude°",
+                        expected.inside,
+                        projector.inside,
+                    )
+                    if (expected.inside) {
+                        assertEquals(expected.x, projector.x, 0.01f)
+                        assertEquals(expected.y, projector.y, 0.01f)
+                    }
+                }
+            }
+        }
     }
 
     @Test

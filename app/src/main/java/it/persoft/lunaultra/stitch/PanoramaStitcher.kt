@@ -14,10 +14,12 @@ import java.io.File
 import kotlin.math.abs
 import kotlin.math.atan
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
@@ -1753,16 +1755,32 @@ class PanoramaStitcher(
         // fotogramma si dipinge diretto, una riga alla volta, senza vettori giganti. È
         // questo che permette alla tela di crescere: prima la fusione lavorava sull'intera
         // finestra e la memoria imponeva panoramiche piccole.
+        // Seno e coseno di ogni colonna, una volta per tutte.
+        //
+        // Le colonne della finestra sono sempre le stesse per tutte le righe: calcolarne la
+        // trigonometria a ogni pixel voleva dire rifare milioni di volte lo stesso conto. Qui
+        // costa una tabella da qualche decina di chilobyte e si ammortizza su tutta la
+        // finestra — che sono cinquanta milioni di pixel.
+        val lonSin = FloatArray(bw)
+        val lonCos = FloatArray(bw)
+        for (bx in 0 until bw) {
+            val delta = (canvas.longitudeAt(columns[bx]) - placement.effectivePan).toRadians()
+            lonSin[bx] = sin(delta)
+            lonCos[bx] = cos(delta)
+        }
+
         step(0.05f, "cerco dove cade sulla tela")
         val recogniseStartedAt = System.currentTimeMillis()
         val newW = ByteArray(count)
         parallelRows(row0, bh, 1) { by, _ ->
-            val latitude = canvas.latitudeAt(row0 + by)
+            // Un proiettore per riga: appartiene a questo filo e a nessun altro, e a fronte
+            // dei pixel della riga la sua costruzione non si misura.
+            val projector = FrameProjector(placement, lens, warp)
+            projector.row(canvas.latitudeAt(row0 + by))
             for (bx in 0 until bw) {
-                val longitude = canvas.longitudeAt(columns[bx])
-                val point = projectWarped(longitude, latitude, placement, lens, warp)
-                if (!point.inside) continue
-                val weight = featherWeight(point.x, point.y, frame.width, frame.height)
+                projector.project(lonSin[bx], lonCos[bx])
+                if (!projector.inside) continue
+                val weight = featherWeight(projector.x, projector.y, frame.width, frame.height)
                 if (weight <= 0f) continue
                 newW[by * bw + bx] = (weight * 255f).roundToInt().coerceIn(1, 255).toByte()
             }
@@ -1818,7 +1836,8 @@ class PanoramaStitcher(
             val insideBlendRows = hasOverlap && by in sy0..sy1
             var touched = false
             var readRow = false
-            var latitude = 0f
+            val projector = FrameProjector(placement, lens, warp)
+            projector.row(canvas.latitudeAt(row0 + by))
             for (bx in 0 until bw) {
                 if (insideBlendRows && bx in sx0..sx1) continue
                 val i = by * bw + bx
@@ -1826,14 +1845,12 @@ class PanoramaStitcher(
                 if (weightByte == 0) continue
                 if (!readRow) {
                     readRow = true
-                    latitude = canvas.latitudeAt(row0 + by)
                     output.getPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
                 }
-                val longitude = canvas.longitudeAt(columns[bx])
-                val point = projectWarped(longitude, latitude, placement, lens, warp)
-                if (!point.inside) continue
-                val color = sampleColor(frame, full, point.x, point.y)
-                val factor = correction.factorAt(point.x, point.y)
+                projector.project(lonSin[bx], lonCos[bx])
+                if (!projector.inside) continue
+                val color = sampleColor(frame, full, projector.x, projector.y)
+                val factor = correction.factorAt(projector.x, projector.y)
                 val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                 val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                 val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)

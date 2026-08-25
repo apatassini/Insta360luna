@@ -389,6 +389,111 @@ fun projectToFrame(
 }
 
 /**
+ * La stessa proiezione di [projectToFrame], preparata per essere chiamata milioni di volte.
+ *
+ * [projectToFrame] è la versione leggibile, ed è quella giusta per l'allineamento, dove le
+ * chiamate sono migliaia. Per la cucitura le chiamate sono **centinaia di milioni**, e lì due
+ * dettagli che a leggerli non si notano diventano il costo dominante.
+ *
+ * Il primo: delle otto funzioni trigonometriche che calcola, **nessuna dipende davvero dal
+ * pixel**. Seno e coseno di inclinazione e rollio sono costanti per tutto il fotogramma;
+ * quelli della latitudine cambiano solo passando di riga; quelli della longitudine solo
+ * passando di colonna — e le colonne sono sempre le stesse, quindi si tabulano una volta.
+ * Chiamate per pixel, sono otto calcoli buttati via su ognuno.
+ *
+ * Il secondo: [projectToFrame] restituisce un [SourcePoint], che è un oggetto. Un oggetto per
+ * pixel sono centinaia di milioni di oggetti da raccogliere, e il netturbino ferma tutti i
+ * fili mentre passa. Qui il risultato si posa in tre campi che vivono quanto il proiettore.
+ *
+ * Un proiettore appartiene a un filo solo — se ne costruisce uno per riga, che a fronte dei
+ * pixel di quella riga non è niente — e non va condiviso, perché i suoi campi sono il
+ * risultato dell'ultima chiamata.
+ */
+class FrameProjector(
+    placement: FramePlacement,
+    private val lens: PinholeLens,
+    private val warp: LocalWarp? = null,
+) {
+    /** Longitudine del centro del fotogramma: le colonne si tabulano rispetto a questa. */
+    val panDegrees: Float = placement.effectivePan
+
+    private val cosTilt: Float
+    private val sinTilt: Float
+    private val cosRoll: Float
+    private val sinRoll: Float
+    private val scale = placement.focalScale
+    private val focal = lens.focalPixels
+    private val halfWidth = lens.imageWidth / 2f
+    private val halfHeight = lens.imageHeight / 2f
+    private val maxX = lens.imageWidth - 1f
+    private val maxY = lens.imageHeight - 1f
+
+    private var cosLat = 1f
+    private var sinLat = 0f
+
+    /** Il pixel trovato dall'ultima chiamata a [project]: valido solo se [inside] è vero. */
+    var x = 0f
+        private set
+    var y = 0f
+        private set
+    var inside = false
+        private set
+
+    init {
+        val tilt = placement.effectiveTilt.toRadians()
+        cosTilt = cos(tilt)
+        sinTilt = sin(tilt)
+        val roll = placement.rollDegrees.toRadians()
+        cosRoll = cos(roll)
+        sinRoll = sin(roll)
+    }
+
+    /** Cambia riga: da qui in poi le proiezioni sono a questa latitudine. */
+    fun row(latitudeDegrees: Float) {
+        val lat = latitudeDegrees.toRadians()
+        cosLat = cos(lat)
+        sinLat = sin(lat)
+    }
+
+    /**
+     * Proietta la colonna il cui scarto di longitudine dal centro del fotogramma ha questo
+     * seno e questo coseno — tabulati una volta per tutte dal chiamante.
+     */
+    fun project(sinLon: Float, cosLon: Float) {
+        val worldX = cosLat * sinLon
+        val worldY = sinLat
+        val worldZ = cosLat * cosLon
+
+        val tiltedY = worldY * cosTilt - worldZ * sinTilt
+        val tiltedZ = worldY * sinTilt + worldZ * cosTilt
+        if (tiltedZ <= MIN_FORWARD) {
+            inside = false
+            return
+        }
+
+        val rolledX = worldX * cosRoll + tiltedY * sinRoll
+        val rolledY = -worldX * sinRoll + tiltedY * cosRoll
+
+        var px = halfWidth + focal * (rolledX * scale) / tiltedZ
+        var py = halfHeight - focal * (rolledY * scale) / tiltedZ
+        if (warp != null && px >= 0f && py >= 0f && px <= maxX && py <= maxY) {
+            val shiftedX = px + warp.shiftX(px, py)
+            val shiftedY = py + warp.shiftY(px, py)
+            px = shiftedX
+            py = shiftedY
+        }
+        x = px
+        y = py
+        inside = px >= 0f && py >= 0f && px <= maxX && py <= maxY
+    }
+
+    private companion object {
+        /** Lo stesso piano dietro l'obiettivo oltre cui [PinholeLens] si rifiuta di dividere. */
+        const val MIN_FORWARD = 1e-4f
+    }
+}
+
+/**
  * Da un pixel del fotogramma alla direzione nel mondo: l'inverso esatto di [projectToFrame].
  *
  * Serve ai punti di coerenza: un dettaglio trovato in un fotogramma diventa una direzione

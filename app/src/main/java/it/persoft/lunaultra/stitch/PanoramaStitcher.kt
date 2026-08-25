@@ -1507,7 +1507,34 @@ class PanoramaStitcher(
         val gh = (sbh + s - 1) / s
         val gcount = gw * gh
 
-        // 1) Vecchio, nuovo e maschera, campionati al centro di ogni cella s×s.
+        // L'istantanea dei possessori, presa PRIMA di qualsiasi scrittura. Senza, la riga
+        // dispari di ogni coppia leggeva il peso appena scritto dalla riga sopra (stessa
+        // cella a mezza risoluzione), i pesi si pareggiavano e la decisione saltava riga
+        // sì / riga no: erano i trattini visti dal vivo. È a mezza risoluzione in
+        // coordinate di finestra e si legge con interpolazione: pesi lisci, decisione
+        // liscia, una sola linea di cucitura.
+        val snapW = sbw / OWNER_SCALE + 2
+        val snapH = sbh / OWNER_SCALE + 2
+        val ownerSnap = FloatArray(snapW * snapH)
+        for (swy in 0 until snapH) {
+            val by = min(swy * OWNER_SCALE, sbh - 1)
+            val row = subRow0 + by
+            for (swx in 0 until snapW) {
+                val bx = min(swx * OWNER_SCALE, sbw - 1)
+                val col = columns[sx0 + bx]
+                ownerSnap[swy * snapW + swx] =
+                    (ownerWeight[ownerIndex(canvas.width, row, col)].toInt() and 0xFF) / 255f
+            }
+        }
+
+        fun oldWeightAt(bx: Int, by: Int): Float =
+            bilinearGrid(
+                ownerSnap, snapW, snapH,
+                bx.toFloat() / OWNER_SCALE, by.toFloat() / OWNER_SCALE,
+            )
+
+        // 1) Vecchio, nuovo e maschera, campionati al centro di ogni cella s×s. I pesi del
+        // nuovo si ricalcolano in virgola mobile: il byte serve solo a dire «qui c'è».
         val baseColor = IntArray(gcount)
         val newColor = IntArray(gcount)
         val mask = FloatArray(gcount)
@@ -1521,15 +1548,16 @@ class PanoramaStitcher(
                 val bx = min(gx * s + s / 2, sbw - 1)
                 val col = columns[sx0 + bx]
                 val g = gy * gw + gx
-                val newWeight = (windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() and 0xFF) / 255f
-                val oldWeight = (ownerWeight[ownerIndex(canvas.width, row, col)].toInt() and 0xFF) / 255f
+                val present = windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() != 0
+                val oldWeight = oldWeightAt(bx, by)
                 val old = rowPixels[col] and 0xFFFFFF
                 baseColor[g] = old
-                valid[g] = newWeight > 0f || oldWeight > 0f
-                if (newWeight > 0f) {
+                var newWeight = 0f
+                if (present) {
                     val longitude = canvas.longitudeAt(col)
                     val point = projectToFrame(longitude, latitude, placement, lens)
                     if (point.inside) {
+                        newWeight = featherWeight(point.x, point.y, frame.width, frame.height)
                         val color = sampleColor(frame, full, point.x, point.y)
                         val factor = correction.factorAt(point.x, point.y)
                         val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -1548,6 +1576,7 @@ class PanoramaStitcher(
                 } else {
                     newColor[g] = old
                 }
+                valid[g] = newWeight > 0f || oldWeight > 0f
             }
         }
 
@@ -1556,9 +1585,13 @@ class PanoramaStitcher(
         fillHoles(baseColor, valid, gw, gh)
         for (g in 0 until gcount) if (!valid[g]) newColor[g] = baseColor[g]
 
-        // 2) La fusione sulla versione ridotta, un canale per volta; della fusione si tiene
-        // solo la correzione rispetto al montaggio netto ridotto.
-        val correctionGrid = Array(3) { FloatArray(gcount) }
+        // 2) La fusione sulla versione ridotta, un canale per volta. Della fusione si
+        // tengono DUE correzioni — rispetto al nuovo e rispetto al vecchio — così ogni
+        // pixel a piena risoluzione applica quella della propria sorgente: al confine le
+        // due decisioni possono divergere di un pelo, e con una correzione sola quella
+        // sbagliata scuriva a blocchi.
+        val corrOver = Array(3) { FloatArray(gcount) }
+        val corrBase = Array(3) { FloatArray(gcount) }
         for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
             val baseChannel = FloatArray(gcount) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
             val overChannel = FloatArray(gcount) { ((newColor[it] shr shift) and 0xFF).toFloat() }
@@ -1569,15 +1602,15 @@ class PanoramaStitcher(
                 width = gw,
                 height = gh,
             )[0]
-            val target = correctionGrid[channel]
             for (g in 0 until gcount) {
-                val hard = if (mask[g] > 0.5f) overChannel[g] else baseChannel[g]
-                target[g] = blended[g] - hard
+                corrOver[channel][g] = blended[g] - overChannel[g]
+                corrBase[channel][g] = blended[g] - baseChannel[g]
             }
         }
 
         // 3) Riga per riga a piena risoluzione, tutte le CPU insieme: montaggio netto più
-        // correzione interpolata.
+        // la correzione della propria sorgente. Le decisioni leggono l'istantanea, mai la
+        // mappa viva.
         parallelRows(subRow0, sbh, canvas.width) { by, rowPixels ->
             val row = subRow0 + by
             val latitude = canvas.latitudeAt(row)
@@ -1586,38 +1619,46 @@ class PanoramaStitcher(
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
             for (bx in 0 until sbw) {
                 val col = columns[sx0 + bx]
-                val weightByte = windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() and 0xFF
-                val ownerIdx = ownerIndex(canvas.width, row, col)
-                val oldByte = ownerWeight[ownerIdx].toInt() and 0xFF
-                if (weightByte == 0 && oldByte == 0) continue
+                val present = windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() != 0
+                val oldWeight = oldWeightAt(bx, by)
+                if (!present && oldWeight <= 0f) continue
 
                 var hard = rowPixels[col] and 0xFFFFFF
-                if (weightByte > 0 && (oldByte == 0 || weightByte > oldByte)) {
+                var newWeight = 0f
+                var useNew = false
+                if (present) {
                     val longitude = canvas.longitudeAt(col)
                     val point = projectToFrame(longitude, latitude, placement, lens)
                     if (point.inside) {
-                        val color = sampleColor(frame, full, point.x, point.y)
-                        val factor = correction.factorAt(point.x, point.y)
-                        val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
-                        hard = (r shl 16) or (g shl 8) or b
+                        newWeight = featherWeight(point.x, point.y, frame.width, frame.height)
+                        if (newWeight > 0f && (oldWeight <= 0f || newWeight > oldWeight)) {
+                            useNew = true
+                            val color = sampleColor(frame, full, point.x, point.y)
+                            val factor = correction.factorAt(point.x, point.y)
+                            val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                            val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                            val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                            hard = (r shl 16) or (g shl 8) or b
+                        }
                     }
                 }
+                if (newWeight <= 0f && oldWeight <= 0f) continue
 
+                val grids = if (useNew) corrOver else corrBase
                 val gxf = (bx.toFloat() / s) - 0.5f + 0.5f / s
                 var outPixel = 0xFF000000.toInt()
                 for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
                     val value = ((hard shr shift) and 0xFF) +
-                        bilinearGrid(correctionGrid[channel], gw, gh, gxf, gyf)
+                        bilinearGrid(grids[channel], gw, gh, gxf, gyf)
                     outPixel = outPixel or (value.roundToInt().coerceIn(0, 255) shl shift)
                 }
                 rowPixels[col] = outPixel
                 touched = true
 
-                val winner = max(oldByte, weightByte)
-                if (winner > oldByte) {
-                    ownerWeight[ownerIdx] = winner.toByte()
+                val quantized = (newWeight * 255f).roundToInt().coerceIn(0, 255)
+                val ownerIdx = ownerIndex(canvas.width, row, col)
+                if (quantized > (ownerWeight[ownerIdx].toInt() and 0xFF)) {
+                    ownerWeight[ownerIdx] = quantized.toByte()
                 }
             }
             if (touched) {

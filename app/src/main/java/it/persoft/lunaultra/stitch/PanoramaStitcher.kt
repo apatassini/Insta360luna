@@ -3,7 +3,9 @@ package it.persoft.lunaultra.stitch
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -415,9 +417,9 @@ class PanoramaStitcher(
     private suspend fun loadFrames(
         shots: List<PanoramaShot>,
         workingLongSide: Int,
-    ): List<Frame> = kotlinx.coroutines.coroutineScope {
+    ): List<Frame> = coroutineScope {
         shots.map { shot ->
-            kotlinx.coroutines.async(Dispatchers.IO) {
+            async(Dispatchers.IO) {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeFile(shot.file.absolutePath, bounds)
                 val options = BitmapFactory.Options().apply {
@@ -674,10 +676,10 @@ class PanoramaStitcher(
         // La ricerca di ogni punto è indipendente dalle altre: si spartiscono fra i core.
         val movingGray = moving.gray
         val candidates = picked.take(CONTROL_MAX_CANDIDATES)
-        val kept = kotlinx.coroutines.coroutineScope {
+        val kept = coroutineScope {
             candidates.chunked((candidates.size / MAX_STITCH_WORKERS + 1).coerceAtLeast(8))
                 .map { chunk ->
-                    kotlinx.coroutines.async(Dispatchers.Default) {
+                    async(Dispatchers.Default) {
                         val local = mutableListOf<FloatArray>()
                         for (candidate in chunk) {
                             val world = frameToWorld(candidate[0].toFloat(), candidate[1].toFloat(), fixedPlacement, lens)
@@ -1347,7 +1349,7 @@ class PanoramaStitcher(
         rowCount: Int,
         bufferSize: Int,
         body: (Int, IntArray) -> Unit,
-    ) = kotlinx.coroutines.coroutineScope {
+    ) = coroutineScope {
         if (rowCount <= 0) return@coroutineScope
         val workers = min(Runtime.getRuntime().availableProcessors(), MAX_STITCH_WORKERS)
         if (workers <= 1 || rowCount < 8) {

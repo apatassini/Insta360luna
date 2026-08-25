@@ -132,7 +132,7 @@ data class StitchSettings(
      * La deformazione locale che assorbe la parallasse: il gimbal non ruota attorno al
      * centro ottico, e quello che è vicino si sposta più di quello che è lontano.
      */
-    val localWarp: Boolean = true,
+    val localWarp: Boolean = false,
 
     /**
      * Di quanto la focale misurata può discostarsi da quella dichiarata, in percento. I
@@ -143,6 +143,9 @@ data class StitchSettings(
 
     /** Quanto deforma il campo locale: 1 leggera, 2 media, 3 forte. */
     val warpStrength: Int = 2,
+
+    /** La sfumatura multibanda sulle giunzioni; spenta, il montaggio resta a taglio netto. */
+    val multiband: Boolean = true,
 
     /**
      * Il campo visivo orizzontale da usare al posto di quello dichiarato, in gradi.
@@ -164,7 +167,7 @@ data class StitchSettings(
      * Senza, si dà per scontato che la camera fosse in bolla — e se non lo era, il mare
      * esce a conca e le linee vicine restano dritte, cioè il contrario del giusto.
      */
-    val levelHorizon: Boolean = false,
+    val levelHorizon: Boolean = true,
 
     /** Inclinazione della camera imposta a mano, in gradi. Zero = misurala dall'orizzonte. */
     val cameraPitchDegrees: Float = 0f,

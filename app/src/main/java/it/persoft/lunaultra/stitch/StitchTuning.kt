@@ -122,11 +122,15 @@ object StitchTestLab {
     const val TEST_WORKING_LONG_SIDE = 1024
     const val TEST_FRAMES = 3
 
-    fun variants(base: StitchTuning): List<StitchVariant> {
-        fun test(tuning: StitchTuning) = tuning.copy(
-            workingLongSide = TEST_WORKING_LONG_SIDE,
-            sampleFromOriginals = false,
-        )
+    /**
+     * Le stesse ricette della modalità test, ma a piena risoluzione.
+     *
+     * Servono a chiudere il buco fra il banco di prova e il lavoro vero: scelta la lettera
+     * che convince, l'unione normale deve poterla usare tale e quale. Prima le due cose
+     * vivevano separate e nessuno poteva sapere se l'unione standard somigliasse alla prova
+     * che aveva vinto.
+     */
+    fun recipes(base: StitchTuning): List<StitchVariant> {
         // Il punto di partenza: com'era prima di questa tornata — taglio sulla mediana
         // geometrica, nessuna deformazione locale, focale quasi bloccata sulla specifica.
         val old = base.copy(
@@ -145,28 +149,48 @@ object StitchTestLab {
         return listOf(
             StitchVariant(
                 "A", "Com'era: camera assunta in bolla, taglio a metà strada, nessuna deformazione",
-                test(old),
+                old,
             ),
             StitchVariant(
                 "B", "Livella l'orizzonte: l'inclinazione vera della camera, misurata",
-                test(levelled),
+                levelled,
             ),
             StitchVariant(
                 "C", "Taglio sul minimo disaccordo + focale libera",
-                test(modern),
+                modern,
             ),
             StitchVariant(
                 "D", "Deformazione locale media",
-                test(dense.copy(warpStrength = 2)),
+                dense.copy(warpStrength = 2),
             ),
             StitchVariant(
                 "E", "Deformazione locale forte",
-                test(dense.copy(warpStrength = 3)),
+                dense.copy(warpStrength = 3),
             ),
             StitchVariant(
                 "F", "Come E a taglio netto: mostra nuda la giunzione",
-                test(dense.copy(warpStrength = 3, multiband = false)),
+                dense.copy(warpStrength = 3, multiband = false),
             ),
         )
     }
+
+    /** Le ricette rimpicciolite per la prova: stessa geometria, un decimo del tempo. */
+    fun variants(base: StitchTuning): List<StitchVariant> = recipes(base).map { variant ->
+        variant.copy(
+            tuning = variant.tuning.copy(
+                workingLongSide = TEST_WORKING_LONG_SIDE,
+                sampleFromOriginals = false,
+            ),
+        )
+    }
+
+    /**
+     * La lettera della ricetta a cui corrispondono le impostazioni attuali, se ce n'è una.
+     *
+     * Il confronto è sull'intera ricetta, e funziona perché le ricette nascono proprio dalle
+     * impostazioni correnti: quello che una ricetta non tocca resta uguale per costruzione,
+     * e quello che tocca è esattamente ciò che distingue una lettera dall'altra.
+     */
+    fun letterOf(tuning: StitchTuning): String? =
+        recipes(tuning).firstOrNull { it.tuning == tuning }?.letter
 }

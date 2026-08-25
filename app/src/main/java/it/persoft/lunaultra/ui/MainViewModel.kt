@@ -23,6 +23,7 @@ import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
 import it.persoft.lunaultra.stitch.PanoJobList
 import it.persoft.lunaultra.stitch.StitchProjection
+import it.persoft.lunaultra.stitch.StitchTestLab
 import it.persoft.lunaultra.stitch.StitchTuning
 import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.stitch.sphericalCoverage
@@ -1667,10 +1668,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * diventa 0,99: una correlazione esattamente 1,0 non esiste in virgola mobile, e la
      * soglia a 1,0 butterebbe tutti i punti invece di tenere solo i perfetti.
      */
-    private fun stitchTuning(): StitchTuning {
-        val stitch = settings.value.stitch
+    private fun stitchTuning(): StitchTuning = tuningOf(settings.value.stitch)
+
+    /** La lettera della ricetta a cui corrispondono le impostazioni, se ce n'è una. */
+    fun stitchRecipeLetter(stitch: StitchSettings): String? = StitchTestLab.letterOf(tuningOf(stitch))
+
+    /**
+     * Scrive nelle impostazioni la ricetta scelta, così l'unione normale fa esattamente
+     * quello che ha fatto quella prova. Senza questo, la lettera che aveva convinto restava
+     * chiusa nella modalità test.
+     */
+    fun applyStitchRecipe(letter: String) {
+        container.settingsStore.update { current ->
+            val recipe = StitchTestLab.recipes(tuningOf(current.stitch))
+                .firstOrNull { it.letter == letter } ?: return@update current
+            val tuning = recipe.tuning
+            current.copy(
+                stitch = current.stitch.copy(
+                    levelHorizon = tuning.levelHorizon,
+                    seamMinimalDifference = tuning.seamMinimalDifference,
+                    localWarp = tuning.localWarp,
+                    warpStrength = tuning.warpStrength,
+                    multiband = tuning.multiband,
+                    focalFreedomPercent = (tuning.focalFreedom * 100).roundToInt(),
+                    controlDensity = tuning.candidateScale.roundToInt(),
+                ),
+            )
+        }
+    }
+
+    private fun tuningOf(stitch: StitchSettings): StitchTuning {
         return StitchTuning(
             keepNcc = stitch.controlQualityPercent.coerceIn(50, 99) / 100f,
+            multiband = stitch.multiband,
             candidateScale = stitch.controlDensity.coerceIn(1, 4).toFloat(),
             seamMinimalDifference = stitch.seamMinimalDifference,
             localWarp = stitch.localWarp,

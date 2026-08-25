@@ -241,6 +241,43 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "E completa con punti severi · F taglio netto, per vedere dove cadono le " +
                         "giunzioni. Trovata la migliore, si spegne il test e si regola qui sotto.",
                 )
+                // La lettera scelta nel banco di prova, applicata all'unione vera: senza
+                // questo, la ricetta che aveva convinto restava chiusa nella modalità test.
+                val recipe = viewModel.stitchRecipeLetter(settings.stitch)
+                Text(
+                    text = "Ricetta: " + (recipe?.let { "$it — la stessa della prova $it" }
+                        ?: "personalizzata"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (recipe != null) Luna.Pano else Luna.OnSurfaceDim,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf("A", "B", "C", "D", "E", "F").forEach { letter ->
+                        FilterChip(
+                            selected = recipe == letter,
+                            onClick = { viewModel.applyStitchRecipe(letter) },
+                            label = { Text(letter) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "Sono le stesse sei ricette della modalità test, ma a piena risoluzione: " +
+                        "toccata una lettera, l'unione normale fa esattamente quello che ha " +
+                        "fatto quella prova. Toccando invece una manopola qui sotto la ricetta " +
+                        "diventa «personalizzata», ed è giusto così.",
+                )
+                ToggleRow(
+                    title = "Sfumatura multibanda",
+                    subtitle = "Spenta, la giunzione resta a taglio netto: serve a vedere dove " +
+                        "cade davvero, senza che la sfumatura la nasconda",
+                    checked = settings.stitch.multiband,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(multiband = on) } },
+                    icon = LunaIcons.Panorama,
+                )
                 Text("Proiezione della panoramica")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     listOf(1 to "Cilindrica", 2 to "Mercatore", 0 to "Equirett.").forEach { (code, label) ->

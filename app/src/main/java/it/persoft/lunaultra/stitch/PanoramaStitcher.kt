@@ -804,7 +804,9 @@ class PanoramaStitcher(
         index: Int,
         placements: List<FramePlacement>,
         lens: PinholeLens,
-    ): List<Int> = (0 until index)
+        candidates: List<Int>,
+    ): List<Int> = candidates
+        .filter { it != index }
         .map { anchor ->
             anchor to angularDistance(
                 placements[anchor].effectivePan,
@@ -838,14 +840,50 @@ class PanoramaStitcher(
         var overruledCount = 0
         var starvedCount = 0
 
-        for (index in 1 until frames.size) {
+        // Una coda, non un ciclo dritto: chi non trova niente da misurare torna in fondo e
+        // ci riprova quando i vicini allineati sono di più.
+        //
+        // In fila ogni fotogramma può confrontarsi solo con quelli che lo precedono, e su una
+        // griglia questo lascia scoperti proprio i casi difficili. La fila di sopra guarda il
+        // cielo: bruciato, senza dettaglio, senza niente da correlare. Chi ci prova non trova
+        // una misura e — come stava succedendo — **resta dov'è**, in mezzo a vicini che nel
+        // frattempo si sono spostati di nove gradi. Il risultato è una giunzione fuori posto
+        // di nove gradi, garantita.
+        //
+        // Ma quel fotogramma confina anche con la fila di sotto, che ha l'albero e gli scogli
+        // ed è piena di dettaglio: solo che quando tocca a lui la fila di sotto non è ancora
+        // stata allineata. Rimandarlo in fondo alla coda costa una seconda misura e gli dà
+        // vicini veri. Un rinvio a testa, non di più: se non basta, il log lo dice.
+        val queue = ArrayDeque((1 until frames.size).toList())
+        val postponed = HashSet<Int>()
+        var processed = 0
+        while (queue.isNotEmpty()) {
+            val index = queue.removeFirst()
             currentCoroutineContext().ensureActive()
-            onProgress(0.10f + 0.25f * index / frames.size, "Allineo ${frames[index].label}")
+            processed++
+            onProgress(
+                0.10f + 0.25f * min(processed, frames.size) / frames.size,
+                "Allineo ${frames[index].label}",
+            )
 
-            // I vicini già sistemati più vicini in angolo: quello di fianco e, se c'è, quello
-            // della fila accanto — così le file della griglia si richiudono fra loro.
-            val anchors = anchorsOf(index, placements, lens)
-            if (anchors.isEmpty()) continue
+            /** Rimanda a dopo, se c'è ancora qualcuno che potrebbe diventare un vicino. */
+            fun postpone(reason: String) {
+                if (postponed.add(index) && queue.isNotEmpty()) {
+                    queue.addLast(index)
+                    return
+                }
+                notes += "${frames[index].label}: $reason"
+            }
+
+            // I vicini **già allineati** più vicini in angolo: quello di fianco e, se c'è,
+            // quello della fila accanto — così le file della griglia si richiudono fra loro.
+            // Alla seconda passata questo include anche i fotogrammi venuti dopo.
+            val settled = aligned.indices.filter { aligned[it] }
+            val anchors = anchorsOf(index, placements, lens, settled)
+            if (anchors.isEmpty()) {
+                postpone("nessun vicino allineato con cui confrontarsi, resta dov'era")
+                continue
+            }
 
             val results = anchors.mapNotNull { anchor ->
                 registerPair(
@@ -858,7 +896,7 @@ class PanoramaStitcher(
                 )
             }
             if (results.isEmpty()) {
-                notes += "${frames[index].label}: sovrapposizione troppo povera, resta dov'era"
+                postpone("sovrapposizione troppo povera, resta dov'era")
                 continue
             }
 
@@ -1013,14 +1051,19 @@ class PanoramaStitcher(
             // avanti lo userà ancora?»**, e si risponde con la stessa funzione che sceglie i
             // vicini. Sbagliare previsione non fa danno: la luminanza è pigra e si rifà dal
             // Bitmap, che è sempre lì.
+            val alignedNow = aligned.indices.filter { aligned[it] }
             val stillNeeded = HashSet<Int>()
-            for (future in index + 1 until frames.size) stillNeeded += anchorsOf(future, placements, lens)
-            for (past in 0..index) {
-                if (past !in stillNeeded) frames[past].releaseWorkingData()
+            for (waiting in queue) stillNeeded += anchorsOf(waiting, placements, lens, alignedNow)
+            for (candidate in alignedNow) {
+                if (candidate !in stillNeeded) frames[candidate].releaseWorkingData()
             }
 
             val magnitude = max(abs(finalPan), abs(finalTilt))
             worst = max(worst, magnitude)
+            if (index in postponed) {
+                notes += "${frames[index].label}: al primo giro non c'era niente da misurare, " +
+                    "ripreso con i vicini allineati nel frattempo"
+            }
             notes += ("%s: %d punti di controllo, %d sopra l'%d%%%s · corretto %+.2f° / %+.2f° · " +
                 "rollio %+.2f° · focale ×%.3f · concordanza %.0f%%%s").format(
                 frames[index].label,
@@ -1072,6 +1115,21 @@ class PanoramaStitcher(
                         keptCounts.maxOrNull() ?: 0,
                         (worstThreshold * 100).roundToInt(),
                     ),
+                )
+            }
+            // Un fotogramma non misurato è la cosa più grave che possa esserci in questa
+            // scheda, e stava scritta solo in fondo al log fra ottanta righe. Se i vicini si
+            // sono spostati di nove gradi e lui è rimasto dov'era, la giunzione è fuori posto
+            // di nove gradi — e non c'è sfumatura che la nasconda.
+            val unmeasured = (1 until aligned.size).filter { !aligned[it] }
+            if (unmeasured.isNotEmpty()) {
+                add(
+                    "⚠ %d foto non misurate (%s): incollate alla posizione ipotizzata, mentre le altre si sono spostate fino a %.1f°"
+                        .format(
+                            unmeasured.size,
+                            unmeasured.joinToString(", ") { frames[it].label },
+                            worst,
+                        ),
                 )
             }
             if (starvedCount > 0) {
@@ -1313,10 +1371,41 @@ class PanoramaStitcher(
         val b = solution[colB].toFloat()
         if (a !in -VIGNETTE_LIMIT..VIGNETTE_LIMIT || b !in -VIGNETTE_LIMIT..VIGNETTE_LIMIT) return null
 
+        // I guadagni si centrano sulla media, invece di essere appesi al primo fotogramma.
+        //
+        // Il sistema fissa a uno il guadagno del primo e stima gli altri rispetto a lui, ma
+        // «rispetto a lui» significa lungo una catena di sovrapposizioni: su nove foto il
+        // fotogramma in fondo è a cinque anelli di distanza e accumula tutta la deriva. Con
+        // una fila di cielo bruciato e due di mare in ombra si arrivava a guadagni di 2,00
+        // — cioè il limite — e moltiplicare per due una foto che ha già del bianco significa
+        // **bruciarla**: il bianco non torna indietro, e il mare veniva slavato.
+        //
+        // Chi è la foto «giusta» non lo decide l'ordine di scatto. Togliendo la media dei
+        // logaritmi il livello resta quello medio della panoramica, e la correzione più
+        // grossa si dimezza: chi è chiaro viene scurito (e lo scuro si recupera) invece che
+        // il contrario. È quello che fa Hugin quando pareggia le esposizioni.
+        val logGains = HashMap<Int, Double>(present.size)
+        present.forEach { frame ->
+            logGains[frame] = if (frame == reference) 0.0 else solution[gainColumn[frame]!!]
+        }
+        val centre = logGains.values.average()
+        var worst = 0.0
+        logGains.replaceAll { _, value -> (value - centre).also { worst = max(worst, abs(it)) } }
+
+        // Se anche così si sfora, si comprime **tutto** dello stesso fattore invece di
+        // tagliare i singoli: tagliare rompe i rapporti fra le foto, e due giunzioni vicine
+        // finiscono corrette in modo diverso — che è peggio di una panoramica un po' meno
+        // pareggiata.
+        val ceiling = kotlin.math.ln(MAX_PHOTO_GAIN.toDouble())
+        if (worst > ceiling) {
+            val squeeze = ceiling / worst
+            logGains.replaceAll { _, value -> value * squeeze }
+        }
+
         val gains = FloatArray(frameCount) { 1f }
         present.forEach { frame ->
-            val logGain = if (frame == reference) 0.0 else solution[gainColumn[frame]!!]
-            gains[frame] = kotlin.math.exp(logGain).toFloat().coerceIn(MIN_PHOTO_GAIN, MAX_PHOTO_GAIN)
+            gains[frame] = kotlin.math.exp(logGains[frame]!!).toFloat()
+                .coerceIn(MIN_PHOTO_GAIN, MAX_PHOTO_GAIN)
         }
         // Le foto senza campioni (non allineate) ereditano il guadagno della più vicina
         // fra quelle stimate: meglio di una pezza a guadagno pieno.

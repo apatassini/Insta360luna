@@ -99,6 +99,18 @@ class PanoramaStitcher(
      */
     private var decodeMillis = 0L
 
+    /**
+     * I tre tempi della cucitura, tenuti separati perché sono tre lavori diversi.
+     *
+     * `riconoscimento` è la mappa dei pesi: dice quali pixel della tela questo fotogramma
+     * può coprire. `fusione` è la giunzione multibanda, che tocca solo la sovrapposizione.
+     * `pittura` è il resto, cioè la gran parte della tela. Senza tenerli separati si può
+     * solo tirare a indovinare quale dei tre stia costando — ed è già successo di sbagliare.
+     */
+    private var recogniseMillis = 0L
+    private var blendMillis = 0L
+    private var paintMillis = 0L
+
     suspend fun stitch(
         shots: List<PanoramaShot>,
         horizontalFovDegrees: Float,
@@ -263,8 +275,15 @@ class PanoramaStitcher(
                     },
             )
             notes += composeDetail
-            notes += "Tempi: allineamento %.0f s · cucitura %.0f s (di cui %.0f s ad aprire gli originali)"
-                .format(refineSeconds, composeSeconds, decodeMillis / 1000f)
+            notes += ("Tempi: allineamento %.0f s · cucitura %.0f s — riconoscimento %.0f s · " +
+                "fusione %.0f s · pittura %.0f s · apertura originali %.0f s").format(
+                refineSeconds,
+                composeSeconds,
+                recogniseMillis / 1000f,
+                blendMillis / 1000f,
+                paintMillis / 1000f,
+                decodeMillis / 1000f,
+            )
             if (!fillNadir) {
                 onProgress(0.98f, "Ritaglio il nero ai bordi")
                 val before = "${bitmap.width}×${bitmap.height}"
@@ -1735,6 +1754,7 @@ class PanoramaStitcher(
         // questo che permette alla tela di crescere: prima la fusione lavorava sull'intera
         // finestra e la memoria imponeva panoramiche piccole.
         step(0.05f, "cerco dove cade sulla tela")
+        val recogniseStartedAt = System.currentTimeMillis()
         val newW = ByteArray(count)
         parallelRows(row0, bh, 1) { by, _ ->
             val latitude = canvas.latitudeAt(row0 + by)
@@ -1747,6 +1767,8 @@ class PanoramaStitcher(
                 newW[by * bw + bx] = (weight * 255f).roundToInt().coerceIn(1, 255).toByte()
             }
         }
+
+        recogniseMillis += System.currentTimeMillis() - recogniseStartedAt
 
         // Il perimetro della sovrapposizione, dai pesi appena calcolati: una scansione
         // leggera, senza trigonometria.
@@ -1779,13 +1801,16 @@ class PanoramaStitcher(
             sy0 = (ov0y - BLEND_CONTEXT_PX).coerceAtLeast(0)
             sy1 = (ov1y + BLEND_CONTEXT_PX).coerceAtMost(bh - 1)
             step(0.25f, "fondo la giunzione (${sx1 - sx0 + 1}×${sy1 - sy0 + 1} px)")
+            val blendStartedAt = System.currentTimeMillis()
             seamNote = blendSubWindow(
                 output, ownerWeight, frame, placement, correction, lens, canvas,
                 columns, row0, bw, newW, sx0, sx1, sy0, sy1, full, warp,
             )
+            blendMillis += System.currentTimeMillis() - blendStartedAt
         }
 
         step(0.6f, "dipingo ${bw}×$bh px")
+        val paintStartedAt = System.currentTimeMillis()
         // Il resto del fotogramma: pittura diretta riga per riga, tutte le CPU insieme.
         // Fuori dalla sotto-finestra ogni pixel nuovo cade su tela vuota per costruzione,
         // quindi non c'è niente da fondere e le righe sono indipendenti.
@@ -1823,6 +1848,8 @@ class PanoramaStitcher(
                 output.setPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
             }
         }
+
+        paintMillis += System.currentTimeMillis() - paintStartedAt
 
         detail?.add(
             "%s: finestra %d×%d px · fusione su %s%s%s".format(
@@ -2071,14 +2098,15 @@ class PanoramaStitcher(
                 }
                 if (newWeight <= 0f && oldWeight <= 0f) continue
 
+                // Srotolato apposta: scritto come ciclo su `intArrayOf(16, 8, 0).withIndex()`
+                // allocava, per **ogni pixel**, l'array dei canali più un oggetto indice per
+                // giro. Su una fusione da decine di milioni di pixel sono centinaia di
+                // milioni di oggetti, e il netturbino che li raccoglie ferma tutti i fili.
                 val grids = if (useNew) corrOver else corrBase
-                var outPixel = 0xFF000000.toInt()
-                for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
-                    val value = ((hard shr shift) and 0xFF) +
-                        bilinearGrid(grids[channel], gw, gh, gxf, gyf)
-                    outPixel = outPixel or (value.roundToInt().coerceIn(0, 255) shl shift)
-                }
-                rowPixels[col] = outPixel
+                val red = correctedChannel(hard, 16, grids[0], gw, gh, gxf, gyf)
+                val green = correctedChannel(hard, 8, grids[1], gw, gh, gxf, gyf)
+                val blue = correctedChannel(hard, 0, grids[2], gw, gh, gxf, gyf)
+                rowPixels[col] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
                 touched = true
 
                 val quantized = (newWeight * 255f).roundToInt().coerceIn(0, 255)
@@ -2295,6 +2323,19 @@ class PanoramaStitcher(
         }
         return Seam(vertical, boundary, newOnHighSide)
     }
+
+    /** Il canale del montaggio netto più la correzione multibanda letta dalla griglia. */
+    private fun correctedChannel(
+        hard: Int,
+        shift: Int,
+        grid: FloatArray,
+        gridWidth: Int,
+        gridHeight: Int,
+        gx: Float,
+        gy: Float,
+    ): Int = (((hard shr shift) and 0xFF) + bilinearGrid(grid, gridWidth, gridHeight, gx, gy))
+        .roundToInt()
+        .coerceIn(0, 255)
 
     /** Interpolazione bilineare su una griglia ridotta, ai bordi si ferma. */
     private fun bilinearGrid(grid: FloatArray, gridWidth: Int, gridHeight: Int, x: Float, y: Float): Float {
@@ -2619,28 +2660,52 @@ class PanoramaStitcher(
      * Interpolazione bilineare leggendo direttamente dal Bitmap nativo: nessun vettore in
      * heap, e le letture sono sicure da più fili insieme.
      */
+    /**
+     * Il quadratino di quattro pixel che serve all'interpolazione, uno per filo.
+     *
+     * `Bitmap.getPixel` è una chiamata nativa con i suoi controlli: farne quattro per ogni
+     * pixel della tela, su una panoramica da cento megapixel, fa mezzo miliardo di
+     * attraversamenti del confine fra Java e nativo. `getPixels` ne prende quattro in un
+     * colpo solo, e il buffer resta di proprietà del filo che lo usa — così non si alloca
+     * niente e non c'è niente da spartire.
+     */
+    private val sampleBuffer = ThreadLocal.withInitial { IntArray(4) }
+
     private fun sampleBitmap(bitmap: Bitmap, x: Float, y: Float): Int {
-        val x0 = x.toInt().coerceIn(0, bitmap.width - 1)
-        val y0 = y.toInt().coerceIn(0, bitmap.height - 1)
-        val x1 = (x0 + 1).coerceAtMost(bitmap.width - 1)
-        val y1 = (y0 + 1).coerceAtMost(bitmap.height - 1)
-        val fx = x - x0
-        val fy = y - y0
-        val c00 = bitmap.getPixel(x0, y0)
-        val c10 = bitmap.getPixel(x1, y0)
-        val c01 = bitmap.getPixel(x0, y1)
-        val c11 = bitmap.getPixel(x1, y1)
-        var result = 0xFF shl 24
-        for (shift in intArrayOf(16, 8, 0)) {
-            val a = (c00 shr shift) and 0xFF
-            val b = (c10 shr shift) and 0xFF
-            val c = (c01 shr shift) and 0xFF
-            val d = (c11 shr shift) and 0xFF
-            val top = a + (b - a) * fx
-            val bottom = c + (d - c) * fx
-            result = result or ((top + (bottom - top) * fy).roundToInt().coerceIn(0, 255) shl shift)
-        }
-        return result
+        // L'origine si tiene a un pixel dal bordo: così il quadratino 2×2 ci sta sempre
+        // dentro e si legge in una volta sola, senza casi particolari agli estremi.
+        val x0 = x.toInt().coerceIn(0, bitmap.width - 2)
+        val y0 = y.toInt().coerceIn(0, bitmap.height - 2)
+        val fx = (x - x0).coerceIn(0f, 1f)
+        val fy = (y - y0).coerceIn(0f, 1f)
+        val quad = sampleBuffer.get()!!
+        bitmap.getPixels(quad, 0, 2, x0, y0, 2, 2)
+        return bilinearQuad(quad[0], quad[1], quad[2], quad[3], fx, fy)
+    }
+
+    /**
+     * L'interpolazione dei tre canali di un quadratino, srotolata.
+     *
+     * Scritta come ciclo su `intArrayOf(16, 8, 0)` allocava un array a ogni pixel: su cento
+     * milioni di pixel sono cento milioni di oggetti da raccogliere, e il netturbino ferma
+     * tutti i fili mentre passa. È il genere di spreco che non si vede leggendo il codice e
+     * si vede benissimo nel contatore dei core.
+     */
+    private fun bilinearQuad(c00: Int, c10: Int, c01: Int, c11: Int, fx: Float, fy: Float): Int {
+        val r = channelAt(c00, c10, c01, c11, 16, fx, fy)
+        val g = channelAt(c00, c10, c01, c11, 8, fx, fy)
+        val b = channelAt(c00, c10, c01, c11, 0, fx, fy)
+        return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+    }
+
+    private fun channelAt(c00: Int, c10: Int, c01: Int, c11: Int, shift: Int, fx: Float, fy: Float): Int {
+        val a = (c00 shr shift) and 0xFF
+        val b = (c10 shr shift) and 0xFF
+        val c = (c01 shr shift) and 0xFF
+        val d = (c11 shr shift) and 0xFF
+        val top = a + (b - a) * fx
+        val bottom = c + (d - c) * fx
+        return (top + (bottom - top) * fy).roundToInt().coerceIn(0, 255)
     }
 
     /** Colore interpolato fra i quattro pixel attorno: senza, i bordi diventano una scaletta. */
@@ -2651,22 +2716,14 @@ class PanoramaStitcher(
         val y1 = (y0 + 1).coerceAtMost(frame.height - 1)
         val fx = x - x0
         val fy = y - y0
-        val c00 = frame.pixels[y0 * frame.width + x0]
-        val c10 = frame.pixels[y0 * frame.width + x1]
-        val c01 = frame.pixels[y1 * frame.width + x0]
-        val c11 = frame.pixels[y1 * frame.width + x1]
-        var result = 0xFF shl 24
-        for (shift in intArrayOf(16, 8, 0)) {
-            val a = (c00 shr shift) and 0xFF
-            val b = (c10 shr shift) and 0xFF
-            val c = (c01 shr shift) and 0xFF
-            val d = (c11 shr shift) and 0xFF
-            val top = a + (b - a) * fx
-            val bottom = c + (d - c) * fx
-            val value = (top + (bottom - top) * fy).roundToInt().coerceIn(0, 255)
-            result = result or (value shl shift)
-        }
-        return result
+        return bilinearQuad(
+            frame.pixels[y0 * frame.width + x0],
+            frame.pixels[y0 * frame.width + x1],
+            frame.pixels[y1 * frame.width + x0],
+            frame.pixels[y1 * frame.width + x1],
+            fx,
+            fy,
+        )
     }
 
     /**

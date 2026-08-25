@@ -851,6 +851,24 @@ class PanoramaStitcher(
      * gli altri**: su una griglia dispari è quello di mezzo, su una pari è uno dei due
      * centrali, e su una fila sola è quello di mezzo della fila — sempre la scelta giusta,
      * senza casi particolari.
+     *
+     * **L'ordine dopo il centro non è la distanza pura.** Sarebbe la cosa ovvia, e sarebbe
+     * sbagliata: su questa griglia le file distano 34° e le colonne 49°, quindi la distanza
+     * pura farebbe uscire prima quelle di sopra e di sotto e solo dopo quelle di fianco. Il
+     * risultato è che il fotogramma di sinistra arriva quando in mezzo alla tela si sono già
+     * allargati quelli di sopra e di sotto, e la sua cucitura deve litigare con due lati
+     * invece che con uno.
+     *
+     * Si va invece **ad anelli**, e dentro l'anello prima la fascia centrale: centro, poi i
+     * due di fianco, poi quello sopra e quello sotto, e per ultimi i quattro angoli. Così la
+     * fascia orizzontale di mezzo — quella che si guarda, quella dell'orizzonte — si chiude
+     * per prima e le sue uniche due giunzioni sono cuciture fra **due** fotogrammi, dove il
+     * taglio sul minimo disaccordo sa lavorare. Gli angoli, che confinano da due lati e che
+     * il ritaglio finale mangia comunque, arrivano quando non possono più fare danno.
+     *
+     * Sull'allineamento questo non cambia niente: l'ordine decide **quando** un fotogramma
+     * viene misurato, non contro chi — i vicini restano sempre i più prossimi in angolo fra
+     * quelli già sistemati.
      */
     private fun radialOrder(placements: List<FramePlacement>): List<Int> {
         if (placements.size <= 2) return placements.indices.toList()
@@ -861,7 +879,23 @@ class PanoramaStitcher(
         val centre = placements.indices.minByOrNull { candidate ->
             placements.indices.sumOf { other -> distance(candidate, other).toDouble() }
         } ?: 0
-        val rest = placements.indices.filter { it != centre }.sortedBy { distance(centre, it) }
+
+        // Gli scarti si normalizzano sul più grande di ciascun asse, così un passo di colonna
+        // e un passo di fila valgono uno tutti e due: la somma diventa il numero dell'anello,
+        // uno per i quattro di fianco e di sopra, due per gli angoli. Il pizzico in più
+        // sull'inclinazione rompe la parità dentro l'anello a favore della fascia centrale.
+        val here = placements[centre]
+        val spanPan = placements.maxOf { abs(wrapDegrees(it.effectivePan - here.effectivePan)) }
+        val spanTilt = placements.maxOf { abs(it.effectiveTilt - here.effectiveTilt) }
+        fun ring(index: Int): Float {
+            val other = placements[index]
+            val dPan = abs(wrapDegrees(other.effectivePan - here.effectivePan)) /
+                spanPan.coerceAtLeast(1e-3f)
+            val dTilt = abs(other.effectiveTilt - here.effectiveTilt) /
+                spanTilt.coerceAtLeast(1e-3f)
+            return dPan + dTilt * (1f + ROW_FIRST_BIAS)
+        }
+        val rest = placements.indices.filter { it != centre }.sortedBy { ring(it) }
         return listOf(centre) + rest
     }
 
@@ -3912,6 +3946,13 @@ class PanoramaStitcher(
          * solo, 96%/92% e 100%/93% per chi ne ha due.
          */
         const val SEAM_ONE_SIDED_FRACTION = 0.75f
+
+        /**
+         * Di quanto un passo di fila «pesa» più di un passo di colonna nell'ordine di
+         * cucitura. Piccolo apposta: non deve cambiare l'anello, solo decidere chi esce prima
+         * a parità di anello — e a parità di anello si vuole la fascia centrale.
+         */
+        const val ROW_FIRST_BIAS = 0.05f
 
         /** Sotto questi campioni la fotometria globale non si fida e resta la catena. */
         const val PHOTOMETRIC_MIN_SAMPLES = 40

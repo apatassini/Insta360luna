@@ -21,11 +21,9 @@ import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
+import it.persoft.lunaultra.stitch.PanoJobList
 import it.persoft.lunaultra.stitch.ProcessVitals
 import it.persoft.lunaultra.stitch.StitchVitals
-import it.persoft.lunaultra.stitch.PanoJob
-import it.persoft.lunaultra.stitch.ProcessVitals
-import it.persoft.lunaultra.stitch.StitchVitalsList
 import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.stitch.StitchTestLab
 import it.persoft.lunaultra.stitch.StitchTuning

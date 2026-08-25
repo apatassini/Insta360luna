@@ -32,6 +32,7 @@ import it.persoft.lunaultra.timelapse.RunState
 import it.persoft.lunaultra.ui.UpdateUiState
 import it.persoft.lunaultra.ui.buildDateLabel
 import it.persoft.lunaultra.stitch.StitchUiState
+import it.persoft.lunaultra.stitch.StitchVitals
 import it.persoft.lunaultra.ui.components.GlassPanel
 import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.italianLabel
@@ -56,6 +57,7 @@ fun StitchCard(
     state: StitchUiState,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    vitals: StitchVitals? = null,
 ) {
     if (state is StitchUiState.Idle) return
     val accent = when (state) {
@@ -116,6 +118,23 @@ fun StitchCard(
                     progress = { state.fraction },
                     modifier = Modifier.fillMaxWidth().height(6.dp),
                 )
+                // Il polso della macchina: core occupati, memoria, tempo. Un'unione dura
+                // minuti, e da fuori non si distingue una che macina da una impantanata.
+                vitals?.let { live ->
+                    Text(
+                        text = "%.1f/%d core · heap %d/%d MB · nativa %d MB".format(
+                            live.busyCores, live.totalCores,
+                            live.heapUsedMb, live.heapMaxMb, live.nativeMb,
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (live.heapFraction > 0.9f) Luna.Rec else Luna.OnSurfaceDim,
+                    )
+                    Text(
+                        text = elapsedAndRemaining(live.elapsedMs, state.fraction),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Luna.OnSurfaceDim,
+                    )
+                }
             }
 
             is StitchUiState.Done -> {
@@ -592,4 +611,22 @@ fun ModeSheet(
             }
         }
     }
+}
+
+/**
+ * «Da 2 min 10 s · ne restano circa 3 min», quando c'è abbastanza avanzamento per dirlo.
+ *
+ * La stima resta muta sotto il tre per cento: all'inizio la frazione balla e una previsione
+ * fatta lì sarebbe solo un numero che cambia idea ogni secondo, che è peggio del silenzio.
+ */
+private fun elapsedAndRemaining(elapsedMs: Long, fraction: Float): String {
+    val elapsed = "Da " + shortDuration(elapsedMs)
+    if (fraction < 0.03f || fraction >= 1f) return elapsed
+    val remaining = (elapsedMs * (1f - fraction) / fraction).toLong()
+    return "$elapsed · ne restano circa ${shortDuration(remaining)}"
+}
+
+private fun shortDuration(millis: Long): String {
+    val seconds = (millis / 1000).coerceAtLeast(0)
+    return if (seconds < 60) "$seconds s" else "${seconds / 60} min ${seconds % 60} s"
 }

@@ -1615,6 +1615,9 @@ class PanoramaStitcher(
             pasteFrame(
                 output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
                 fullResSampling, warps.getOrNull(index), detail,
+                progressBase = 0.35f + 0.6f * index / frames.size,
+                progressSpan = 0.6f / frames.size,
+                progressLabel = "${frame.label} (${index + 1}/${frames.size})",
             )
             val last = detail.removeLastOrNull()
             if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
@@ -1643,7 +1646,18 @@ class PanoramaStitcher(
         fullResSampling: Boolean,
         warp: LocalWarp?,
         detail: MutableList<String>? = null,
+        /**
+         * La fetta di avanzamento che spetta a questo fotogramma. Cucirne uno può durare
+         * dieci secondi: senza sotto-passi la barra resterebbe ferma per tutto il tempo, e
+         * chi guarda non saprebbe se sta lavorando.
+         */
+        progressBase: Float = 0f,
+        progressSpan: Float = 0f,
+        progressLabel: String = "",
     ) {
+        fun step(fraction: Float, what: String) {
+            if (progressSpan > 0f) onProgress(progressBase + progressSpan * fraction, "$progressLabel · $what")
+        }
         val full = if (fullResSampling) frame.openFullResolution() else null
         val margin = BBOX_MARGIN_DEGREES
         val halfH = lens.horizontalFovDegrees / 2f + margin
@@ -1677,6 +1691,7 @@ class PanoramaStitcher(
         // fotogramma si dipinge diretto, una riga alla volta, senza vettori giganti. È
         // questo che permette alla tela di crescere: prima la fusione lavorava sull'intera
         // finestra e la memoria imponeva panoramiche piccole.
+        step(0.05f, "cerco dove cade sulla tela")
         val newW = ByteArray(count)
         parallelRows(row0, bh, 1) { by, _ ->
             val latitude = canvas.latitudeAt(row0 + by)
@@ -1720,12 +1735,14 @@ class PanoramaStitcher(
             sx1 = (ov1x + BLEND_CONTEXT_PX).coerceAtMost(bw - 1)
             sy0 = (ov0y - BLEND_CONTEXT_PX).coerceAtLeast(0)
             sy1 = (ov1y + BLEND_CONTEXT_PX).coerceAtMost(bh - 1)
+            step(0.25f, "fondo la giunzione (${sx1 - sx0 + 1}×${sy1 - sy0 + 1} px)")
             seamNote = blendSubWindow(
                 output, ownerWeight, frame, placement, correction, lens, canvas,
                 columns, row0, bw, newW, sx0, sx1, sy0, sy1, full, warp,
             )
         }
 
+        step(0.6f, "dipingo ${bw}×$bh px")
         // Il resto del fotogramma: pittura diretta riga per riga, tutte le CPU insieme.
         // Fuori dalla sotto-finestra ogni pixel nuovo cade su tela vuota per costruzione,
         // quindi non c'è niente da fondere e le righe sono indipendenti.

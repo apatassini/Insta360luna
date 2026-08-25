@@ -82,6 +82,7 @@ fun ViewfinderScreen(
     val photoCountdown by viewModel.photoCountdownSeconds.collectAsState()
     val calibration by viewModel.gimbalCalibration.collectAsState()
     val stitch by viewModel.stitchState.collectAsState()
+    val stitchVitals by viewModel.stitchVitals.collectAsState()
     val panoJobs by viewModel.panoJobs.collectAsState()
 
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
@@ -486,7 +487,11 @@ fun ViewfinderScreen(
             if (run.running) {
                 RunCard(run = run, mode = captureMode, saving = cameraSaving, onStop = viewModel::emergencyStop)
             }
-            StitchCard(state = stitch, onDismiss = viewModel::clearStitchState)
+            StitchCard(
+                state = stitch,
+                onDismiss = viewModel::clearStitchState,
+                vitals = stitchVitals,
+            )
         }
     }
 }

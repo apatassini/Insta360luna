@@ -21,7 +21,11 @@ import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
-import it.persoft.lunaultra.stitch.PanoJobList
+import it.persoft.lunaultra.stitch.ProcessVitals
+import it.persoft.lunaultra.stitch.StitchVitals
+import it.persoft.lunaultra.stitch.PanoJob
+import it.persoft.lunaultra.stitch.ProcessVitals
+import it.persoft.lunaultra.stitch.StitchVitalsList
 import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.stitch.StitchTestLab
 import it.persoft.lunaultra.stitch.StitchTuning
@@ -45,6 +49,7 @@ import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.update.UpdateManager
 import it.persoft.lunaultra.ui.viewfinder.CaptureMode
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -327,6 +332,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         observeConnection()
         observeForegroundService()
         observeFinishedRuns()
+        observeStitchVitals()
     }
 
     /**
@@ -1589,6 +1595,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure {
                 _stitchState.value = StitchUiState.Failed(it.message ?: "scaricamento non riuscito")
                 showMessage("Panoramica non messa in coda: ${it.message}")
+            }
+        }
+    }
+
+    /**
+     * CPU e memoria mentre l'unione lavora, per chi sta aspettando.
+     *
+     * Un'unione dura minuti e diceva solo «Cucio Foto 4»: da fuori non si distingue una
+     * macchina che macina da una che si è impantanata. La sonda vive quanto dura l'unione e
+     * non un istante di più — campionare `/proc` a vuoto non serve a nessuno.
+     */
+    private val _stitchVitals = MutableStateFlow<StitchVitals?>(null)
+    val stitchVitals: StateFlow<StitchVitals?> = _stitchVitals
+    private var vitalsJob: Job? = null
+
+    private fun observeStitchVitals() {
+        viewModelScope.launch {
+            _stitchState.collect { state ->
+                if (state is StitchUiState.Working) {
+                    if (vitalsJob == null) startStitchVitals()
+                } else {
+                    vitalsJob?.cancel()
+                    vitalsJob = null
+                    _stitchVitals.value = null
+                }
+            }
+        }
+    }
+
+    private fun startStitchVitals() {
+        val probe = ProcessVitals()
+        vitalsJob = viewModelScope.launch {
+            // Il primo campione fissa solo la base dei tempi di CPU: la differenza esiste
+            // dal secondo in poi, e mostrare zero core occupati sarebbe una bugia.
+            probe.sample()
+            while (isActive) {
+                delay(VITALS_INTERVAL_MS)
+                _stitchVitals.value = probe.sample()
             }
         }
     }
@@ -3053,6 +3097,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private companion object {
+        /** Ogni quanto si guardano CPU e memoria durante l'unione. */
+        const val VITALS_INTERVAL_MS = 700L
+
         const val STATUS_POLL_MS = 3_000L
 
         /** Ogni quanto il diario delle posizioni annota dove sta il telefono, da connessi. */

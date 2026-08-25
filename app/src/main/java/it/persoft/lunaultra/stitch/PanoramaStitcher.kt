@@ -3045,12 +3045,17 @@ class PanoramaStitcher(
             }
         }
         return when {
-            manySided -> "confine sul peso (vicini su più lati: un taglio solo non basterebbe)"
+            manySided ->
+                "confine sul peso (vicini su più lati: un taglio solo non basterebbe), fusione a 1/$s"
             seam == null && tuning.seamMinimalDifference ->
-                "taglio a metà strada (la polarità della sovrapposizione non è chiara)"
-            seam == null -> "taglio a metà strada"
-            else -> "taglio sul minimo disaccordo, %s".format(
+                "taglio a metà strada (la polarità della sovrapposizione non è chiara), fusione a 1/$s"
+            seam == null -> "taglio a metà strada, fusione a 1/$s"
+            // La scala della fusione nel log: quando un fotogramma ci mette ottantatré secondi
+            // invece di sei, la prima cosa da sapere è se ha lavorato a una scala diversa
+            // dagli altri o se era il telefono a essere occupato altrove.
+            else -> "taglio sul minimo disaccordo, %s, fusione a 1/%d".format(
                 if (seam.vertical) "verticale" else "orizzontale",
+                s,
             )
         }
     }
@@ -3732,13 +3737,25 @@ class PanoramaStitcher(
         const val REG_MIN_NCC = 0.30f
 
         /**
-         * Quanta sovrapposizione deve restare a un candidato perché il suo punteggio conti.
+         * Quanta sovrapposizione deve restare a un candidato perché venga considerato.
          *
-         * Sotto metà dei campioni previsti non si sta più misurando lo stesso pezzo di mondo:
-         * si sta correlando quel che rimane, e quel che rimane dà sempre ragione a chi si è
-         * spostato di più.
+         * Non è una soglia di qualità, è **la finestra di ricerca detta nel modo giusto**.
+         * Una banda di sovrapposizione di trenta gradi perde campioni in proporzione a quanto
+         * ci si sposta: mezzo grado ne perde il 2%, otto gradi il 27%. Chiedere l'85% vuol
+         * dire non prendere nemmeno in considerazione chi si sposta di più di quattro gradi e
+         * mezzo — e con angoli veri di un gimbal, il giusto sta sotto il grado.
+         *
+         * Meglio di un limite in gradi, che sarebbe un numero deciso a tavolino: questa
+         * soglia si adatta da sola alla sovrapposizione che c'è davvero. Su foto molto
+         * sovrapposte concede di più, su foto appena accostate stringe.
+         *
+         * Era a metà, e a metà ammetteva spostamenti fino a quindici gradi: nella pratica il
+         * massimo scivolava là in fondo, veniva scartato dai controlli successivi, e il
+         * risultato era «concordanza 0%» su tutte e nove le foto — cioè la ricerca grossolana
+         * che non contribuiva più niente, lasciando scoperta tutta la fascia fra i sette
+         * decimi di grado dei punti di controllo e i sette gradi del muro.
          */
-        const val REG_MIN_COVERAGE = 0.5f
+        const val REG_MIN_COVERAGE = 0.85f
 
         /**
          * Quanta della heap libera possono prendersi i vettori di lavoro della cucitura.

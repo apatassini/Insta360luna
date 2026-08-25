@@ -89,6 +89,16 @@ class PanoramaStitcher(
     private val tuning: StitchTuning = StitchTuning(),
 ) {
 
+    /**
+     * Quanto è costato aprire gli originali a piena risoluzione.
+     *
+     * È l'unica parte della cucitura che resta per forza su un filo solo — il decoder JPEG
+     * di Android non si spartisce — e su file da trentasette megapixel pesa. Misurarla a
+     * parte evita di cercare il collo di bottiglia dove non è: se la cucitura dura cento
+     * secondi e sessanta sono decodifica, parallelizzare il resto non sposta niente.
+     */
+    private var decodeMillis = 0L
+
     suspend fun stitch(
         shots: List<PanoramaShot>,
         horizontalFovDegrees: Float,
@@ -135,7 +145,11 @@ class PanoramaStitcher(
                     placements = placements.map { it.copy(tiltDegrees = forced) }
                     levelNotes += "Orizzonte: camera a %+.1f° (impostata a mano)".format(forced)
                 } else {
-                    val pitches = frames.map { estimateCameraPitch(it, lens) }
+                    // Un fotogramma per core: la misura dell'orizzonte è indipendente per
+                    // ognuno, e in fila costava quanto tutte messe insieme.
+                    val pitches = frames.map { frame ->
+                        async(Dispatchers.Default) { estimateCameraPitch(frame, lens) }
+                    }.awaitAll()
                     val measured = pitches.filterNotNull()
                     val median = if (measured.isEmpty()) null else measured.sorted()[measured.size / 2]
                     val enough = measured.size >= (frames.size + 1) / 2
@@ -249,7 +263,8 @@ class PanoramaStitcher(
                     },
             )
             notes += composeDetail
-            notes += "Tempi: allineamento %.0f s · cucitura %.0f s".format(refineSeconds, composeSeconds)
+            notes += "Tempi: allineamento %.0f s · cucitura %.0f s (di cui %.0f s ad aprire gli originali)"
+                .format(refineSeconds, composeSeconds, decodeMillis / 1000f)
             if (!fillNadir) {
                 onProgress(0.98f, "Ritaglio il nero ai bordi")
                 val before = "${bitmap.width}×${bitmap.height}"
@@ -1384,14 +1399,14 @@ class PanoramaStitcher(
      * livello prima, lo spostamento che massimizza la correlazione fra i due fotogrammi su quei
      * punti. Al livello più sfocato la finestra è larga sedici gradi; all'ultimo, un decimo.
      */
-    private fun registerPair(
+    private suspend fun registerPair(
         moving: Frame,
         fixed: Frame,
         movingPlacement: FramePlacement,
         fixedPlacement: FramePlacement,
         lens: PinholeLens,
         wideSearch: Boolean,
-    ): Offset? {
+    ): Offset? = coroutineScope {
         // Con la ricerca larga il vero combaciamento può stare ovunque: si tengono tutti i
         // punti del fermo, e sarà ogni candidato a dire quali cadono nel mobile. Con gli
         // angoli misurati, invece, la previsione è affidabile e filtra da subito.
@@ -1408,7 +1423,7 @@ class PanoramaStitcher(
             }
             y += REG_SAMPLE_STEP
         }
-        if (directions.size < REG_MIN_SAMPLES) return null
+        if (directions.size < REG_MIN_SAMPLES) return@coroutineScope null
 
         // La finestra della prima passata: la deriva di un gimbal calibrato, oppure — a mano
         // libera — quasi tutto il campo visivo, perché il passo vero nessuno lo sa.
@@ -1446,35 +1461,61 @@ class PanoramaStitcher(
                 )
             }
 
-            var bestPan = dPan
-            var bestTilt = dTilt
-            var bestNcc = -2f
+            // La griglia dei candidati si spartisce fra i core.
+            //
+            // È la parte più cara dell'allineamento e girava tutta su un filo solo: al livello
+            // grosso della ricerca larga sono un centinaio di posizioni di pan per una trentina
+            // di tilt, e ognuna rifà la correlazione su migliaia di punti campione. Ogni
+            // candidato però è indipendente da tutti gli altri — [sampledNcc] non scrive
+            // niente di condiviso — quindi ognuno può stare su un core suo, e alla fine vince
+            // il migliore fra i migliori di ciascuno.
+            val offsets = ArrayList<Float>()
             var cp = -rangePan
             while (cp <= rangePan + 1e-3f) {
-                var ct = -rangeTilt
-                while (ct <= rangeTilt + 1e-3f) {
-                    val candPan = (dPan + cp).coerceIn(-maxPan, maxPan)
-                    val candTilt = (dTilt + ct).coerceIn(-maxTilt, maxTilt)
-                    val candidate = movingPlacement.copy(
-                        panCorrectionDegrees = candPan,
-                        tiltCorrectionDegrees = candTilt,
-                    )
-                    val ncc = sampledNcc(directions, fixedValues, movingLevel, movingScale, candidate, lens)
-                    if (ncc > bestNcc) {
-                        bestNcc = ncc
-                        bestPan = candPan
-                        bestTilt = candTilt
-                    }
-                    ct += step
-                }
+                offsets += cp
                 cp += step
             }
-            dPan = bestPan
-            dTilt = bestTilt
-            confidence = bestNcc
+            val workers = min(Runtime.getRuntime().availableProcessors(), MAX_STITCH_WORKERS)
+
+            fun bestWithin(chunk: List<Float>): FloatArray {
+                var bestPan = dPan
+                var bestTilt = dTilt
+                var bestNcc = -2f
+                for (panOffset in chunk) {
+                    var ct = -rangeTilt
+                    while (ct <= rangeTilt + 1e-3f) {
+                        val candPan = (dPan + panOffset).coerceIn(-maxPan, maxPan)
+                        val candTilt = (dTilt + ct).coerceIn(-maxTilt, maxTilt)
+                        val candidate = movingPlacement.copy(
+                            panCorrectionDegrees = candPan,
+                            tiltCorrectionDegrees = candTilt,
+                        )
+                        val ncc = sampledNcc(directions, fixedValues, movingLevel, movingScale, candidate, lens)
+                        if (ncc > bestNcc) {
+                            bestNcc = ncc
+                            bestPan = candPan
+                            bestTilt = candTilt
+                        }
+                        ct += step
+                    }
+                }
+                return floatArrayOf(bestPan, bestTilt, bestNcc)
+            }
+
+            val best = if (workers <= 1 || offsets.size < 4) {
+                bestWithin(offsets)
+            } else {
+                offsets.chunked((offsets.size + workers - 1) / workers)
+                    .map { chunk -> async(Dispatchers.Default) { bestWithin(chunk) } }
+                    .awaitAll()
+                    .maxByOrNull { it[2] }!!
+            }
+            dPan = best[0]
+            dTilt = best[1]
+            confidence = best[2]
         }
-        if (confidence < REG_MIN_NCC) return null
-        return Offset(dPan, dTilt, confidence.coerceIn(0f, 1f))
+        if (confidence < REG_MIN_NCC) return@coroutineScope null
+        Offset(dPan, dTilt, confidence.coerceIn(0f, 1f))
     }
 
     /**
@@ -1658,7 +1699,9 @@ class PanoramaStitcher(
         fun step(fraction: Float, what: String) {
             if (progressSpan > 0f) onProgress(progressBase + progressSpan * fraction, "$progressLabel · $what")
         }
+        val decodeStartedAt = System.currentTimeMillis()
         val full = if (fullResSampling) frame.openFullResolution() else null
+        decodeMillis += System.currentTimeMillis() - decodeStartedAt
         val margin = BBOX_MARGIN_DEGREES
         val halfH = lens.horizontalFovDegrees / 2f + margin
         val halfV = lens.verticalFovDegrees / 2f + margin
@@ -2332,21 +2375,30 @@ class PanoramaStitcher(
      * Sulle tele che chiudono il giro le colonne non si toccano: destra e sinistra sono lo
      * stesso meridiano, e ritagliarle romperebbe la continuità.
      */
-    private fun cropBlackEdges(bitmap: Bitmap, allowColumns: Boolean): Bitmap {
+    private suspend fun cropBlackEdges(bitmap: Bitmap, allowColumns: Boolean): Bitmap = coroutineScope {
         val width = bitmap.width
         val height = bitmap.height
-        val row = IntArray(width)
         val leftRun = IntArray(height)
         val rightRun = IntArray(height)
-        for (y in 0 until height) {
-            bitmap.getPixels(row, 0, width, 0, y, width, 1)
-            var left = 0
-            while (left < width && row[left] == EMPTY_PIXEL) left++
-            var right = 0
-            while (right < width - left && row[width - 1 - right] == EMPTY_PIXEL) right++
-            leftRun[y] = left
-            rightRun[y] = right
-        }
+        // La scansione dei bordi guarda ogni pixel della tela: su una panoramica da sessanta
+        // megapixel, in fila, sono secondi buttati su un core solo mentre gli altri sette
+        // guardano. Le righe sono indipendenti, e ognuna scrive solo la propria casella.
+        val workers = min(Runtime.getRuntime().availableProcessors(), MAX_STITCH_WORKERS)
+        val band = (height + workers - 1) / workers
+        (0 until height step band.coerceAtLeast(1)).map { start ->
+            async(Dispatchers.Default) {
+                val row = IntArray(width)
+                for (y in start until min(start + band, height)) {
+                    bitmap.getPixels(row, 0, width, 0, y, width, 1)
+                    var left = 0
+                    while (left < width && row[left] == EMPTY_PIXEL) left++
+                    var right = 0
+                    while (right < width - left && row[width - 1 - right] == EMPTY_PIXEL) right++
+                    leftRun[y] = left
+                    rightRun[y] = right
+                }
+            }
+        }.awaitAll()
 
         var top = 0
         var bottom = height - 1
@@ -2391,10 +2443,10 @@ class PanoramaStitcher(
             }
         }
 
-        if (top == 0 && bottom == height - 1 && left == 0 && right == width - 1) return bitmap
+        if (top == 0 && bottom == height - 1 && left == 0 && right == width - 1) return@coroutineScope bitmap
         val cropped = Bitmap.createBitmap(bitmap, left, top, right - left + 1, bottom - top + 1)
         bitmap.recycle()
-        return cropped
+        cropped
     }
 
     /** Legge un ritaglio che può avvolgersi oltre il bordo destro della tela. */

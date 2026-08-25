@@ -173,66 +173,109 @@ class PanoramaStitcher(
 
             var placements = shots.map { FramePlacement(it.panDegrees, it.tiltDegrees) }
 
-            // La livella. Quando gli angoli veri non ci sono — foto scelte a mano — la lista
-            // arriva con tutti i tilt a zero, cioè con l'ipotesi che la camera fosse in
-            // bolla. Se non lo era, l'orizzonte non esce dritto come deve: esce come un arco
-            // per fotogramma, il mare sembra una conca e le linee vicine restano dritte
-            // invece di incurvarsi. Misurato dall'orizzonte stesso, il difetto sparisce.
+            // La livella: raddrizzare la panoramica, non i singoli fotogrammi.
+            //
+            // L'orizzonte è un cerchio massimo, e in tutte e tre le proiezioni un cerchio
+            // massimo alla latitudine zero è una riga dritta. Se esce curvo — «il mare a
+            // onde» — vuol dire che il nostro zero non è l'orizzontale vera: un cerchio
+            // massimo inclinato di δ diventa una sinusoide di ampiezza δ, e non c'è
+            // allineamento fra vicini che possa toglierla, perché **tutti i fotogrammi sono
+            // storti insieme, e insieme combaciano benissimo**.
+            //
+            // Fin qui questa correzione girava solo quando gli angoli non c'erano — le foto
+            // scelte a mano, con i tilt tutti a zero. Con gli angoli del gimbal non girava
+            // mai: si dava per scontato che lo zero del gimbal fosse l'orizzontale vera. Ma
+            // lo zero del gimbal è lo zero del *supporto*: basta la base appoggiata su un
+            // sasso e tutta la panoramica nasce inclinata. È il motivo per cui la panoramica
+            // a nove foto aveva il mare stondato anche nel fotogramma centrale, mentre quella
+            // a tre — dove la livella girava — no.
+            //
+            // Il conto è lo stesso nei due casi, e adesso lo è anche il codice. Ogni
+            // fotogramma dice: «il mio centro guarda alla latitudine `tilt`, e l'orizzonte lo
+            // vedo `p` gradi sotto il centro». Quindi secondo lui l'orizzonte sta alla
+            // latitudine `tilt − p`, che se il mondo fosse dritto varrebbe zero. La mediana di
+            // quegli scarti è di quanto è storta l'intera panoramica, e si toglie **a tutti
+            // uguale**: una rotazione sola del mondo, che raddrizza l'orizzonte senza toccare
+            // di un centesimo la geometria fra un fotogramma e l'altro.
+            //
+            // Uguale per tutti è la parte che conta. Dare a ogni fotogramma la sua misura —
+            // com'era fino a ieri — vuol dire ruotare ognuno di un angolo diverso: ognuno si
+            // porta dietro la sua sinusoide, e il mare va a onde con una gobba per foto.
             val levelNotes = mutableListOf<String>()
-            if (shots.all { abs(it.tiltDegrees) < 0.01f }) {
+            run {
                 val forced = tuning.cameraPitchDegrees
                 if (abs(forced) > 0.05f) {
-                    placements = placements.map { it.copy(tiltDegrees = forced) }
+                    // A mano vale come misura assoluta, come è sempre stato: la camera
+                    // guardava in su di tanto, e la tela si raddrizza di conseguenza.
+                    placements = placements.map { it.copy(tiltDegrees = it.tiltDegrees + forced) }
                     levelNotes += "Orizzonte: camera a %+.1f° (impostata a mano)".format(forced)
-                } else {
-                    // Un fotogramma per core: la misura dell'orizzonte è indipendente per
-                    // ognuno, e in fila costava quanto tutte messe insieme.
-                    val pitches = frames.map { frame ->
-                        async(Dispatchers.Default) { estimateCameraPitch(frame, lens) }
-                    }.awaitAll()
-                    val measured = pitches.filterNotNull()
-                    val median = if (measured.isEmpty()) null else measured.sorted()[measured.size / 2]
-                    val enough = measured.size >= (frames.size + 1) / 2
-                    if (tuning.levelHorizon && enough && median != null) {
-                        // **Una sola inclinazione per tutti**, non una per fotogramma.
-                        //
-                        // Qui c'era il difetto che faceva il mare a onde. Una fila di scatti
-                        // la fa un gimbal che tiene l'inclinazione ferma: la camera guardava
-                        // in su di un tot, e di quel tot per tutti e tre gli scatti. Se le tre
-                        // misure dell'orizzonte danno +11,6°, +7,8° e niente, quei quattro
-                        // gradi di differenza non sono la camera che si è mossa — è il
-                        // rilevatore che in una foto ha trovato l'orizzonte e in un'altra il
-                        // bordo di una nuvola.
-                        //
-                        // Dare a ogni fotogramma la *sua* misura significa ruotare ogni
-                        // fotogramma di un angolo diverso. E un errore di rotazione attorno
-                        // all'asse orizzontale non sposta l'orizzonte: lo **incurva**, perché
-                        // un cerchio massimo inclinato di δ diventa una sinusoide di ampiezza
-                        // δ. Ogni foto prendeva la sua curva, e il mare andava a onde — una
-                        // gobba per fotogramma, esattamente come si vede.
-                        //
-                        // La mediana è una misura sola, sbagliata al massimo di quanto sbaglia
-                        // il rilevatore, e sbagliata **uguale per tutti**: una panoramica
-                        // storta in blocco, non ondulata. E lo scarto fra le misure finisce
-                        // nel log, perché è la cosa che dice se fidarsi.
-                        placements = placements.map { it.copy(tiltDegrees = median) }
-                        val spread = (measured.maxOrNull() ?: 0f) - (measured.minOrNull() ?: 0f)
-                        levelNotes += ("Orizzonte livellato: camera a %+.1f° per tutte (misure %s, " +
-                            "scarto fra le misure %.1f°)").format(
-                            median,
-                            pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
-                            spread,
-                        )
-                    } else if (enough && median != null && abs(median) >= HORIZON_NOTABLE_DEGREES) {
-                        // Di serie la tela resta centrata sul centro delle foto: è la scelta
-                        // prevedibile, quella che non sposta l'inquadratura. Ma se l'orizzonte
-                        // è lontano dal centro vale la pena dirlo, perché è da lì che nasce
-                        // l'incurvamento del mare — e basta un interruttore per raddrizzarlo.
-                        levelNotes += ("L'orizzonte cade %+.1f° sotto il centro delle foto: la tela " +
-                            "resta centrata sulle foto. Accendi «Livella l'orizzonte» per raddrizzarlo.")
-                            .format(median)
-                    }
+                    return@run
                 }
+                if (!tuning.levelHorizon) return@run
+
+                // Un fotogramma per core: la misura dell'orizzonte è indipendente per
+                // ognuno, e in fila costava quanto tutte messe insieme.
+                val pitches = frames.map { frame ->
+                    async(Dispatchers.Default) { estimateCameraPitch(frame, lens) }
+                }.awaitAll()
+                val offsets = placements.indices.mapNotNull { i ->
+                    pitches[i]?.let { placements[i].tiltDegrees - it }
+                }
+                // Quante misure bastano: due, non metà delle foto.
+                //
+                // Su una panoramica a più file l'orizzonte lo vede **solo la fila di mezzo** —
+                // quella di sopra guarda il cielo e quella di sotto i sassi, e giustamente non
+                // trovano niente. Chiedere metà delle nove foto voleva dire cinque misure
+                // quando al massimo se ne possono avere tre: la livella non sarebbe partita
+                // mai, che è esattamente il motivo per cui il mare della panoramica a nove
+                // resta stondato mentre quello della fila singola no.
+                if (offsets.size < HORIZON_MIN_FRAMES) {
+                    levelNotes += "Orizzonte trovato in %d foto su %d: troppo poche, la tela resta com'è"
+                        .format(offsets.size, frames.size)
+                    return@run
+                }
+                // Mediana vera anche quando le misure sono in numero pari: con due misure
+                // prendere quella «di mezzo» vuol dire prenderne una a caso, e fra +11,6° e
+                // +7,8° la differenza è quasi quattro gradi di panoramica storta.
+                val sorted = offsets.sorted()
+                val middle = sorted.size / 2
+                val tilt = if (sorted.size % 2 == 1) {
+                    sorted[middle]
+                } else {
+                    (sorted[middle - 1] + sorted[middle]) / 2f
+                }
+                val spread = (offsets.maxOrNull() ?: 0f) - (offsets.minOrNull() ?: 0f)
+                // Misure che litigano fra loro non sono misure: se una foto dice che
+                // l'orizzonte sta dieci gradi più su di quel che dice l'altra, almeno una
+                // delle due ha trovato una nuvola. Meglio una panoramica storta come è
+                // nata che una raddrizzata a caso.
+                if (spread > HORIZON_MAX_DISAGREEMENT) {
+                    levelNotes += ("Orizzonte: le %d misure non si accordano (scarto %.1f°, " +
+                        "misure %s) — la tela resta com'è").format(
+                        offsets.size,
+                        spread,
+                        pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
+                    )
+                    return@run
+                }
+                if (abs(tilt) < HORIZON_LEVEL_DEADBAND) {
+                    levelNotes += "Orizzonte già in bolla (scarto %+.1f°): niente da raddrizzare".format(tilt)
+                    return@run
+                }
+                if (abs(tilt) > MAX_CAMERA_PITCH_DEGREES) {
+                    levelNotes += ("Orizzonte: la misura dice %+.1f°, troppo per essere vera — " +
+                        "la tela resta com'è").format(tilt)
+                    return@run
+                }
+                placements = placements.map { it.copy(tiltDegrees = it.tiltDegrees - tilt) }
+                levelNotes += ("Panoramica raddrizzata di %+.1f° (misure %s, scarto fra le misure " +
+                    "%.1f° su %d foto su %d)").format(
+                    -tilt,
+                    pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
+                    spread,
+                    offsets.size,
+                    frames.size,
+                )
             }
 
             // La cucitura campiona dagli originali a piena risoluzione (uno per volta, in
@@ -1899,10 +1942,22 @@ class PanoramaStitcher(
 
         // La finestra della prima passata: la deriva di un gimbal calibrato, oppure — a mano
         // libera — quasi tutto il campo visivo, perché il passo vero nessuno lo sa.
-        val coarsePan = if (wideSearch) min(60f, lens.horizontalFovDegrees * 0.75f) else MAX_SEARCH_DEGREES * 2f
-        val coarseTilt = if (wideSearch) 20f else MAX_SEARCH_DEGREES * 2f
-        val maxPan = coarsePan + 2f
-        val maxTilt = coarseTilt + 2f
+        // Con gli angoli del gimbal la finestra è quella che il gimbal può sbagliare, e
+        // basta. Era il doppio, con un tetto di dieci gradi, e quei gradi in più non erano
+        // margine di sicurezza: erano lo spazio in cui il massimo poteva scappare. Foto 6 ne
+        // ha approfittato per chiedere sei gradi di pan — quattrocentoventisette pixel — con
+        // il sessantacinque per cento di concordanza, mentre tutte le altre stavano a sei
+        // centesimi di grado. Un fotogramma spostato di mezza foto, e nessun controllo
+        // statistico l'ha fermato perché era il primo dopo il riferimento e non aveva ancora
+        // nessuno con cui essere confrontato.
+        //
+        // Non serviva un altro controllo: serviva non offrire quella possibilità. A mano
+        // libera invece la finestra resta larga, perché lì il passo fra le foto non lo sa
+        // nessuno e una risposta grossa può essere giusta.
+        val coarsePan = if (wideSearch) min(60f, lens.horizontalFovDegrees * 0.75f) else MAX_SEARCH_DEGREES
+        val coarseTilt = if (wideSearch) 20f else MAX_SEARCH_DEGREES
+        val maxPan = if (wideSearch) coarsePan + 2f else MAX_SEARCH_DEGREES + 1f
+        val maxTilt = if (wideSearch) coarseTilt + 2f else MAX_SEARCH_DEGREES + 1f
         val schedule = listOf(
             floatArrayOf(3f, coarsePan, coarseTilt, if (wideSearch) 1.2f else 0.8f),
             floatArrayOf(2f, 1.2f, 1.2f, 0.3f),
@@ -3822,6 +3877,20 @@ class PanoramaStitcher(
         /** Sotto questo nessuno è un caso strano: è la deriva normale di un gimbal. */
         const val OUTLIER_FLOOR_DEGREES = 1.5f
 
+        /** Sotto questo scarto l'orizzonte è già dritto: raddrizzarlo sposterebbe solo rumore. */
+        const val HORIZON_LEVEL_DEADBAND = 0.3f
+
+        /**
+         * Quante foto devono aver visto l'orizzonte perché la misura conti.
+         *
+         * Due, non metà: su una panoramica a più file l'orizzonte lo vede solo la fila di
+         * mezzo, e le altre giustamente non trovano niente.
+         */
+        const val HORIZON_MIN_FRAMES = 2
+
+        /** Oltre questo disaccordo fra le misure, almeno una ha trovato una nuvola. */
+        const val HORIZON_MAX_DISAGREEMENT = 8f
+
         /** Due vicini che suggeriscono correzioni più lontane di così sono in disaccordo. */
         const val ANCHOR_AGREEMENT_DEGREES = 0.8f
 
@@ -3881,9 +3950,6 @@ class PanoramaStitcher(
 
         /** Oltre questa inclinazione non è più una camera che guarda un paesaggio. */
         const val MAX_CAMERA_PITCH_DEGREES = 40f
-
-        /** Sotto questo scarto fra orizzonte e centro della foto non vale la pena dire niente. */
-        const val HORIZON_NOTABLE_DEGREES = 3f
 
         // La soglia di qualità dei punti (già 0,80 fisso) ora è in StitchTuning.keepNcc.
 

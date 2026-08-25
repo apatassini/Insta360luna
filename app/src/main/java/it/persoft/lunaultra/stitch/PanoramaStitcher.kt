@@ -3,6 +3,7 @@ package it.persoft.lunaultra.stitch
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -453,7 +454,7 @@ class PanoramaStitcher(
                 }
                 Frame(bitmap, shot.label, shot.file, max(bounds.outWidth, bounds.outHeight))
             }
-        }.let { kotlinx.coroutines.awaitAll(*it.toTypedArray()) }
+        }.awaitAll()
     }
 
     private class Refinement(
@@ -698,7 +699,7 @@ class PanoramaStitcher(
                         local
                     }
                 }
-                .let { kotlinx.coroutines.awaitAll(*it.toTypedArray()) }
+                .awaitAll()
                 .flatten()
         }
         return ControlPointTally(picked.size, kept)

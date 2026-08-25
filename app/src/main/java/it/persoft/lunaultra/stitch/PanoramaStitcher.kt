@@ -830,6 +830,41 @@ class PanoramaStitcher(
      * Serve in due posti — a scegliere gli ancoraggi e a decidere chi può liberare la memoria
      * — e devono dare la stessa risposta, altrimenti si libera qualcosa che serve ancora.
      */
+    /**
+     * Il fotogramma centrale, e poi tutti gli altri a raggiera attorno a lui.
+     *
+     * Fin qui si partiva dal primo scatto — quello in alto a sinistra — e si procedeva in
+     * ordine di ripresa. Su una fila sola è indifferente; su una griglia no, per due ragioni.
+     *
+     * **La catena.** Ogni fotogramma si allinea sui vicini già sistemati, quindi il suo errore
+     * è la somma degli errori lungo la strada che lo separa dal riferimento. Partendo da un
+     * angolo, l'angolo opposto è a quattro passi di distanza; partendo dal centro, nessuno è
+     * più lontano di due. La deriva accumulata si dimezza senza cambiare una riga di
+     * matematica.
+     *
+     * **La cucitura.** Chi si posa per primo tiene il centro della tela, e chi viene dopo gli
+     * si accosta attorno. Il centro della panoramica è quello che si guarda: è giusto che sia
+     * il fotogramma che lo vede meglio a occuparlo per intero, invece di essere l'ultimo a
+     * essere ricoperto dai vicini.
+     *
+     * Il centro non è la media aritmetica degli angoli ma il fotogramma **più vicino a tutti
+     * gli altri**: su una griglia dispari è quello di mezzo, su una pari è uno dei due
+     * centrali, e su una fila sola è quello di mezzo della fila — sempre la scelta giusta,
+     * senza casi particolari.
+     */
+    private fun radialOrder(placements: List<FramePlacement>): List<Int> {
+        if (placements.size <= 2) return placements.indices.toList()
+        fun distance(a: Int, b: Int) = angularDistance(
+            placements[a].effectivePan, placements[a].effectiveTilt,
+            placements[b].effectivePan, placements[b].effectiveTilt,
+        )
+        val centre = placements.indices.minByOrNull { candidate ->
+            placements.indices.sumOf { other -> distance(candidate, other).toDouble() }
+        } ?: 0
+        val rest = placements.indices.filter { it != centre }.sortedBy { distance(centre, it) }
+        return listOf(centre) + rest
+    }
+
     private fun anchorsOf(
         index: Int,
         placements: List<FramePlacement>,
@@ -860,7 +895,11 @@ class PanoramaStitcher(
         val placements = initial.toMutableList()
         val notes = mutableListOf<String>()
         val aligned = BooleanArray(frames.size)
-        aligned[0] = true
+        // Il riferimento è il fotogramma centrale, non il primo scattato: da lì nessun altro
+        // dista più di due passi, e la deriva della catena si dimezza.
+        val order = radialOrder(initial)
+        val reference = order.first()
+        aligned[reference] = true
         var worst = 0f
         val photometric = mutableListOf<FloatArray>()
         val warps = arrayOfNulls<LocalWarp>(frames.size)
@@ -884,7 +923,7 @@ class PanoramaStitcher(
         // ed è piena di dettaglio: solo che quando tocca a lui la fila di sotto non è ancora
         // stata allineata. Rimandarlo in fondo alla coda costa una seconda misura e gli dà
         // vicini veri. Un rinvio a testa, non di più: se non basta, il log lo dice.
-        val queue = ArrayDeque((1 until frames.size).toList())
+        val queue = ArrayDeque(order.drop(1))
         val postponed = HashSet<Int>()
         var processed = 0
         while (queue.isNotEmpty()) {
@@ -1200,7 +1239,9 @@ class PanoramaStitcher(
             // scheda, e stava scritta solo in fondo al log fra ottanta righe. Se i vicini si
             // sono spostati di nove gradi e lui è rimasto dov'era, la giunzione è fuori posto
             // di nove gradi — e non c'è sfumatura che la nasconda.
-            val unmeasured = (1 until aligned.size).filter { !aligned[it] }
+            // Il riferimento è già segnato come allineato, quindi si esclude da solo: non
+            // serve più dare per scontato che sia il primo.
+            val unmeasured = aligned.indices.filter { !aligned[it] }
             if (unmeasured.isNotEmpty()) {
                 add(
                     "⚠ %d foto non misurate (%s): incollate alla posizione ipotizzata, mentre le altre si sono spostate fino a %.1f°"
@@ -2347,19 +2388,24 @@ class PanoramaStitcher(
         // la tela, sul suo filo, e spento in ogni caso quando si esce di qui.
         val gpu = openGpu()
         try {
-            frames.forEachIndexed { index, frame ->
+            // Dal centro verso fuori, non in ordine di scatto: il fotogramma che vede meglio
+            // il centro della tela se lo prende per intero, e gli altri gli si accostano
+            // attorno. Prima il centro era il quinto ad arrivare e si faceva ricoprire i bordi
+            // dai quattro che venivano dopo.
+            radialOrder(placements).forEachIndexed { step, index ->
+                val frame = frames[index]
                 currentCoroutineContext().ensureActive()
                 onProgress(
-                    0.35f + 0.6f * index / frames.size,
-                    "Cucio ${frame.label} (${index + 1}/${frames.size})",
+                    0.35f + 0.6f * step / frames.size,
+                    "Cucio ${frame.label} (${step + 1}/${frames.size})",
                 )
                 val startedAt = System.currentTimeMillis()
                 pasteFrame(
                     output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
                     fullResSampling, warps.getOrNull(index), gpu, detail,
-                    progressBase = 0.35f + 0.6f * index / frames.size,
+                    progressBase = 0.35f + 0.6f * step / frames.size,
                     progressSpan = 0.6f / frames.size,
-                    progressLabel = "${frame.label} (${index + 1}/${frames.size})",
+                    progressLabel = "${frame.label} (${step + 1}/${frames.size})",
                 )
                 val last = detail.removeLastOrNull()
                 if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"

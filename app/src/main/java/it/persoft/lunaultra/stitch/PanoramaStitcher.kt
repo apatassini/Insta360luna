@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
@@ -105,11 +106,24 @@ class PanoramaStitcher(
             val lens = PinholeLens(first.width, first.height, horizontalFovDegrees)
 
             var placements = shots.map { FramePlacement(it.panDegrees, it.tiltDegrees) }
+            // La cucitura campiona dagli originali a piena risoluzione (uno per volta, in
+            // memoria nativa): la copia di lavoro serve solo all'allineamento. Quindi la
+            // tela può chiedere la densità dei pixel veri, non quella della copia ridotta.
+            val sourceScale = frames.minOf { frame ->
+                if (frame.sourceLongSide > 0) {
+                    frame.sourceLongSide.toFloat() / max(frame.width, frame.height)
+                } else {
+                    1f
+                }
+            }.coerceAtLeast(1f)
+            val fullResSampling = heapMb >= 384 && sourceScale > 1.05f
+            val requestedDensity = lens.imageWidth / lens.horizontalFovDegrees *
+                (if (fullResSampling) sourceScale else 1f)
             // La densità della tela non è più un numero fisso: si calcola dal budget di
             // memoria vero, sapendo quanto costerà la cucitura di ogni fotogramma con la
             // fusione ristretta alla sola sovrapposizione. È quello che decide quanto
             // grande esce la panoramica.
-            val density = chooseDensity(placements, lens, heapMb)
+            val density = chooseDensity(placements, lens, heapMb, requestedDensity)
             val canvas = PanoramaCanvas.covering(
                 placements = placements,
                 lens = lens,
@@ -127,7 +141,10 @@ class PanoramaStitcher(
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
             val composeDetail = mutableListOf<String>()
             val composeStartedAt = System.currentTimeMillis()
-            var bitmap = compose(frames, placements, lens, canvas, refinement.aligned, composeDetail)
+            var bitmap = compose(
+                frames, placements, lens, canvas, refinement.aligned,
+                fullResSampling, composeDetail,
+            )
             val composeSeconds = (System.currentTimeMillis() - composeStartedAt) / 1000f
             val patchedRows = if (fillNadir) {
                 onProgress(0.97f, "Chiudo il buco sotto")
@@ -142,8 +159,13 @@ class PanoramaStitcher(
             val notes = refinement.notes.toMutableList()
             notes.add(
                 0,
-                "Risoluzione di lavoro $workingLongSide px · tela ${canvas.width}×${canvas.height} " +
-                    "a %.1f px/grado (heap $heapMb MB)".format(canvas.pixelsPerDegree),
+                "Tela ${canvas.width}×${canvas.height} a %.1f px/grado (heap $heapMb MB) · ".format(canvas.pixelsPerDegree) +
+                    if (fullResSampling) {
+                        "cucitura dagli originali a piena risoluzione (×%.1f rispetto ai %d px di lavoro)"
+                            .format(sourceScale, workingLongSide)
+                    } else {
+                        "cucitura dalla copia di lavoro a $workingLongSide px"
+                    },
             )
             notes += composeDetail
             notes += "Tempi: allineamento %.0f s · cucitura %.0f s".format(refineSeconds, composeSeconds)
@@ -192,8 +214,8 @@ class PanoramaStitcher(
         placements: List<FramePlacement>,
         lens: PinholeLens,
         heapMb: Int,
+        requested: Float,
     ): Float {
-        val requested = lens.imageWidth / lens.horizontalFovDegrees
         val wH = lens.horizontalFovDegrees + 2f * BBOX_MARGIN_DEGREES
         val wV = lens.verticalFovDegrees + 2f * BBOX_MARGIN_DEGREES
         val slackH = wH / 2f + OVERLAP_SLACK_DEGREES
@@ -236,7 +258,9 @@ class PanoramaStitcher(
         // Il budget: metà scarsa della heap, meno i pixel del fotogramma in lavorazione.
         val frameBytes = lens.imageWidth.toLong() * lens.imageHeight * 4L
         val budget = (heapMb.toLong() * 1024L * 1024L * 45L / 100L) - frameBytes - 32L * 1024L * 1024L
-        val perDensitySquared = wH * wV * 4f +
+        // I pesi del fotogramma sono un byte a pixel; la fusione a scala ridotta pesa una
+        // frazione; la mappa dei possessori un byte ogni quattro pixel di tela.
+        val perDensitySquared = wH * wV * 1f +
             worstBlendArea * BLEND_PREDICTED_BYTES_PER_PX +
             ownerArea / (OWNER_SCALE * OWNER_SCALE)
         val affordable = if (budget > 0 && perDensitySquared > 0f) {
@@ -259,13 +283,54 @@ class PanoramaStitcher(
     /** Un livello della piramide di luminanza: i dati e la sua misura. */
     private class GrayLevel(val data: FloatArray, val width: Int, val height: Int)
 
-    private class Frame(val bitmap: Bitmap, val label: String) {
+    private class Frame(
+        val bitmap: Bitmap,
+        val label: String,
+        val file: java.io.File? = null,
+        /** Il lato lungo dell'originale su disco: dice quanta risoluzione esiste davvero. */
+        val sourceLongSide: Int = 0,
+    ) {
         val width get() = bitmap.width
         val height get() = bitmap.height
 
         private var pixelsCache: IntArray? = null
         private var grayCache: FloatArray? = null
         private var levelsCache: List<GrayLevel>? = null
+
+        private var fullCache: Bitmap? = null
+        var fullScaleX = 1f
+            private set
+        var fullScaleY = 1f
+            private set
+
+        /**
+         * L'originale a piena risoluzione, aperto solo mentre lo si cuce.
+         *
+         * L'allineamento lavora sulla copia ridotta — gli basta e avanza — ma la cucitura
+         * campiona da qui: è la differenza fra una panoramica grande coi pixel veri e una
+         * gonfiata. Vive in memoria nativa (fuori dalla heap), uno per volta, e si chiude
+         * appena il fotogramma è cucito. Se la decodifica fallisce si resta sulla ridotta.
+         */
+        fun openFullResolution(): Bitmap? {
+            fullCache?.let { return it }
+            val source = file ?: return null
+            val decoded = runCatching {
+                val raw = BitmapFactory.decodeFile(source.absolutePath) ?: return null
+                it.persoft.lunaultra.media.applyExifOrientation(
+                    raw,
+                    androidx.exifinterface.media.ExifInterface(source),
+                )
+            }.getOrNull() ?: return null
+            fullScaleX = decoded.width.toFloat() / width
+            fullScaleY = decoded.height.toFloat() / height
+            fullCache = decoded
+            return decoded
+        }
+
+        fun closeFullResolution() {
+            fullCache?.recycle()
+            fullCache = null
+        }
 
         /**
          * I pixel come vettore, per il campionamento veloce della fusione.
@@ -346,41 +411,49 @@ class PanoramaStitcher(
      * risultato è tempo speso per buttare via dettaglio subito dopo. Il ridimensionamento lo fa
      * il decodificatore, che salta i pixel invece di leggerli e scartarli.
      */
-    private fun loadFrames(shots: List<PanoramaShot>, workingLongSide: Int): List<Frame> = shots.map { shot ->
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(shot.file.absolutePath, bounds)
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSizeFor(bounds.outWidth, workingLongSide)
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        val raw = BitmapFactory.decodeFile(shot.file.absolutePath, options)
-            ?: throw IllegalStateException("Non riesco a leggere ${shot.file.name}")
-        // Le foto del telefono in verticale arrivano coricate con l'EXIF che dice di girarle:
-        // il decodificatore lo ignora, e un fotogramma sdraiato manda a monte l'unione.
-        val decoded = runCatching {
-            it.persoft.lunaultra.media.applyExifOrientation(
-                raw,
-                androidx.exifinterface.media.ExifInterface(shot.file),
-            )
-        }.getOrDefault(raw)
-        // Il decodificatore riduce solo per potenze di due: una foto da 4000 pixel scende a
-        // 2000, non a 1600, e quel 25% in più di lato è il 56% in più di memoria — che
-        // moltiplicato per cinque foto è la differenza fra unire e morire di memoria.
-        val longSide = max(decoded.width, decoded.height)
-        val bitmap = if (longSide > workingLongSide) {
-            val scale = workingLongSide.toFloat() / longSide
-            val scaled = Bitmap.createScaledBitmap(
-                decoded,
-                (decoded.width * scale).roundToInt().coerceAtLeast(1),
-                (decoded.height * scale).roundToInt().coerceAtLeast(1),
-                true,
-            )
-            decoded.recycle()
-            scaled
-        } else {
-            decoded
-        }
-        Frame(bitmap, shot.label)
+    private suspend fun loadFrames(
+        shots: List<PanoramaShot>,
+        workingLongSide: Int,
+    ): List<Frame> = kotlinx.coroutines.coroutineScope {
+        shots.map { shot ->
+            kotlinx.coroutines.async(Dispatchers.IO) {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(shot.file.absolutePath, bounds)
+                val options = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSizeFor(bounds.outWidth, workingLongSide)
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                val raw = BitmapFactory.decodeFile(shot.file.absolutePath, options)
+                    ?: throw IllegalStateException("Non riesco a leggere ${shot.file.name}")
+                // Le foto del telefono in verticale arrivano coricate con l'EXIF che dice di
+                // girarle: il decodificatore lo ignora, e un fotogramma sdraiato manda a
+                // monte l'unione.
+                val decoded = runCatching {
+                    it.persoft.lunaultra.media.applyExifOrientation(
+                        raw,
+                        androidx.exifinterface.media.ExifInterface(shot.file),
+                    )
+                }.getOrDefault(raw)
+                // Il decodificatore riduce solo per potenze di due: una foto da 4000 pixel
+                // scende a 2000, non a 1600, e quel 25% in più di lato è il 56% in più di
+                // memoria — moltiplicato per gli scatti è la differenza fra unire e morire.
+                val longSide = max(decoded.width, decoded.height)
+                val bitmap = if (longSide > workingLongSide) {
+                    val scale = workingLongSide.toFloat() / longSide
+                    val scaled = Bitmap.createScaledBitmap(
+                        decoded,
+                        (decoded.width * scale).roundToInt().coerceAtLeast(1),
+                        (decoded.height * scale).roundToInt().coerceAtLeast(1),
+                        true,
+                    )
+                    decoded.recycle()
+                    scaled
+                } else {
+                    decoded
+                }
+                Frame(bitmap, shot.label, shot.file, max(bounds.outWidth, bounds.outHeight))
+            }
+        }.let { kotlinx.coroutines.awaitAll(*it.toTypedArray()) }
     }
 
     private class Refinement(
@@ -541,7 +614,7 @@ class PanoramaStitcher(
      * Ogni superstite porta il suo residuo in gradi, e la media potata dei residui è la
      * rifinitura.
      */
-    private fun controlPoints(
+    private suspend fun controlPoints(
         moving: Frame,
         fixed: Frame,
         movingPlacement: FramePlacement,
@@ -597,23 +670,36 @@ class PanoramaStitcher(
             step = (step * 2) / 3
         }
 
-        val kept = mutableListOf<FloatArray>()
-        for (candidate in picked.take(CONTROL_MAX_CANDIDATES)) {
-            val world = frameToWorld(candidate[0].toFloat(), candidate[1].toFloat(), fixedPlacement, lens)
-            val predicted = projectToFrame(world[0], world[1], movingPlacement, lens)
-            if (!predicted.inside) continue
-            val found = matchControlPoint(
-                template = gray, templateWidth = fixed.width,
-                sourceX = candidate[0], sourceY = candidate[1],
-                target = moving.gray, targetWidth = moving.width, targetHeight = moving.height,
-                centerX = predicted.x, centerY = predicted.y,
-                radiusPx = searchPx,
-            ) ?: continue
-            val worldFound = frameToWorld(found[0], found[1], movingPlacement, lens)
-            kept += floatArrayOf(
-                wrapDegrees(world[0] - worldFound[0]),
-                world[1] - worldFound[1],
-            )
+        // La ricerca di ogni punto è indipendente dalle altre: si spartiscono fra i core.
+        val movingGray = moving.gray
+        val candidates = picked.take(CONTROL_MAX_CANDIDATES)
+        val kept = kotlinx.coroutines.coroutineScope {
+            candidates.chunked((candidates.size / MAX_STITCH_WORKERS + 1).coerceAtLeast(8))
+                .map { chunk ->
+                    kotlinx.coroutines.async(Dispatchers.Default) {
+                        val local = mutableListOf<FloatArray>()
+                        for (candidate in chunk) {
+                            val world = frameToWorld(candidate[0].toFloat(), candidate[1].toFloat(), fixedPlacement, lens)
+                            val predicted = projectToFrame(world[0], world[1], movingPlacement, lens)
+                            if (!predicted.inside) continue
+                            val found = matchControlPoint(
+                                template = gray, templateWidth = fixed.width,
+                                sourceX = candidate[0], sourceY = candidate[1],
+                                target = movingGray, targetWidth = moving.width, targetHeight = moving.height,
+                                centerX = predicted.x, centerY = predicted.y,
+                                radiusPx = searchPx,
+                            ) ?: continue
+                            val worldFound = frameToWorld(found[0], found[1], movingPlacement, lens)
+                            local += floatArrayOf(
+                                wrapDegrees(world[0] - worldFound[0]),
+                                world[1] - worldFound[1],
+                            )
+                        }
+                        local
+                    }
+                }
+                .let { kotlinx.coroutines.awaitAll(*it.toTypedArray()) }
+                .flatten()
         }
         return ControlPointTally(picked.size, kept)
     }
@@ -902,6 +988,7 @@ class PanoramaStitcher(
         lens: PinholeLens,
         canvas: PanoramaCanvas,
         aligned: BooleanArray,
+        fullResSampling: Boolean,
         detail: MutableList<String>,
     ): Bitmap {
         val output = Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
@@ -927,11 +1014,16 @@ class PanoramaStitcher(
                 "Cucio ${frame.label} (${index + 1}/${frames.size})",
             )
             val startedAt = System.currentTimeMillis()
-            pasteFrame(output, ownerWeight, frame, placements[index], gains[index], lens, canvas, detail)
+            pasteFrame(
+                output, ownerWeight, frame, placements[index], gains[index], lens, canvas,
+                fullResSampling, detail,
+            )
             val last = detail.removeLastOrNull()
             if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
-            // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori si liberano.
+            // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori e il suo
+            // originale a piena risoluzione si liberano.
             frame.releaseWorkingData()
+            frame.closeFullResolution()
         }
         return output
     }
@@ -942,7 +1034,7 @@ class PanoramaStitcher(
      * Le zone dove solo uno dei due esiste vengono riempite con l'altro prima delle piramidi:
      * senza, il nero fuori campo entrerebbe nelle bande larghe e scurirebbe i bordi veri.
      */
-    private fun pasteFrame(
+    private suspend fun pasteFrame(
         output: Bitmap,
         ownerWeight: ByteArray,
         frame: Frame,
@@ -950,8 +1042,10 @@ class PanoramaStitcher(
         gain: Float,
         lens: PinholeLens,
         canvas: PanoramaCanvas,
+        fullResSampling: Boolean,
         detail: MutableList<String>? = null,
     ) {
+        val full = if (fullResSampling) frame.openFullResolution() else null
         val margin = BBOX_MARGIN_DEGREES
         val halfH = lens.horizontalFovDegrees / 2f + margin
         val halfV = lens.verticalFovDegrees / 2f + margin
@@ -983,12 +1077,8 @@ class PanoramaStitcher(
         // fotogramma si dipinge diretto, una riga alla volta, senza vettori giganti. È
         // questo che permette alla tela di crescere: prima la fusione lavorava sull'intera
         // finestra e la memoria imponeva panoramiche piccole.
-        val newW = FloatArray(count)
-        var ov0x = Int.MAX_VALUE
-        var ov1x = -1
-        var ov0y = Int.MAX_VALUE
-        var ov1y = -1
-        for (by in 0 until bh) {
+        val newW = ByteArray(count)
+        parallelRows(row0, bh, 1) { by, _ ->
             val latitude = canvas.latitudeAt(row0 + by)
             for (bx in 0 until bw) {
                 val longitude = canvas.longitudeAt(columns[bx])
@@ -996,7 +1086,19 @@ class PanoramaStitcher(
                 if (!point.inside) continue
                 val weight = featherWeight(point.x, point.y, frame.width, frame.height)
                 if (weight <= 0f) continue
-                newW[by * bw + bx] = weight
+                newW[by * bw + bx] = (weight * 255f).roundToInt().coerceIn(1, 255).toByte()
+            }
+        }
+
+        // Il perimetro della sovrapposizione, dai pesi appena calcolati: una scansione
+        // leggera, senza trigonometria.
+        var ov0x = Int.MAX_VALUE
+        var ov1x = -1
+        var ov0y = Int.MAX_VALUE
+        var ov1y = -1
+        for (by in 0 until bh) {
+            for (bx in 0 until bw) {
+                if (newW[by * bw + bx].toInt() == 0) continue
                 if (ownerWeight[ownerIndex(canvas.width, row0 + by, columns[bx])].toInt() != 0) {
                     if (bx < ov0x) ov0x = bx
                     if (bx > ov1x) ov1x = bx
@@ -1019,15 +1121,14 @@ class PanoramaStitcher(
             sy1 = (ov1y + BLEND_CONTEXT_PX).coerceAtMost(bh - 1)
             blendSubWindow(
                 output, ownerWeight, frame, placement, gain, lens, canvas,
-                columns, row0, bw, newW, sx0, sx1, sy0, sy1,
+                columns, row0, bw, newW, sx0, sx1, sy0, sy1, full,
             )
         }
 
-        // Il resto del fotogramma: pittura diretta riga per riga. Fuori dalla
-        // sotto-finestra ogni pixel nuovo cade su tela vuota per costruzione, quindi non
-        // c'è niente da fondere.
-        val rowPixels = IntArray(canvas.width)
-        for (by in 0 until bh) {
+        // Il resto del fotogramma: pittura diretta riga per riga, tutte le CPU insieme.
+        // Fuori dalla sotto-finestra ogni pixel nuovo cade su tela vuota per costruzione,
+        // quindi non c'è niente da fondere e le righe sono indipendenti.
+        parallelRows(row0, bh, canvas.width) { by, rowPixels ->
             val insideBlendRows = hasOverlap && by in sy0..sy1
             var touched = false
             var readRow = false
@@ -1035,8 +1136,8 @@ class PanoramaStitcher(
             for (bx in 0 until bw) {
                 if (insideBlendRows && bx in sx0..sx1) continue
                 val i = by * bw + bx
-                val weight = newW[i]
-                if (weight <= 0f) continue
+                val weightByte = newW[i].toInt() and 0xFF
+                if (weightByte == 0) continue
                 if (!readRow) {
                     readRow = true
                     latitude = canvas.latitudeAt(row0 + by)
@@ -1045,16 +1146,15 @@ class PanoramaStitcher(
                 val longitude = canvas.longitudeAt(columns[bx])
                 val point = projectToFrame(longitude, latitude, placement, lens)
                 if (!point.inside) continue
-                val color = sample(frame, point.x, point.y)
+                val color = sampleColor(frame, full, point.x, point.y)
                 val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                 val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                 val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
                 rowPixels[columns[bx]] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
                 touched = true
-                val quantized = (weight * 255f).roundToInt().coerceIn(1, 255)
                 val index = ownerIndex(canvas.width, row0 + by, columns[bx])
-                if (quantized > (ownerWeight[index].toInt() and 0xFF)) {
-                    ownerWeight[index] = quantized.toByte()
+                if (weightByte > (ownerWeight[index].toInt() and 0xFF)) {
+                    ownerWeight[index] = weightByte.toByte()
                 }
             }
             if (touched) {
@@ -1083,7 +1183,7 @@ class PanoramaStitcher(
      * memoria cala col quadrato e il dettaglio fine resta pieno, perché viene dal montaggio,
      * non dalla piramide.
      */
-    private fun blendSubWindow(
+    private suspend fun blendSubWindow(
         output: Bitmap,
         ownerWeight: ByteArray,
         frame: Frame,
@@ -1094,11 +1194,12 @@ class PanoramaStitcher(
         columns: IntArray,
         row0: Int,
         bw: Int,
-        windowNewW: FloatArray,
+        windowNewW: ByteArray,
         sx0: Int,
         sx1: Int,
         sy0: Int,
         sy1: Int,
+        full: Bitmap?,
     ) {
         val sbw = sx1 - sx0 + 1
         val sbh = sy1 - sy0 + 1
@@ -1120,8 +1221,7 @@ class PanoramaStitcher(
         val newColor = IntArray(gcount)
         val mask = FloatArray(gcount)
         val valid = BooleanArray(gcount)
-        val rowPixels = IntArray(canvas.width)
-        for (gy in 0 until gh) {
+        parallelRows(0, gh, canvas.width) { gy, rowPixels ->
             val by = min(gy * s + s / 2, sbh - 1)
             val row = subRow0 + by
             val latitude = canvas.latitudeAt(row)
@@ -1130,7 +1230,7 @@ class PanoramaStitcher(
                 val bx = min(gx * s + s / 2, sbw - 1)
                 val col = columns[sx0 + bx]
                 val g = gy * gw + gx
-                val newWeight = windowNewW[(sy0 + by) * bw + (sx0 + bx)]
+                val newWeight = (windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() and 0xFF) / 255f
                 val oldWeight = (ownerWeight[ownerIndex(canvas.width, row, col)].toInt() and 0xFF) / 255f
                 val old = rowPixels[col] and 0xFFFFFF
                 baseColor[g] = old
@@ -1139,7 +1239,7 @@ class PanoramaStitcher(
                     val longitude = canvas.longitudeAt(col)
                     val point = projectToFrame(longitude, latitude, placement, lens)
                     if (point.inside) {
-                        val color = sample(frame, point.x, point.y)
+                        val color = sampleColor(frame, full, point.x, point.y)
                         val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val gch = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -1184,8 +1284,9 @@ class PanoramaStitcher(
             }
         }
 
-        // 3) Riga per riga a piena risoluzione: montaggio netto più correzione interpolata.
-        for (by in 0 until sbh) {
+        // 3) Riga per riga a piena risoluzione, tutte le CPU insieme: montaggio netto più
+        // correzione interpolata.
+        parallelRows(subRow0, sbh, canvas.width) { by, rowPixels ->
             val row = subRow0 + by
             val latitude = canvas.latitudeAt(row)
             output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
@@ -1193,17 +1294,17 @@ class PanoramaStitcher(
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
             for (bx in 0 until sbw) {
                 val col = columns[sx0 + bx]
-                val newWeight = windowNewW[(sy0 + by) * bw + (sx0 + bx)]
+                val weightByte = windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() and 0xFF
                 val ownerIdx = ownerIndex(canvas.width, row, col)
-                val oldWeight = (ownerWeight[ownerIdx].toInt() and 0xFF) / 255f
-                if (newWeight <= 0f && oldWeight <= 0f) continue
+                val oldByte = ownerWeight[ownerIdx].toInt() and 0xFF
+                if (weightByte == 0 && oldByte == 0) continue
 
                 var hard = rowPixels[col] and 0xFFFFFF
-                if (newWeight > 0f && (oldWeight <= 0f || newWeight > oldWeight)) {
+                if (weightByte > 0 && (oldByte == 0 || weightByte > oldByte)) {
                     val longitude = canvas.longitudeAt(col)
                     val point = projectToFrame(longitude, latitude, placement, lens)
                     if (point.inside) {
-                        val color = sample(frame, point.x, point.y)
+                        val color = sampleColor(frame, full, point.x, point.y)
                         val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -1221,14 +1322,51 @@ class PanoramaStitcher(
                 rowPixels[col] = outPixel
                 touched = true
 
-                val winner = max(oldWeight, newWeight)
-                val quantized = (winner * 255f).roundToInt().coerceIn(0, 255)
-                if (quantized > (ownerWeight[ownerIdx].toInt() and 0xFF)) {
-                    ownerWeight[ownerIdx] = quantized.toByte()
+                val winner = max(oldByte, weightByte)
+                if (winner > oldByte) {
+                    ownerWeight[ownerIdx] = winner.toByte()
                 }
             }
             if (touched) {
                 output.setPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
+            }
+        }
+    }
+
+    /**
+     * Distribuisce le righe su tutti i core, a coppie allineate alla mappa dei possessori.
+     *
+     * Ogni riga scrive pixel suoi sulla tela, ma due righe adiacenti condividono la riga
+     * della mappa dei possessori (che vive a mezza risoluzione): lavorando a coppie
+     * allineate alla parità assoluta, ogni lavoratore ha le sue righe di mappa in
+     * esclusiva e non serve nessun lucchetto. A ogni lavoratore il suo buffer di riga.
+     */
+    private suspend fun parallelRows(
+        firstAbsoluteRow: Int,
+        rowCount: Int,
+        bufferSize: Int,
+        body: (Int, IntArray) -> Unit,
+    ) = kotlinx.coroutines.coroutineScope {
+        if (rowCount <= 0) return@coroutineScope
+        val workers = min(Runtime.getRuntime().availableProcessors(), MAX_STITCH_WORKERS)
+        if (workers <= 1 || rowCount < 8) {
+            val buffer = IntArray(bufferSize)
+            for (r in 0 until rowCount) body(r, buffer)
+            return@coroutineScope
+        }
+        val firstPair = firstAbsoluteRow / OWNER_SCALE
+        val lastPair = (firstAbsoluteRow + rowCount - 1) / OWNER_SCALE
+        val next = java.util.concurrent.atomic.AtomicInteger(firstPair)
+        repeat(workers) {
+            launch(Dispatchers.Default) {
+                val buffer = IntArray(bufferSize)
+                while (true) {
+                    val pair = next.getAndIncrement()
+                    if (pair > lastPair) break
+                    val from = max(pair * OWNER_SCALE, firstAbsoluteRow)
+                    val to = min(pair * OWNER_SCALE + OWNER_SCALE - 1, firstAbsoluteRow + rowCount - 1)
+                    for (row in from..to) body(row - firstAbsoluteRow, buffer)
+                }
             }
         }
     }
@@ -1531,6 +1669,46 @@ class PanoramaStitcher(
         return gains
     }
 
+    /**
+     * Il colore di un punto del fotogramma: dall'originale a piena risoluzione quando è
+     * aperto, altrimenti dalla copia di lavoro. Le coordinate arrivano nello spazio della
+     * copia di lavoro e si riportano all'originale con la sua scala.
+     */
+    private fun sampleColor(frame: Frame, full: Bitmap?, x: Float, y: Float): Int =
+        if (full == null) {
+            sample(frame, x, y)
+        } else {
+            sampleBitmap(full, x * frame.fullScaleX, y * frame.fullScaleY)
+        }
+
+    /**
+     * Interpolazione bilineare leggendo direttamente dal Bitmap nativo: nessun vettore in
+     * heap, e le letture sono sicure da più fili insieme.
+     */
+    private fun sampleBitmap(bitmap: Bitmap, x: Float, y: Float): Int {
+        val x0 = x.toInt().coerceIn(0, bitmap.width - 1)
+        val y0 = y.toInt().coerceIn(0, bitmap.height - 1)
+        val x1 = (x0 + 1).coerceAtMost(bitmap.width - 1)
+        val y1 = (y0 + 1).coerceAtMost(bitmap.height - 1)
+        val fx = x - x0
+        val fy = y - y0
+        val c00 = bitmap.getPixel(x0, y0)
+        val c10 = bitmap.getPixel(x1, y0)
+        val c01 = bitmap.getPixel(x0, y1)
+        val c11 = bitmap.getPixel(x1, y1)
+        var result = 0xFF shl 24
+        for (shift in intArrayOf(16, 8, 0)) {
+            val a = (c00 shr shift) and 0xFF
+            val b = (c10 shr shift) and 0xFF
+            val c = (c01 shr shift) and 0xFF
+            val d = (c11 shr shift) and 0xFF
+            val top = a + (b - a) * fx
+            val bottom = c + (d - c) * fx
+            result = result or ((top + (bottom - top) * fy).roundToInt().coerceIn(0, 255) shl shift)
+        }
+        return result
+    }
+
     /** Colore interpolato fra i quattro pixel attorno: senza, i bordi diventano una scaletta. */
     private fun sample(frame: Frame, x: Float, y: Float): Int {
         val x0 = x.toInt().coerceIn(0, frame.width - 1)
@@ -1670,7 +1848,10 @@ class PanoramaStitcher(
          * ridotta al passo massimo restano le correzioni e le griglie piccole, non le
          * piramidi piene. Prudente per eccesso.
          */
-        const val BLEND_PREDICTED_BYTES_PER_PX = 16f
+        const val BLEND_PREDICTED_BYTES_PER_PX = 6f
+
+        /** Quanti fili lavorano insieme alla cucitura: tutti i core, con un tetto sano. */
+        const val MAX_STITCH_WORKERS = 8
 
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2

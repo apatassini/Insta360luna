@@ -53,6 +53,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.StateFlow
@@ -328,7 +329,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { container.load() }
         observeNotifications()
         observeConnection()
-        observeForegroundService()
         observeFinishedRuns()
     }
 
@@ -372,32 +372,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             combine(
                 combine(connectionState, wantConnectedFlow) { c, w -> c to w },
-                _recordingSinceMs,
+                combine(_recordingSinceMs, _stitchState) { r, s -> r to s },
                 runState,
                 _status,
                 gimbalCalibrationState,
-            ) { (connection, wanted), recordingSince, run, status, calibration ->
+            ) { (connection, wanted), (recordingSince, stitch), run, status, calibration ->
                 when {
+                    // L'unione per prima, e non per importanza: è l'unica di queste attività
+                    // che gira **senza** la camera connessa. Un job lanciato la sera, a
+                    // camera spenta, faceva cadere tutte le altre condizioni e il servizio si
+                    // spegneva — e da Android 12 un processo senza servizio in primo piano
+                    // viene congelato pochi secondi dopo che si cambia applicazione. La
+                    // cucitura non si interrompeva con un errore: si fermava e basta,
+                    // riprendendo al rientro. Da qui la sensazione che cambiando app si fermi.
+                    stitch is StitchUiState.Working ->
+                        "Unione panoramica — %d%%".format((stitch.fraction * 100).roundToInt()) to true
                     // Durante una riconnessione il servizio deve restare in piedi: è lui che
                     // tiene l'app «in primo piano» per Android, e senza quello stato la
                     // richiesta della rete Wi-Fi della camera non è più permessa.
                     connection != ConnectionState.CONNECTED ->
-                        if (wanted) "Riconnessione alla camera…" else null
+                        if (wanted) "Riconnessione alla camera…" to false else null
                     calibration.running -> if (calibration.pausedForPreview) {
-                        "Calibrazione gimbal in pausa — riapri l'app per l'anteprima"
+                        "Calibrazione gimbal in pausa — riapri l'app per l'anteprima" to false
                     } else {
-                        "Calibrazione gimbal — ${(calibration.progress * 100).toInt()}%"
+                        "Calibrazione gimbal — ${(calibration.progress * 100).toInt()}%" to false
                     }
                     run.running ->
-                        "Sequenza in corso — tratto ${run.legIndex + 1}/${run.legCount.coerceAtLeast(1)}"
+                        "Sequenza in corso — tratto ${run.legIndex + 1}/${run.legCount.coerceAtLeast(1)}" to false
 
-                    recordingSince > 0L || status.recording == true -> "Ripresa in corso"
-                    else -> "Connessa — la sessione resta aperta"
+                    recordingSince > 0L || status.recording == true -> "Ripresa in corso" to false
+                    else -> "Connessa — la sessione resta aperta" to false
                 }
-            }.collect { text ->
+            }.distinctUntilChanged().collect { notice ->
                 val context = getApplication<Application>()
-                if (text == null) LunaConnectionService.stop(context)
-                else LunaConnectionService.start(context, text)
+                if (notice == null) {
+                    LunaConnectionService.stop(context)
+                } else {
+                    LunaConnectionService.start(context, notice.first, dataSync = notice.second)
+                }
             }
         }
     }
@@ -1615,6 +1627,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     init {
         observeStitchVitals()
+        // Anche il servizio in primo piano guarda `_stitchState`, quindi vale la stessa
+        // regola: da qui in giù, non dall'`init` in cima.
+        observeForegroundService()
     }
 
     private fun observeStitchVitals() {

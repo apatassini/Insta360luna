@@ -7,11 +7,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import it.persoft.lunaultra.R
 
 /**
@@ -35,7 +37,16 @@ class LunaConnectionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: DEFAULT_TEXT
         createChannel()
-        startForeground(NOTIFICATION_ID, buildNotification(text))
+        // Il tipo si dichiara a ogni avvio, perché il mestiere cambia: tenere viva la
+        // sessione con la camera è un dispositivo connesso, unire una panoramica è calcolo.
+        // Da Android 14 dichiarare il tipo sbagliato non è una svista formale: il sistema
+        // pretende che i presupposti del tipo dichiarato siano soddisfatti.
+        val type = if (intent?.getBooleanExtra(EXTRA_DATA_SYNC, false) == true) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(text), type)
         acquireLocks()
         // Riavviarlo da solo non servirebbe: senza la sessione dell'app è un servizio vuoto.
         return START_NOT_STICKY
@@ -102,14 +113,23 @@ class LunaConnectionService : Service() {
         private const val CHANNEL_ID = "luna_connection"
         private const val NOTIFICATION_ID = 42
         private const val EXTRA_TEXT = "text"
+        private const val EXTRA_DATA_SYNC = "dataSync"
         private const val DEFAULT_TEXT = "Connessa — la sessione resta aperta"
 
         /** Tetto del wake lock: una sequenza lunga, non una notte intera per una dimenticanza. */
         private const val MAX_LOCK_MS = 4L * 60L * 60L * 1000L
 
-        /** Avvia il servizio, o ne aggiorna il testo se è già in piedi. */
-        fun start(context: Context, text: String = DEFAULT_TEXT) {
-            val intent = Intent(context, LunaConnectionService::class.java).putExtra(EXTRA_TEXT, text)
+        /**
+         * Avvia il servizio, o ne aggiorna il testo se è già in piedi.
+         *
+         * [dataSync] distingue i due mestieri: la sessione con la camera è un dispositivo
+         * connesso, l'unione di una panoramica è calcolo che deve sopravvivere al cambio di
+         * applicazione.
+         */
+        fun start(context: Context, text: String = DEFAULT_TEXT, dataSync: Boolean = false) {
+            val intent = Intent(context, LunaConnectionService::class.java)
+                .putExtra(EXTRA_TEXT, text)
+                .putExtra(EXTRA_DATA_SYNC, dataSync)
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(intent)

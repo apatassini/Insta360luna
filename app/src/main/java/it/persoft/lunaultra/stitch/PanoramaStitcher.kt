@@ -1558,7 +1558,7 @@ class PanoramaStitcher(
 
         // 2) La fusione sulla versione ridotta, un canale per volta; della fusione si tiene
         // solo la correzione rispetto al montaggio netto ridotto.
-        val correction = Array(3) { FloatArray(gcount) }
+        val correctionGrid = Array(3) { FloatArray(gcount) }
         for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
             val baseChannel = FloatArray(gcount) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
             val overChannel = FloatArray(gcount) { ((newColor[it] shr shift) and 0xFF).toFloat() }
@@ -1569,7 +1569,7 @@ class PanoramaStitcher(
                 width = gw,
                 height = gh,
             )[0]
-            val target = correction[channel]
+            val target = correctionGrid[channel]
             for (g in 0 until gcount) {
                 val hard = if (mask[g] > 0.5f) overChannel[g] else baseChannel[g]
                 target[g] = blended[g] - hard
@@ -1609,7 +1609,7 @@ class PanoramaStitcher(
                 var outPixel = 0xFF000000.toInt()
                 for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
                     val value = ((hard shr shift) and 0xFF) +
-                        bilinearGrid(correction[channel], gw, gh, gxf, gyf)
+                        bilinearGrid(correctionGrid[channel], gw, gh, gxf, gyf)
                     outPixel = outPixel or (value.roundToInt().coerceIn(0, 255) shl shift)
                 }
                 rowPixels[col] = outPixel

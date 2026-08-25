@@ -146,7 +146,7 @@ class PanoramaStitcher(
             val composeStartedAt = System.currentTimeMillis()
             var bitmap = compose(
                 frames, placements, lens, canvas, refinement.aligned,
-                fullResSampling, composeDetail,
+                fullResSampling, refinement.photometric, composeDetail,
             )
             val composeSeconds = (System.currentTimeMillis() - composeStartedAt) / 1000f
             val patchedRows = if (fillNadir) {
@@ -465,6 +465,13 @@ class PanoramaStitcher(
         val worstCorrection: Float,
         /** Chi è stato allineato davvero: chi no, ha una posizione di fiducia, non misurata. */
         val aligned: BooleanArray,
+        /**
+         * I campioni fotometrici dai punti di controllo:
+         * [indice fisso, indice mobile, luma fisso, luma mobile, r² fisso, r² mobile].
+         * Lo stesso punto del mondo visto da due foto a raggi diversi: è quello che
+         * permette di separare l'esposizione dalla vignettatura.
+         */
+        val photometric: List<FloatArray>,
     )
 
     /**
@@ -491,6 +498,7 @@ class PanoramaStitcher(
         val aligned = BooleanArray(frames.size)
         aligned[0] = true
         var worst = 0f
+        val photometric = mutableListOf<FloatArray>()
 
         for (index in 1 until frames.size) {
             currentCoroutineContext().ensureActive()
@@ -561,6 +569,13 @@ class PanoramaStitcher(
                 )
                 candidates += tally.candidates
                 kept += tally.kept
+                // I campioni per la fotometria: si scartano i punti vicini alla saturazione,
+                // dove il rapporto di luminanza non dice più niente di vero.
+                tally.kept.forEach { p ->
+                    if (p[4] in 12f..242f && p[5] in 12f..242f) {
+                        photometric += floatArrayOf(anchor.toFloat(), index.toFloat(), p[4], p[5], p[6], p[7])
+                    }
+                }
             }
             var finalPan = offset.panDegrees
             var finalTilt = offset.tiltDegrees
@@ -618,7 +633,7 @@ class PanoramaStitcher(
                 offset.confidence * 100f,
             )
         }
-        return Refinement(placements, notes, worst, aligned)
+        return Refinement(placements, notes, worst, aligned, photometric)
     }
 
     private class ControlPointTally(val candidates: Int, val kept: List<FloatArray>)
@@ -705,6 +720,133 @@ class PanoramaStitcher(
             }
         }
         return DoubleArray(4) { b[it] / a[it * 4 + it] }
+    }
+
+    /**
+     * La correzione fotometrica di un fotogramma: guadagno e compensazione di vignettatura.
+     *
+     * `fattore(x, y) = guadagno / V(r)` con `V(r) = 1 + a·r² + b·r⁴` e `r` normalizzato al
+     * semidiagonale. È il modello classico dell'ottimizzazione fotometrica di Autopano:
+     * l'esposizione varia da scatto a scatto, la caduta di luce ai bordi è dell'obiettivo
+     * ed è uguale per tutti.
+     */
+    private class FrameCorrection(
+        val gain: Float,
+        private val vignetteA: Float,
+        private val vignetteB: Float,
+        frameWidth: Int,
+        frameHeight: Int,
+    ) {
+        private val halfW = frameWidth / 2f
+        private val halfH = frameHeight / 2f
+        private val invNorm = 1f / (halfW * halfW + halfH * halfH)
+
+        fun factorAt(x: Float, y: Float): Float {
+            val dx = x - halfW
+            val dy = y - halfH
+            val r2 = (dx * dx + dy * dy) * invNorm
+            val v = (1f + vignetteA * r2 + vignetteB * r2 * r2).coerceAtLeast(0.4f)
+            return gain / v
+        }
+    }
+
+    private class PhotometricFit(val gains: FloatArray, val vignetteA: Float, val vignetteB: Float)
+
+    /**
+     * La stima fotometrica globale, dai campioni dei punti di controllo.
+     *
+     * Lo stesso punto del mondo visto da due foto: la differenza dei logaritmi delle
+     * luminanze è la somma della differenza di esposizione e della differenza di
+     * vignettatura ai due raggi. Con tanti punti sparsi si risolvono insieme, ai minimi
+     * quadrati, i guadagni di ogni foto (la prima fa da riferimento) e i due coefficienti
+     * della caduta ai bordi. È il pezzo che mancava: la catena dei guadagni vedeva solo le
+     * mediane e la vignettatura le sembrava esposizione — da lì le bande scure alle
+     * giunzioni.
+     */
+    private fun fitPhotometric(samples: List<FloatArray>, frameCount: Int): PhotometricFit? {
+        if (samples.size < PHOTOMETRIC_MIN_SAMPLES) return null
+        val present = samples.flatMap { listOf(it[0].toInt(), it[1].toInt()) }.distinct().sorted()
+        if (present.size < 2) return null
+        val reference = present.first()
+        val gainColumn = HashMap<Int, Int>()
+        var next = 0
+        present.forEach { frame -> if (frame != reference) gainColumn[frame] = next++ }
+        val size = next + 2
+        val colA = next
+        val colB = next + 1
+
+        val n = DoubleArray(size * size)
+        val t = DoubleArray(size)
+        val row = DoubleArray(size)
+        for (s in samples) {
+            java.util.Arrays.fill(row, 0.0)
+            val fixed = s[0].toInt()
+            val movingIdx = s[1].toInt()
+            val y = kotlin.math.ln(s[3].toDouble().coerceAtLeast(1.0)) -
+                kotlin.math.ln(s[2].toDouble().coerceAtLeast(1.0))
+            // y = logG_f − logG_m + a·(r²m − r²f) + b·(r⁴m − r⁴f)
+            gainColumn[fixed]?.let { row[it] = 1.0 }
+            gainColumn[movingIdx]?.let { row[it] = -1.0 }
+            val r2f = s[4].toDouble()
+            val r2m = s[5].toDouble()
+            row[colA] = r2m - r2f
+            row[colB] = r2m * r2m - r2f * r2f
+            for (i in 0 until size) {
+                if (row[i] == 0.0) continue
+                t[i] += row[i] * y
+                for (j in 0 until size) n[i * size + j] += row[i] * row[j]
+            }
+        }
+        val solution = solveLinearSystem(size, n, t) ?: return null
+
+        val a = solution[colA].toFloat()
+        val b = solution[colB].toFloat()
+        if (a !in -VIGNETTE_LIMIT..VIGNETTE_LIMIT || b !in -VIGNETTE_LIMIT..VIGNETTE_LIMIT) return null
+
+        val gains = FloatArray(frameCount) { 1f }
+        present.forEach { frame ->
+            val logGain = if (frame == reference) 0.0 else solution[gainColumn[frame]!!]
+            gains[frame] = kotlin.math.exp(logGain).toFloat().coerceIn(MIN_PHOTO_GAIN, MAX_PHOTO_GAIN)
+        }
+        // Le foto senza campioni (non allineate) ereditano il guadagno della più vicina
+        // fra quelle stimate: meglio di una pezza a guadagno pieno.
+        for (frame in 0 until frameCount) {
+            if (frame in present) continue
+            val nearest = present.minByOrNull { abs(it - frame) } ?: continue
+            gains[frame] = gains[nearest]
+        }
+        return PhotometricFit(gains, a, b)
+    }
+
+    /** Eliminazione di Gauss con pivot, per sistemi piccoli di taglia qualunque. */
+    private fun solveLinearSystem(size: Int, matrix: DoubleArray, vector: DoubleArray): DoubleArray? {
+        val a = matrix.copyOf()
+        val b = vector.copyOf()
+        for (col in 0 until size) {
+            var pivot = col
+            for (r in col + 1 until size) {
+                if (abs(a[r * size + col]) > abs(a[pivot * size + col])) pivot = r
+            }
+            if (abs(a[pivot * size + col]) < 1e-9) return null
+            if (pivot != col) {
+                for (j in 0 until size) {
+                    val tmp = a[col * size + j]
+                    a[col * size + j] = a[pivot * size + j]
+                    a[pivot * size + j] = tmp
+                }
+                val tmp = b[col]
+                b[col] = b[pivot]
+                b[pivot] = tmp
+            }
+            val diag = a[col * size + col]
+            for (r in 0 until size) {
+                if (r == col) continue
+                val factor = a[r * size + col] / diag
+                for (j in 0 until size) a[r * size + j] -= factor * a[col * size + j]
+                b[r] -= factor * b[col]
+            }
+        }
+        return DoubleArray(size) { b[it] / a[it * size + it] }
     }
 
     private fun placementResidual(p: FloatArray, sol: DoubleArray): Float {
@@ -804,13 +946,29 @@ class PanoramaStitcher(
                             ) ?: continue
                             val worldFound = frameToWorld(found[0], found[1], movingPlacement, lens)
                             // Oltre al residuo, la posizione del punto nel fotogramma mobile
-                            // (in gradi dal centro): è quella che permette di distinguere uno
-                            // spostamento da una rotazione o da un errore di focale.
+                            // (in gradi dal centro) — distingue spostamento, rotazione e
+                            // focale — e le due luminanze con i raggi normalizzati, che sono
+                            // il cibo della stima fotometrica: guadagni e vignettatura.
+                            val halfWf = fixed.width / 2f
+                            val halfHf = fixed.height / 2f
+                            val halfWm = moving.width / 2f
+                            val halfHm = moving.height / 2f
+                            val fx = candidate[0] - halfWf
+                            val fy = candidate[1] - halfHf
+                            val mx = found[0] - halfWm
+                            val my = found[1] - halfHm
                             local += floatArrayOf(
                                 wrapDegrees(world[0] - worldFound[0]),
                                 world[1] - worldFound[1],
                                 ((found[0] - lens.imageWidth / 2f) / lens.focalPixels).toDegrees(),
                                 ((lens.imageHeight / 2f - found[1]) / lens.focalPixels).toDegrees(),
+                                gray[candidate[1] * fixed.width + candidate[0]],
+                                movingGray[
+                                    found[1].toInt().coerceIn(0, moving.height - 1) * moving.width +
+                                        found[0].toInt().coerceIn(0, moving.width - 1),
+                                ],
+                                (fx * fx + fy * fy) / (halfWf * halfWf + halfHf * halfHf),
+                                (mx * mx + my * my) / (halfWm * halfWm + halfHm * halfHm),
                             )
                         }
                         local
@@ -1107,15 +1265,28 @@ class PanoramaStitcher(
         canvas: PanoramaCanvas,
         aligned: BooleanArray,
         fullResSampling: Boolean,
+        photometric: List<FloatArray>,
         detail: MutableList<String>,
     ): Bitmap {
         val output = Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
         // Nero, non trasparente: un JPEG non ha trasparenza e diventerebbe bianco.
         output.eraseColor(0xFF000000.toInt())
-        val gains = exposureGains(frames, placements, lens, canvas, aligned)
-        detail += "Guadagni di esposizione: " +
-            gains.mapIndexed { i, g -> "%.2f%s".format(g, if (!aligned[i]) "≈" else "") }
-                .joinToString(" · ") + " (≈ = stimato su angoli ipotizzati)"
+
+        // La fotometria vera: guadagni per foto e vignettatura dell'obiettivo, stimati
+        // insieme dai punti di controllo. Il ripiego è la vecchia catena delle mediane.
+        val fit = fitPhotometric(photometric, frames.size)
+        val gains = fit?.gains ?: exposureGains(frames, placements, lens, canvas, aligned)
+        detail += if (fit != null) {
+            "Fotometria: guadagni " + gains.joinToString(" · ") { "%.2f".format(it) } +
+                " · vignettatura a=%.3f b=%.3f (%d campioni)".format(fit.vignetteA, fit.vignetteB, photometric.size)
+        } else {
+            "Fotometria di ripiego (catena delle mediane): guadagni " +
+                gains.mapIndexed { i, g -> "%.2f%s".format(g, if (!aligned[i]) "≈" else "") }
+                    .joinToString(" · ")
+        }
+        val corrections = frames.mapIndexed { i, frame ->
+            FrameCorrection(gains[i], fit?.vignetteA ?: 0f, fit?.vignetteB ?: 0f, frame.width, frame.height)
+        }
 
         // Chi possiede ogni pixel della tela, quantificato: il peso della sfumatura del
         // fotogramma che l'ha dipinto. Serve a decidere le maschere dei fotogrammi
@@ -1133,7 +1304,7 @@ class PanoramaStitcher(
             )
             val startedAt = System.currentTimeMillis()
             pasteFrame(
-                output, ownerWeight, frame, placements[index], gains[index], lens, canvas,
+                output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
                 fullResSampling, detail,
             )
             val last = detail.removeLastOrNull()
@@ -1157,7 +1328,7 @@ class PanoramaStitcher(
         ownerWeight: ByteArray,
         frame: Frame,
         placement: FramePlacement,
-        gain: Float,
+        correction: FrameCorrection,
         lens: PinholeLens,
         canvas: PanoramaCanvas,
         fullResSampling: Boolean,
@@ -1238,7 +1409,7 @@ class PanoramaStitcher(
             sy0 = (ov0y - BLEND_CONTEXT_PX).coerceAtLeast(0)
             sy1 = (ov1y + BLEND_CONTEXT_PX).coerceAtMost(bh - 1)
             blendSubWindow(
-                output, ownerWeight, frame, placement, gain, lens, canvas,
+                output, ownerWeight, frame, placement, correction, lens, canvas,
                 columns, row0, bw, newW, sx0, sx1, sy0, sy1, full,
             )
         }
@@ -1265,9 +1436,10 @@ class PanoramaStitcher(
                 val point = projectToFrame(longitude, latitude, placement, lens)
                 if (!point.inside) continue
                 val color = sampleColor(frame, full, point.x, point.y)
-                val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
-                val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
-                val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                val factor = correction.factorAt(point.x, point.y)
+                val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
                 rowPixels[columns[bx]] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
                 touched = true
                 val index = ownerIndex(canvas.width, row0 + by, columns[bx])
@@ -1306,7 +1478,7 @@ class PanoramaStitcher(
         ownerWeight: ByteArray,
         frame: Frame,
         placement: FramePlacement,
-        gain: Float,
+        correction: FrameCorrection,
         lens: PinholeLens,
         canvas: PanoramaCanvas,
         columns: IntArray,
@@ -1358,9 +1530,10 @@ class PanoramaStitcher(
                     val point = projectToFrame(longitude, latitude, placement, lens)
                     if (point.inside) {
                         val color = sampleColor(frame, full, point.x, point.y)
-                        val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val gch = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val factor = correction.factorAt(point.x, point.y)
+                        val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val gch = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
                         newColor[g] = (r shl 16) or (gch shl 8) or b
                         if (oldWeight <= 0f) {
                             baseColor[g] = newColor[g]
@@ -1423,9 +1596,10 @@ class PanoramaStitcher(
                     val point = projectToFrame(longitude, latitude, placement, lens)
                     if (point.inside) {
                         val color = sampleColor(frame, full, point.x, point.y)
-                        val r = (gain * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val g = (gain * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
-                        val b = (gain * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val factor = correction.factorAt(point.x, point.y)
+                        val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
                         hard = (r shl 16) or (g shl 8) or b
                     }
                 }
@@ -1974,6 +2148,16 @@ class PanoramaStitcher(
         /** Oltre questi valori la stima non è più credibile e si torna alla sola traslazione. */
         const val MAX_ROLL_DEGREES = 4f
         const val MAX_FOCAL_ADJUST = 0.04f
+
+        /** Sotto questi campioni la fotometria globale non si fida e resta la catena. */
+        const val PHOTOMETRIC_MIN_SAMPLES = 40
+
+        /** I coefficienti di vignettatura credibili per un obiettivo vero. */
+        const val VIGNETTE_LIMIT = 0.8f
+
+        /** I guadagni di esposizione fra due scatti in automatico: fino a un raddoppio. */
+        const val MIN_PHOTO_GAIN = 0.5f
+        const val MAX_PHOTO_GAIN = 2.0f
 
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2

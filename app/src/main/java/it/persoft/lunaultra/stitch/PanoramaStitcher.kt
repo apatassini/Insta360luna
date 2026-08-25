@@ -496,9 +496,18 @@ class PanoramaStitcher(
         )
         val ownerArea = spanH * spanV
 
-        // Il budget: metà scarsa della heap, meno i pixel del fotogramma in lavorazione.
+        // Il budget dei vettori di lavoro: una parte della heap **libera adesso**, non del
+        // tetto teorico.
+        //
+        // Prima era il 45% del tetto, e il tetto lo si paga tutto anche quando è già occupato.
+        // Ora la heap si misura: con la luminanza passata ai byte e i pixel non più
+        // materializzati, all'inizio di una cucitura sono in uso tredici megabyte su
+        // cinquecentododici — e continuare a ragionare come se ne mancassero metà costa
+        // risoluzione per niente. Sulla panoramica da nove foto la tela usciva a 62 px/grado
+        // invece degli 84 che gli originali portano davvero.
         val frameBytes = lens.imageWidth.toLong() * lens.imageHeight * 4L
-        val budget = (heapMb.toLong() * 1024L * 1024L * 45L / 100L) - frameBytes - 32L * 1024L * 1024L
+        val freeHeap = (memory.javaMaxBytes - memory.javaUsedBytes).coerceAtLeast(0L)
+        val budget = (freeHeap * WORKING_HEAP_SHARE).toLong() - frameBytes - RESERVED_HEAP_BYTES
         // I pesi del fotogramma sono un byte a pixel; la fusione a scala ridotta pesa una
         // frazione; la mappa dei possessori un byte ogni quattro pixel di tela.
         val perDensitySquared = wH * wV * 1f +
@@ -3518,6 +3527,19 @@ class PanoramaStitcher(
          * spostato di più.
          */
         const val REG_MIN_COVERAGE = 0.5f
+
+        /**
+         * Quanta della heap libera possono prendersi i vettori di lavoro della cucitura.
+         *
+         * Non tutta: il raccoglitore di memoria ha bisogno di spazio per lavorare, e una heap
+         * riempita fino all'orlo passa il tempo a raccogliere invece che a cucire. Il resto
+         * della risoluzione perduta non si recupera alzando questo numero, si recupera
+         * togliendo quei vettori dalla heap Java — che è un lavoro, non una manopola.
+         */
+        const val WORKING_HEAP_SHARE = 0.60
+
+        /** Quello che si tiene da parte comunque, per i buffer di riga e il respiro del GC. */
+        const val RESERVED_HEAP_BYTES = 48L * 1024L * 1024L
 
         /**
          * Quanto vicino al bordo della finestra una risposta smette di essere una misura.

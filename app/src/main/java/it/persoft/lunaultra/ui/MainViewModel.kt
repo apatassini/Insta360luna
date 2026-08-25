@@ -1570,12 +1570,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _stitchState.value = StitchUiState.Working(fraction, message)
                 },
             ).onSuccess { done ->
-                // Solo a panoramica salvata: via gli scatti temporanei, via il job.
-                withContext(Dispatchers.IO) {
-                    container.stitchJob.discardJobFiles(files.map { it.absolutePath })
-                }
-                container.panoJobStore.update { list ->
-                    list.copy(jobs = list.jobs.filterNot { it.id == job.id })
+                // Gli scatti temporanei e il job si buttano solo a panoramica salvata E se
+                // l'interruttore lo chiede: con l'opzione spenta il job resta lì, pronto per
+                // la prova successiva — è il banco di prova dell'unione.
+                if (settings.value.deleteJobAfterStitch) {
+                    withContext(Dispatchers.IO) {
+                        container.stitchJob.discardJobFiles(files.map { it.absolutePath })
+                    }
+                    container.panoJobStore.update { list ->
+                        list.copy(jobs = list.jobs.filterNot { it.id == job.id })
+                    }
                 }
                 _stitchState.value = done
                 showMessage("Panoramica unita: ${done.fileName}")
@@ -1583,6 +1587,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita")
             }
         }
+    }
+
+    /** A unione riuscita: buttare scatti e job, o tenerli per la prova successiva? */
+    fun setDeleteJobAfterStitch(enabled: Boolean) {
+        container.settingsStore.update { it.copy(deleteJobAfterStitch = enabled) }
     }
 
     /** Annulla un job: sparisce dall'elenco, le foto restano dove sono. */

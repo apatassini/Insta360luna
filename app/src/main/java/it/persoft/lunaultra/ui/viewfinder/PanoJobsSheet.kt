@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -36,6 +37,8 @@ import kotlin.math.roundToInt
 fun PanoJobsSheet(
     jobs: List<PanoJob>,
     busy: Boolean,
+    deleteOnFinish: Boolean,
+    onDeleteOnFinish: (Boolean) -> Unit,
     onRun: (PanoJob) -> Unit,
     onCancel: (PanoJob) -> Unit,
     onClose: () -> Unit,
@@ -119,6 +122,33 @@ fun PanoJobsSheet(
                     activeColor = Luna.Rec,
                 )
             }
+        }
+
+        // L'interruttore in fondo: a unione riuscita, buttare scatti e job oppure tenerli.
+        // Spento, lo stesso job si rilancia quante volte si vuole: è il banco di prova
+        // dell'unione, senza dover riscattare niente.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Cancella al termine",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White,
+                )
+                Text(
+                    text = if (deleteOnFinish) {
+                        "A unione riuscita, scatti e job si buttano."
+                    } else {
+                        "Scatti e job restano: puoi rifare le prove quante volte vuoi."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Luna.OnSurfaceDim,
+                )
+            }
+            Switch(checked = deleteOnFinish, onCheckedChange = onDeleteOnFinish)
         }
     }
 }

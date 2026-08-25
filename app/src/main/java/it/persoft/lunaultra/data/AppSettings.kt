@@ -128,6 +128,13 @@ data class AppSettings(
      */
     val updateBranch: String = "",
 
+    /**
+     * A unione riuscita, cancellare gli scatti temporanei e il job? Spento di serie: con le
+     * foto che restano, lo stesso job si può rilanciare quante volte serve — è il banco di
+     * prova dell'unione, senza dover riscattare niente.
+     */
+    val deleteJobAfterStitch: Boolean = false,
+
     /** L'app ufficiale ripete l'handshake ogni 3 secondi come keep-alive. */
     val keepAliveSeconds: Int = 3,
     val requestTimeoutMs: Long = 3_000,

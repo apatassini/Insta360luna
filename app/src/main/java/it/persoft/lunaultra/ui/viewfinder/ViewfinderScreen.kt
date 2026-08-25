@@ -320,6 +320,8 @@ fun ViewfinderScreen(
                 PanoJobsSheet(
                     jobs = panoJobs.jobs,
                     busy = stitch is it.persoft.lunaultra.stitch.StitchUiState.Working,
+                    deleteOnFinish = settings.deleteJobAfterStitch,
+                    onDeleteOnFinish = viewModel::setDeleteJobAfterStitch,
                     onRun = {
                         jobsSheetOpen = false
                         viewModel.runPanoJob(it)

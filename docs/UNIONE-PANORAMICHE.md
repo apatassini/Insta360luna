@@ -487,6 +487,54 @@ che li usa.
 **Resta seriale una cosa sola, e per forza:** aprire gli originali, perché il decoder JPEG di
 Android non si spartisce. Sono 2 s su file da 37 Mpx.
 
+### 7.1 La scheda grafica
+
+Con il collo di bottiglia singolo sparito, il passo successivo non è togliere altro lavoro alla
+CPU: è darne una parte a chi lo fa per mestiere. Riconoscimento e pittura sono per-pixel,
+indipendenti riga per riga, e la pittura in più fa a ogni pixel un campionamento bilineare —
+che sulla CPU costa quattro letture più l'interpolazione e sull'unità di campionamento di una
+GPU **non costa niente**, la fa l'hardware.
+
+Il frammento (`GpuStitchRenderer`) è la traduzione riga per riga di `FrameProjector` +
+`featherWeight` + `factorAt`. Restituisce un intero già in formato Bitmap: OpenGL rilegge i byte
+in ordine R,G,B,A, quindi lo shader scrive le componenti al contrario e l'intero little-endian
+che ne esce è già `0xAARRGGBB`. L'alfa non è trasparenza, è **il peso della sfumatura**.
+
+Tre vincoli decidono la forma:
+
+- **La tela non entra in una texture.** 17245 px superano gli 8192 dichiarati da molti telefoni,
+  quindi si disegna a fasce e ogni fascia si rilegge in un vettore di 8 MB, riusato.
+- **Il contesto grafico appartiene a un filo.** Le corutine cambiano filo alle sospensioni: c'è
+  un filo solo, suo, acceso con la tela e spento con lei.
+- **Niente può far fallire un'unione.** Ogni chiamata è dentro una `runCatching`; un fallimento
+  spegne la GPU per il resto dell'unione e la CPU riprende da dove era. Non c'è un caso in cui
+  la panoramica esce peggio: esce uguale, più lentamente, e il log dice perché.
+
+**L'autocontrollo** è la parte che rende la cosa accettabile. Uno shader sbagliato non lancia
+niente e non si ferma: disegna una panoramica storta, indistinguibile a occhio da un problema di
+allineamento. Quindi prima di scrivere un solo pixel si disegna un riquadro di 96×96 nel centro
+del fotogramma e lo si ricalcola con le funzioni CPU vere, confrontando ~200 campioni:
+
+| grandezza | tolleranza | perché |
+|---|---|---|
+| peso della sfumatura | Δ medio ≤ 3 su 255 | è pura geometria: due strade che proiettano uguale danno pesi uguali |
+| colore | Δ medio ≤ 6 su 255 | in più c'è l'interpolazione in virgola fissa dell'hardware: qualche livello su un bordo netto è fisiologico, decine no |
+
+Gli scarti misurati finiscono **sempre** nel log, che passi o non passi: è quello che serve per
+correggere lo shader senza avere il telefono in mano.
+
+Le due manopole si accendono una alla volta (Impostazioni → Unione foto → Scheda grafica), e
+ogni unione riporta per ogni foto «ricognizione su GPU/CPU, pittura su GPU/CPU» più la riga
+**«Di cui sulla scheda grafica: disegno … · riporto sulla tela … · caricamento delle
+sorgenti …»**. Quella riga è la sola cosa che dice quale sia la mossa successiva: se cala il
+disegno ma non il riporto, il collo di bottiglia si è solo spostato sulla copia CPU delle fasce,
+e la risposta è metterle in pipeline (disegnare la fascia *n+1* mentre si riporta la *n*) invece
+di alternarle.
+
+La pittura in GPU ha una condizione in più: l'originale deve entrare in una texture. A ×2,2 sui
+3200 px di lavoro il lato lungo è ~7040, sotto il limite di 8192; se un giorno non lo fosse,
+quel fotogramma si dipinge in CPU e il log lo scrive.
+
 ---
 
 ## 8. Le manopole e le ricette
@@ -504,6 +552,8 @@ Tutte in `StitchTuning`, regolabili da Impostazioni → «Unione foto».
 | qualità dei punti | 80% | punto di partenza, scende da sola se non bastano |
 | quantità dei punti | normale | ×1, ×2, ×4 |
 | sfumatura multibanda | accesa | spenta = taglio netto, diagnostico |
+| ricognizione su GPU | spenta | pesi e geometria sulla scheda, con rete di sicurezza CPU |
+| pittura su GPU | spenta | proiezione, campionamento e fotometria sulla scheda, idem |
 
 Le **ricette A…F** sono sei configurazioni che differiscono ognuna dalla precedente per **una
 cosa sola**, così la lettera in cui un difetto sparisce dice da sola chi era il colpevole.

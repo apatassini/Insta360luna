@@ -18,6 +18,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.atan
+import kotlin.math.exp
 
 /**
  * La geometria dell'unione, che è la parte che deve essere giusta.
@@ -432,5 +434,76 @@ class PanoramaGeometryTest {
         val warp = LocalWarp.from(points, 1600, 1200, maximumShiftPixels = 40f)!!
         assertEquals(40f, warp.shiftX(800f, 600f), 0.01f)
         assertEquals(-40f, warp.shiftY(800f, 600f), 0.01f)
+    }
+
+    /**
+     * I numeri che la tela consegna alla scheda grafica devono ricostruire la tela.
+     *
+     * Lo shader non chiama [PanoramaCanvas]: si rifà i conti da `startLongitudeDegrees`,
+     * `pixelsPerDegree`, `verticalRadius` e `topPixel`. Qui quei conti sono riscritti in
+     * Kotlin, gli stessi identici del frammento, e confrontati con l'originale. Se un giorno
+     * qualcuno cambia la mappa riga↔latitudine e si dimentica dello shader, questo test
+     * fallisce — che è l'unico modo di accorgersene senza un telefono in mano.
+     */
+    @Test
+    fun `la tela si ricostruisce dai numeri che vanno alla scheda grafica`() {
+        for (projection in StitchProjection.entries) {
+            val canvas = PanoramaCanvas(
+                centerPanDegrees = 12f,
+                centerTiltDegrees = -4f,
+                horizontalDegrees = 190f,
+                verticalDegrees = 70f,
+                pixelsPerDegree = 40f,
+                projection = projection,
+            )
+            val radius = canvas.verticalRadius
+            val top = canvas.topPixel
+            for (column in listOf(0, 137, canvas.width / 2, canvas.width - 1)) {
+                val fromShader = canvas.startLongitudeDegrees + (column + 0.5f) / canvas.pixelsPerDegree
+                assertEquals(canvas.longitudeAt(column), fromShader, 1e-3f)
+            }
+            for (row in listOf(0, 91, canvas.height / 2, canvas.height - 1)) {
+                val y = top - (row + 0.5f)
+                val fromShader = when (projection) {
+                    StitchProjection.EQUIRECTANGULAR -> y / canvas.pixelsPerDegree
+                    StitchProjection.CYLINDRICAL -> Math.toDegrees(atan((y / radius).toDouble())).toFloat()
+                    StitchProjection.MERCATOR ->
+                        Math.toDegrees(2.0 * atan(exp((y / radius).toDouble())) - Math.PI / 2.0).toFloat()
+                }
+                assertEquals(canvas.latitudeAt(row), fromShader, 1e-3f)
+            }
+        }
+    }
+
+    /**
+     * I nodi in fila che vanno alla scheda sono gli stessi che usa la CPU.
+     *
+     * La scheda riceve il campo come `dx, dy, dx, dy…` e lo interpola per conto suo con la
+     * stessa formula bilineare. Se l'ordine fosse sbagliato la deformazione andrebbe di
+     * traverso, e su una panoramica non si distinguerebbe da un allineamento storto.
+     */
+    @Test
+    fun `il campo locale in fila conserva ordine e valori`() {
+        val points = buildList {
+            for (y in 100..1100 step 100) {
+                for (x in 100..1500 step 100) {
+                    add(floatArrayOf(x.toFloat(), y.toFloat(), x / 200f, -y / 300f))
+                }
+            }
+        }
+        val warp = LocalWarp.from(points, 1600, 1200, maximumShiftPixels = 40f)!!
+        val flat = warp.interleaved()
+        assertEquals(LocalWarp.NODES_X * LocalWarp.NODES_Y * 2, flat.size)
+        val cellWidth = 1600f / (LocalWarp.NODES_X - 1)
+        val cellHeight = 1200f / (LocalWarp.NODES_Y - 1)
+        for (ny in 0 until LocalWarp.NODES_Y) {
+            for (nx in 0 until LocalWarp.NODES_X) {
+                val node = ny * LocalWarp.NODES_X + nx
+                val x = nx * cellWidth
+                val y = ny * cellHeight
+                assertEquals(warp.shiftX(x, y), flat[node * 2], 1e-3f)
+                assertEquals(warp.shiftY(x, y), flat[node * 2 + 1], 1e-3f)
+            }
+        }
     }
 }

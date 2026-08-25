@@ -3,6 +3,9 @@ package it.persoft.lunaultra.stitch
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -112,6 +115,24 @@ class PanoramaStitcher(
     private var recogniseMillis = 0L
     private var blendMillis = 0L
     private var paintMillis = 0L
+
+    /**
+     * Il tempo della scheda grafica, separato in disegno e riporto.
+     *
+     * Sono due cose diverse e conviene vederle separate: `disegno` è quello che fa la GPU,
+     * `riporto` è la CPU che rimette le piastrelle sulla tela e aggiorna la mappa dei
+     * possessori. Se il primo crolla e il secondo no, il collo di bottiglia si è solo
+     * spostato, e la prossima mossa è metterli in pipeline invece di alternarli.
+     */
+    private var gpuDrawMillis = 0L
+    private var gpuMergeMillis = 0L
+    private var gpuUploadMillis = 0L
+
+    /** Quello che la GPU ha da raccontare: nome della scheda, autocontrollo, o il motivo del ripiego. */
+    private val gpuNotes = mutableListOf<String>()
+
+    /** Spenta per il resto dell'unione: un ripiego non si ritenta a ogni fotogramma. */
+    private var gpuOff = false
 
     suspend fun stitch(
         shots: List<PanoramaShot>,
@@ -286,6 +307,17 @@ class PanoramaStitcher(
                 paintMillis / 1000f,
                 decodeMillis / 1000f,
             )
+            // Il tempo della scheda non è un tempo in più: sta già dentro riconoscimento e
+            // pittura. Separarlo dice l'unica cosa che serve per la mossa successiva — se il
+            // collo di bottiglia è ancora il disegno o si è spostato sul riporto.
+            if (gpuDrawMillis + gpuMergeMillis + gpuUploadMillis > 0L) {
+                notes += ("Di cui sulla scheda grafica: disegno %.1f s · riporto sulla tela %.1f s · " +
+                    "caricamento delle sorgenti %.1f s").format(
+                    gpuDrawMillis / 1000f,
+                    gpuMergeMillis / 1000f,
+                    gpuUploadMillis / 1000f,
+                )
+            }
             if (!fillNadir) {
                 onProgress(0.98f, "Ritaglio il nero ai bordi")
                 val before = "${bitmap.width}×${bitmap.height}"
@@ -1065,8 +1097,8 @@ class PanoramaStitcher(
      */
     private class FrameCorrection(
         val gain: Float,
-        private val vignetteA: Float,
-        private val vignetteB: Float,
+        val vignetteA: Float,
+        val vignetteB: Float,
         frameWidth: Int,
         frameHeight: Int,
     ) {
@@ -1643,6 +1675,258 @@ class PanoramaStitcher(
      * Il lavoro pesante avviene solo nel rettangolo del fotogramma nuovo, non su tutta la
      * tela: la memoria resta quella di un ritaglio.
      */
+    /**
+     * Il contesto grafico e il filo che ne è proprietario: le due cose vanno sempre insieme.
+     *
+     * Un contesto OpenGL è legato al filo che lo rende corrente, e una corutina di filo ne
+     * cambia a ogni sospensione. L'unico modo sicuro è un filo solo, suo, per tutta l'unione:
+     * si accende con la tela e si spegne con lei.
+     */
+    private class GpuSession(
+        val renderer: GpuStitchRenderer,
+        val dispatcher: ExecutorCoroutineDispatcher,
+    )
+
+    /**
+     * Accende la scheda grafica, se qualcuna delle manopole GPU è alzata.
+     *
+     * Non accenderla non è mai un errore: il percorso CPU resta quello completo e testato, e
+     * questo metodo restituisce null tutte le volte che qualcosa non torna — driver assente,
+     * contesto rifiutato, shader che non compila. Il log dice cosa è successo.
+     */
+    private suspend fun openGpu(): GpuSession? {
+        if (!tuning.gpuRecognise && !tuning.gpuPaint) return null
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "cucitura-gpu")
+        }
+        val dispatcher = executor.asCoroutineDispatcher()
+        val renderer = withContext(dispatcher) { GpuStitchRenderer.create() }
+        if (renderer == null) {
+            dispatcher.close()
+            gpuOff = true
+            gpuNotes += "GPU: contesto grafico non disponibile — tutto sulla CPU"
+            return null
+        }
+        gpuNotes += "GPU: ${renderer.hardware} · texture fino a ${renderer.maxTextureSize} px · " +
+            listOfNotNull(
+                "ricognizione".takeIf { tuning.gpuRecognise },
+                "pittura".takeIf { tuning.gpuPaint },
+            ).joinToString(" e ")
+        return GpuSession(renderer, dispatcher)
+    }
+
+    private suspend fun closeGpu(gpu: GpuSession?) {
+        if (gpu == null) return
+        withContext(NonCancellable + gpu.dispatcher) { gpu.renderer.release() }
+        gpu.dispatcher.close()
+    }
+
+    /** Spegne la scheda per il resto dell'unione, e dice perché. */
+    private fun gpuGiveUp(reason: String) {
+        if (gpuOff) return
+        gpuOff = true
+        gpuNotes += "GPU spenta: $reason — da qui in avanti dipinge la CPU"
+    }
+
+    /**
+     * I numeri del fotogramma nel formato che vuole lo shader.
+     *
+     * Sono gli stessi che [FrameProjector] si calcola nel costruttore: se le due liste
+     * divergono, [gpuVerify] se ne accorge prima che un pixel finisca sulla tela.
+     */
+    private fun gpuUniforms(
+        frame: Frame,
+        placement: FramePlacement,
+        correction: FrameCorrection,
+        lens: PinholeLens,
+        canvas: PanoramaCanvas,
+        warp: LocalWarp?,
+        source: Bitmap?,
+    ): GpuFrameUniforms {
+        val tilt = placement.effectiveTilt.toRadians()
+        val roll = placement.rollDegrees.toRadians()
+        return GpuFrameUniforms(
+            sourceWidth = source?.width ?: frame.width,
+            sourceHeight = source?.height ?: frame.height,
+            toSourceX = if (source == null) 1f else frame.fullScaleX,
+            toSourceY = if (source == null) 1f else frame.fullScaleY,
+            workingWidth = frame.width,
+            workingHeight = frame.height,
+            focalPixels = lens.focalPixels,
+            focalScale = placement.focalScale,
+            panDegrees = placement.effectivePan,
+            cosTilt = cos(tilt),
+            sinTilt = sin(tilt),
+            cosRoll = cos(roll),
+            sinRoll = sin(roll),
+            startLongitude = canvas.startLongitudeDegrees,
+            pixelsPerDegree = canvas.pixelsPerDegree,
+            radius = canvas.verticalRadius,
+            topY = canvas.topPixel,
+            projection = canvas.projection.ordinal,
+            gain = correction.gain,
+            vignetteA = correction.vignetteA,
+            vignetteB = correction.vignetteB,
+            warpNodesX = LocalWarp.NODES_X,
+            warpNodesY = LocalWarp.NODES_Y,
+            warp = warp?.interleaved() ?: FloatArray(0),
+        )
+    }
+
+    /**
+     * L'autocontrollo: la scheda e la CPU devono dire la stessa cosa, o la scheda si spegne.
+     *
+     * È la rete di sicurezza, ed è quello che rende questa strada accettabile. Uno shader
+     * sbagliato non è come un ciclo Kotlin sbagliato: non lancia niente, non si ferma, disegna
+     * semplicemente una panoramica storta — e chi la guarda su un telefono, in vacanza, non ha
+     * nessun modo di distinguerla da un problema di allineamento.
+     *
+     * Quindi prima di dipingere anche un solo pixel si disegna un riquadro di prova nel centro
+     * del fotogramma, e lo stesso riquadro si calcola con [FrameProjector], [featherWeight] e
+     * `factorAt` — le funzioni vere. Se i due non coincidono, la GPU si spegne e il log porta i
+     * numeri, che è esattamente quello che serve per correggere lo shader.
+     *
+     * Le due strade non possono coincidere *esattamente*: l'interpolazione bilineare
+     * dell'hardware lavora in virgola fissa con una manciata di bit di sotto-pixel, e su un
+     * bordo netto un paio di livelli di differenza sono fisiologici. Quello che non è
+     * fisiologico è una geometria diversa, e quella si vede subito: un pixel preso nel posto
+     * sbagliato non differisce di due livelli, differisce di decine.
+     */
+    private suspend fun gpuVerify(
+        gpu: GpuSession,
+        uniforms: GpuFrameUniforms,
+        frame: Frame,
+        placement: FramePlacement,
+        correction: FrameCorrection,
+        lens: PinholeLens,
+        canvas: PanoramaCanvas,
+        warp: LocalWarp?,
+        full: Bitmap?,
+        withColour: Boolean,
+        centreColumn: Int,
+        centreRow: Int,
+    ): String? {
+        val side = GPU_CHECK_SIDE
+        if (canvas.height < side) return null
+        val col0 = centreColumn - side / 2
+        val row0 = (centreRow - side / 2).coerceIn(0, canvas.height - side)
+        val tile = IntArray(side * side)
+        val drawn = withContext(gpu.dispatcher) {
+            gpu.renderer.renderTile(
+                uniforms, col0, row0, side, side, weightOnly = !withColour, into = tile,
+            )
+        }
+        if (!drawn) return "il riquadro di prova non si è disegnato"
+
+        val projector = FrameProjector(placement, lens, warp)
+        val source = full?.let { SourceBlock(it) }
+        var weightSamples = 0
+        var weightSum = 0.0
+        var weightWorst = 0
+        var colourSamples = 0
+        var colourSum = 0.0
+        var colourWorst = 0
+        var r = 0
+        while (r < side) {
+            projector.row(canvas.latitudeAt(row0 + r))
+            var c = 0
+            while (c < side) {
+                val column = ((col0 + c) % canvas.width + canvas.width) % canvas.width
+                val delta = (canvas.longitudeAt(column) - placement.effectivePan).toRadians()
+                projector.project(sin(delta), cos(delta))
+                val packed = tile[r * side + c]
+                val gpuWeight = packed ushr 24
+                val cpuWeight = if (!projector.inside) {
+                    0
+                } else {
+                    val w = featherWeight(projector.x, projector.y, frame.width, frame.height)
+                    if (w <= 0f) 0 else (w * 255f).roundToInt().coerceIn(1, 255)
+                }
+                weightSamples++
+                val weightDelta = abs(cpuWeight - gpuWeight)
+                weightSum += weightDelta.toDouble()
+                weightWorst = max(weightWorst, weightDelta)
+                if (withColour && cpuWeight != 0 && gpuWeight != 0) {
+                    val colour = sampleColor(frame, source, projector.x, projector.y)
+                    val factor = correction.factorAt(projector.x, projector.y)
+                    val cr = (factor * ((colour shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                    val cg = (factor * ((colour shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                    val cb = (factor * (colour and 0xFF)).roundToInt().coerceIn(0, 255)
+                    val gap = abs(cr - ((packed shr 16) and 0xFF)) +
+                        abs(cg - ((packed shr 8) and 0xFF)) +
+                        abs(cb - (packed and 0xFF))
+                    colourSamples++
+                    colourSum += gap / 3.0
+                    colourWorst = max(colourWorst, gap / 3)
+                }
+                c += GPU_CHECK_STEP
+            }
+            r += GPU_CHECK_STEP
+        }
+
+        val weightGap = if (weightSamples == 0) 0.0 else weightSum / weightSamples
+        val colourGap = if (colourSamples == 0) 0.0 else colourSum / colourSamples
+        gpuNotes += "Autocontrollo ${frame.label}: peso Δ%.1f (max %d) · colore Δ%.1f (max %d) su %d/%d campioni"
+            .format(weightGap, weightWorst, colourGap, colourWorst, colourSamples, weightSamples)
+        if (weightGap > GPU_MAX_WEIGHT_GAP) {
+            return "i pesi non coincidono (Δ%.1f, il limite è %.0f)".format(weightGap, GPU_MAX_WEIGHT_GAP)
+        }
+        if (withColour && colourSamples >= GPU_CHECK_MIN_COLOUR && colourGap > GPU_MAX_COLOUR_GAP) {
+            return "i colori non coincidono (Δ%.1f, il limite è %.0f)".format(colourGap, GPU_MAX_COLOUR_GAP)
+        }
+        return null
+    }
+
+    /**
+     * Disegna la finestra di un fotogramma a fasce, e consegna ogni fascia a chi la riporta.
+     *
+     * A fasce per due motivi. Il primo è il limite delle texture: una tela da diciassettemila
+     * pixel non ci sta, e la scheda dichiara quanto è il suo massimo. Il secondo è la memoria:
+     * la fascia va riletta in un vettore, e un vettore grande quanto la finestra intera —
+     * cinquanta milioni di pixel — sarebbe duecento megabyte accanto alla tela.
+     *
+     * Il vettore della fascia si riusa per tutte: si alloca una volta sola.
+     */
+    private suspend fun gpuBands(
+        gpu: GpuSession,
+        uniforms: GpuFrameUniforms,
+        c0: Int,
+        row0: Int,
+        bw: Int,
+        bh: Int,
+        weightOnly: Boolean,
+        onBand: suspend (band: IntArray, bandRow: Int, rows: Int) -> Boolean,
+    ): Boolean {
+        val tileWidth = min(bw, gpu.renderer.maxTextureSize)
+        val bandHeight = (GPU_BAND_PIXELS / tileWidth)
+            .coerceIn(1, min(bh, gpu.renderer.maxTextureSize))
+        val band = IntArray(bw * bandHeight)
+        var by = 0
+        while (by < bh) {
+            currentCoroutineContext().ensureActive()
+            val rows = min(bandHeight, bh - by)
+            val startedAt = System.currentTimeMillis()
+            val drawn = withContext(gpu.dispatcher) {
+                var good = true
+                var bx = 0
+                while (bx < bw && good) {
+                    val width = min(tileWidth, bw - bx)
+                    good = gpu.renderer.renderTile(
+                        uniforms, c0 + bx, row0 + by, width, rows,
+                        weightOnly = weightOnly, into = band, intoOffset = bx, intoStride = bw,
+                    )
+                    bx += width
+                }
+                good
+            }
+            gpuDrawMillis += System.currentTimeMillis() - startedAt
+            if (!drawn) return false
+            if (!onBand(band, by, rows)) return false
+            by += rows
+        }
+        return true
+    }
+
     private suspend fun compose(
         frames: List<Frame>,
         placements: List<FramePlacement>,
@@ -1682,26 +1966,34 @@ class PanoramaStitcher(
         val ownerHeight = (canvas.height + OWNER_SCALE - 1) / OWNER_SCALE
         val ownerWeight = ByteArray(ownerWidth * ownerHeight)
 
-        frames.forEachIndexed { index, frame ->
-            currentCoroutineContext().ensureActive()
-            onProgress(
-                0.35f + 0.6f * index / frames.size,
-                "Cucio ${frame.label} (${index + 1}/${frames.size})",
-            )
-            val startedAt = System.currentTimeMillis()
-            pasteFrame(
-                output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
-                fullResSampling, warps.getOrNull(index), detail,
-                progressBase = 0.35f + 0.6f * index / frames.size,
-                progressSpan = 0.6f / frames.size,
-                progressLabel = "${frame.label} (${index + 1}/${frames.size})",
-            )
-            val last = detail.removeLastOrNull()
-            if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
-            // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori e il suo
-            // originale a piena risoluzione si liberano.
-            frame.releaseWorkingData()
-            frame.closeFullResolution()
+        // La scheda grafica, se qualcuna delle sue manopole è alzata: un contesto per tutta
+        // la tela, sul suo filo, e spento in ogni caso quando si esce di qui.
+        val gpu = openGpu()
+        try {
+            frames.forEachIndexed { index, frame ->
+                currentCoroutineContext().ensureActive()
+                onProgress(
+                    0.35f + 0.6f * index / frames.size,
+                    "Cucio ${frame.label} (${index + 1}/${frames.size})",
+                )
+                val startedAt = System.currentTimeMillis()
+                pasteFrame(
+                    output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
+                    fullResSampling, warps.getOrNull(index), gpu, detail,
+                    progressBase = 0.35f + 0.6f * index / frames.size,
+                    progressSpan = 0.6f / frames.size,
+                    progressLabel = "${frame.label} (${index + 1}/${frames.size})",
+                )
+                val last = detail.removeLastOrNull()
+                if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
+                // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori e il suo
+                // originale a piena risoluzione si liberano.
+                frame.releaseWorkingData()
+                frame.closeFullResolution()
+            }
+        } finally {
+            closeGpu(gpu)
+            detail += gpuNotes
         }
         return output
     }
@@ -1722,6 +2014,7 @@ class PanoramaStitcher(
         canvas: PanoramaCanvas,
         fullResSampling: Boolean,
         warp: LocalWarp?,
+        gpu: GpuSession?,
         detail: MutableList<String>? = null,
         /**
          * La fetta di avanzamento che spetta a questo fotogramma. Cucirne uno può durare
@@ -1784,10 +2077,65 @@ class PanoramaStitcher(
             lonCos[bx] = cos(delta)
         }
 
+        // La scheda grafica, se le sue manopole sono alzate e se questo fotogramma le sta
+        // bene. Prima di dipingere un solo pixel si passa dall'autocontrollo: uno shader che
+        // sbaglia non si ferma da solo, disegna semplicemente una panoramica storta.
+        var uniforms: GpuFrameUniforms? = null
+        var gpuColours = false
+        var gpuUploaded = false
+        if (gpu != null && !gpuOff) {
+            val sampled = if (fullResSampling) full else null
+            val texture = sampled ?: frame.bitmap
+            val limit = gpu.renderer.maxTextureSize
+            val fits = texture.width <= limit && texture.height <= limit
+            if (tuning.gpuPaint && !fits) {
+                gpuGiveUp(
+                    "la sorgente ${texture.width}×${texture.height} px non entra in una texture da $limit px",
+                )
+            } else {
+                if (tuning.gpuPaint) {
+                    val uploadStartedAt = System.currentTimeMillis()
+                    gpuUploaded = withContext(gpu.dispatcher) { gpu.renderer.uploadSource(texture) }
+                    gpuUploadMillis += System.currentTimeMillis() - uploadStartedAt
+                    if (!gpuUploaded) gpuGiveUp("la sorgente non si è caricata sulla scheda")
+                }
+                if (!gpuOff) {
+                    gpuColours = gpuUploaded
+                    val candidate = gpuUniforms(frame, placement, correction, lens, canvas, warp, sampled)
+                    val complaint = gpuVerify(
+                        gpu, candidate, frame, placement, correction, lens, canvas, warp, full,
+                        withColour = gpuColours,
+                        centreColumn = c0 + bw / 2,
+                        centreRow = (row0 + bh / 2).coerceIn(0, canvas.height - 1),
+                    )
+                    if (complaint != null) gpuGiveUp(complaint) else uniforms = candidate
+                }
+            }
+        }
+        // Da qui in avanti è una fotografia della decisione presa: o c'è la scheda con i suoi
+        // numeri, o non c'è e si va di CPU. Non cambia più per tutto il fotogramma.
+        val gpuPlan = uniforms
+
         step(0.05f, "cerco dove cade sulla tela")
         val recogniseStartedAt = System.currentTimeMillis()
         val newW = ByteArray(count)
-        parallelRows(row0, bh, 1) { by, _ ->
+        var recognisedOnGpu = false
+        if (gpuPlan != null && gpu != null && tuning.gpuRecognise) {
+            // Solo i pesi: la ricognizione di colori non sa che farsene, e non leggere la
+            // texture è la metà del lavoro in meno.
+            recognisedOnGpu = gpuBands(gpu, gpuPlan, c0, row0, bw, bh, weightOnly = true) { band, bandRow, rows ->
+                val mergeStartedAt = System.currentTimeMillis()
+                for (r in 0 until rows) {
+                    val from = r * bw
+                    val to = (bandRow + r) * bw
+                    for (bx in 0 until bw) newW[to + bx] = (band[from + bx] ushr 24).toByte()
+                }
+                gpuMergeMillis += System.currentTimeMillis() - mergeStartedAt
+                true
+            }
+            if (!recognisedOnGpu) gpuGiveUp("la ricognizione non è tornata dalla scheda")
+        }
+        if (!recognisedOnGpu) parallelRows(row0, bh, 1) { by, _ ->
             // Un proiettore per riga: appartiene a questo filo e a nessun altro, e a fronte
             // dei pixel della riga la sua costruzione non si misura.
             val projector = FrameProjector(placement, lens, warp)
@@ -1844,10 +2192,50 @@ class PanoramaStitcher(
 
         step(0.6f, "dipingo ${bw}×$bh px")
         val paintStartedAt = System.currentTimeMillis()
+        var paintedOnGpu = false
+        if (gpuPlan != null && gpu != null && tuning.gpuPaint && gpuColours) {
+            // La scheda disegna la fascia già corretta e già sfumata; alla CPU resta il
+            // riporto, che è una copia condizionata — nessuna trigonometria, nessun
+            // campionamento. Le stesse righe, gli stessi lavoratori, la stessa parità della
+            // mappa dei possessori: dal punto di vista della tela non cambia niente.
+            paintedOnGpu = gpuBands(gpu, gpuPlan, c0, row0, bw, bh, weightOnly = false) { band, bandRow, rows ->
+                val mergeStartedAt = System.currentTimeMillis()
+                parallelRows(row0 + bandRow, rows, canvas.width) { r, rowPixels ->
+                    val by = bandRow + r
+                    val insideBlendRows = hasOverlap && by in sy0..sy1
+                    var touched = false
+                    var readRow = false
+                    val from = r * bw
+                    for (bx in 0 until bw) {
+                        if (insideBlendRows && bx in sx0..sx1) continue
+                        val weightByte = newW[by * bw + bx].toInt() and 0xFF
+                        if (weightByte == 0) continue
+                        val packed = band[from + bx]
+                        if (packed ushr 24 == 0) continue
+                        if (!readRow) {
+                            readRow = true
+                            output.getPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
+                        }
+                        rowPixels[columns[bx]] = 0xFF000000.toInt() or (packed and 0xFFFFFF)
+                        touched = true
+                        val index = ownerIndex(canvas.width, row0 + by, columns[bx])
+                        if (weightByte > (ownerWeight[index].toInt() and 0xFF)) {
+                            ownerWeight[index] = weightByte.toByte()
+                        }
+                    }
+                    if (touched) {
+                        output.setPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
+                    }
+                }
+                gpuMergeMillis += System.currentTimeMillis() - mergeStartedAt
+                true
+            }
+            if (!paintedOnGpu) gpuGiveUp("la pittura non è tornata dalla scheda")
+        }
         // Il resto del fotogramma: pittura diretta riga per riga, tutte le CPU insieme.
         // Fuori dalla sotto-finestra ogni pixel nuovo cade su tela vuota per costruzione,
         // quindi non c'è niente da fondere e le righe sono indipendenti.
-        parallelRows(row0, bh, canvas.width) { by, rowPixels ->
+        if (!paintedOnGpu) parallelRows(row0, bh, canvas.width) { by, rowPixels ->
             val insideBlendRows = hasOverlap && by in sy0..sy1
             var touched = false
             var readRow = false
@@ -1884,12 +2272,17 @@ class PanoramaStitcher(
 
         paintMillis += System.currentTimeMillis() - paintStartedAt
 
+        // La memoria della scheda è poca: la sorgente di questo fotogramma se ne va subito.
+        if (gpuUploaded && gpu != null) withContext(gpu.dispatcher) { gpu.renderer.dropSource() }
+
         detail?.add(
-            "%s: finestra %d×%d px · fusione su %s%s%s".format(
+            "%s: finestra %d×%d px · fusione su %s%s%s · %s".format(
                 frame.label, bw, bh,
                 if (hasOverlap) "${sx1 - sx0 + 1}×${sy1 - sy0 + 1} px" else "niente (primo tocco di tela)",
                 if (seamNote.isEmpty()) "" else " · $seamNote",
                 warp?.let { " · deformazione locale fino a %.1f px".format(it.worstShiftPixels) }.orEmpty(),
+                "ricognizione su ${if (recognisedOnGpu) "GPU" else "CPU"}, " +
+                    "pittura su ${if (paintedOnGpu) "GPU" else "CPU"}",
             ),
         )
     }
@@ -3005,6 +3398,35 @@ class PanoramaStitcher(
 
         /** Una riga con più buchi di così è già dentro il foro, non sul suo bordo. */
         const val MAX_EMPTY_FRACTION = 0.10f
+
+        /**
+         * Quanto grande è una fascia disegnata dalla scheda, in pixel.
+         *
+         * Due milioni sono otto megabyte di vettore, riusato per tutte le fasce di un
+         * fotogramma: abbastanza da ammortizzare il costo fisso di ogni disegno, abbastanza
+         * poco da non pesare accanto a una tela che di suo ne occupa quattrocentosessanta.
+         * E questo vettore è heap Java, non memoria nativa come il Bitmap: è il posto dove
+         * si sta più stretti.
+         */
+        const val GPU_BAND_PIXELS = 2 shl 20
+
+        /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
+        const val GPU_CHECK_SIDE = 96
+        const val GPU_CHECK_STEP = 7
+
+        /** Sotto questi campioni di colore il confronto non ha abbastanza da dire. */
+        const val GPU_CHECK_MIN_COLOUR = 12
+
+        /**
+         * Le tolleranze dell'autocontrollo, in livelli su 255.
+         *
+         * Il peso è pura geometria e deve tornare quasi esatto: due strade che proiettano
+         * uguale danno pesi uguali, e la differenza residua è solo l'arrotondamento. Il
+         * colore ha in più l'interpolazione bilineare dell'hardware, che lavora in virgola
+         * fissa: su un bordo netto qualche livello di scarto è normale, decine no.
+         */
+        const val GPU_MAX_WEIGHT_GAP = 3.0
+        const val GPU_MAX_COLOUR_GAP = 6.0
     }
 }
 

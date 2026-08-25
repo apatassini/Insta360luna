@@ -1779,6 +1779,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             levelHorizon = stitch.levelHorizon,
             cameraPitchDegrees = stitch.cameraPitchDegrees,
+            gpuRecognise = stitch.gpuRecognise,
+            gpuPaint = stitch.gpuPaint,
         )
     }
 

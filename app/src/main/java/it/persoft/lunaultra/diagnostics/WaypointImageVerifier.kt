@@ -89,7 +89,7 @@ object WaypointImageVerifier {
         val confidence = (inlierRatio * 0.58f + support * 0.42f).coerceIn(0f, 1f)
         val displacement = hypot(consensus.dx, consensus.dy)
         val verdict = when {
-            consensus.inliers.size < MIN_MATCHES -> PositionVerdict.WRONG
+            consensus.inliers.size < MIN_CONSENSUS -> PositionVerdict.WRONG
             confidence < MIN_CONFIDENCE -> PositionVerdict.UNCERTAIN
             displacement <= CORRECT_RADIUS_PX -> PositionVerdict.CORRECT
             displacement <= OVERLAP_RADIUS_PX -> PositionVerdict.SHIFTED
@@ -479,6 +479,18 @@ object WaypointImageVerifier {
     private const val MAX_FEATURES = 180
     private const val MIN_FEATURES = 10
     private const val MIN_MATCHES = 5
+
+    /**
+     * Quanti punti devono sopravvivere al consenso geometrico perché la misura conti.
+     *
+     * Non può essere lo stesso numero delle corrispondenze candidate: RANSAC ne scarta
+     * sempre qualcuna, quindi chiedere cinque superstiti su cinque candidati vuol dire
+     * chiedere che nessuno sbagli mai — e una scena viva, dove l'acqua si muove e la luce
+     * cambia, un candidato sbagliato ce l'ha sempre. Tre punti che concordano sulla stessa
+     * traslazione entro [RANSAC_RADIUS_PX] non sono una coincidenza; il resto lo dice la
+     * confidenza, che pesa insieme la frazione di concordi e quanti sono in assoluto.
+     */
+    private const val MIN_CONSENSUS = 3
     private const val GOOD_SUPPORT = 14
     private const val MAX_HAMMING = 82
     private const val RATIO_TEST = 0.78f

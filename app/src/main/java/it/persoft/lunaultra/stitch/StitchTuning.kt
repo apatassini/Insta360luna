@@ -101,6 +101,26 @@ data class StitchTuning(
      * Zero significa «misurala dall'orizzonte».
      */
     val cameraPitchDegrees: Float = 0f,
+
+    /**
+     * La ricognizione — dove cade ogni pixel della tela e quanto pesa — sulla scheda grafica.
+     *
+     * È il passo più sicuro da spostare: non legge la foto, non produce colori, calcola solo
+     * geometria e sfumatura. Se lo shader sbaglia, sbagliano i pesi, e l'autocontrollo se ne
+     * accorge subito confrontandoli con quelli della CPU.
+     */
+    val gpuRecognise: Boolean = false,
+
+    /**
+     * La pittura — proiezione, campionamento bilineare e fotometria — sulla scheda grafica.
+     *
+     * È il passo che vale di più: il campionamento bilineare, che sulla CPU costa quattro
+     * letture e sei moltiplicazioni per pixel, sull'hardware delle texture non costa niente.
+     * Ha però due condizioni: che l'originale entri in una texture, e che la scheda dica le
+     * stesse cose della CPU sui pixel di prova. Se una delle due manca, si dipinge in CPU e
+     * il log dice perché.
+     */
+    val gpuPaint: Boolean = false,
 )
 
 /** Una ricetta della modalità test: lettera per il nome del file, titolo per il log. */

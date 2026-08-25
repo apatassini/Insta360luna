@@ -171,6 +171,17 @@ data class StitchSettings(
 
     /** Inclinazione della camera imposta a mano, in gradi. Zero = misurala dall'orizzonte. */
     val cameraPitchDegrees: Float = 0f,
+
+    /**
+     * Ricognizione (dove cade ogni pixel, quanto pesa) sulla scheda grafica.
+     *
+     * Spenta di serie: la GPU si accende una manopola alla volta, e ogni unione dice nel log
+     * quale strada ha preso davvero e quanto ci ha messo. Sotto c'è sempre la CPU.
+     */
+    val gpuRecognise: Boolean = false,
+
+    /** Pittura (proiezione, campionamento, fotometria) sulla scheda grafica. */
+    val gpuPaint: Boolean = false,
 )
 
 @Serializable

@@ -240,7 +240,20 @@ class TimelapseEngine(
                 initialJpeg = actualStartJpeg,
             )
             if (!startAligned) {
-                throw IllegalStateException("Punto 1 non allineato visivamente: registrazione non avviata")
+                // Il controllo visivo è una rifinitura, non un permesso di registrare.
+                //
+                // Il gimbal qui è già sul bersaglio — l'errore meccanico è nel log, e vale
+                // centesimi di grado. Se l'immagine non lo conferma il motivo è quasi sempre
+                // la scena, non la posizione: fra quando il punto è stato memorizzato e adesso
+                // l'acqua si è mossa, la luce è cambiata, qualcuno è passato davanti. Rifiutare
+                // di partire per questo vuol dire che una sequenza perfettamente puntata non si
+                // gira, ed è esattamente quello che succedeva.
+                log.warn(
+                    "RUN $traceId · PUNTO 1 NON CONFERMATO DALL'IMMAGINE · PARTO LO STESSO",
+                    targetDetail(first, gimbal.position.value) +
+                        "\nIl gimbal è sul bersaglio: si registra con le coordinate, " +
+                        "senza aspettare la conferma visiva.",
+                )
             }
 
             when (sequence.mode) {
@@ -350,7 +363,15 @@ class TimelapseEngine(
                 deadlineNanos = legDeadline,
             )
             if (!aligned) {
-                throw IllegalStateException("${to.name} non allineato visivamente entro il tempo impostato")
+                // A maggior ragione qui: la registrazione è già in corso da minuti. Fermarla
+                // perché una miniatura non combacia butterebbe via tutta la ripresa fatta
+                // fin qui, per un difetto che al massimo vale qualche pixel di inquadratura.
+                log.warn(
+                    "RUN $traceId · ${to.name} NON CONFERMATO DALL'IMMAGINE · PROSEGUO",
+                    targetDetail(to, gimbal.position.value) +
+                        "\nSi prosegue con le coordinate stimate: interrompere qui vorrebbe " +
+                        "dire buttare via la ripresa già registrata.",
+                )
             }
 
             // Se la correzione finisce in anticipo, resta fermo fino alla durata esatta del tratto.
@@ -943,7 +964,16 @@ class TimelapseEngine(
         const val MIN_APPROACH_SECONDS = 1f
         const val PRE_RECORD_SETTLE_MS = 500L
         const val MAX_VISUAL_ATTEMPTS = 5
-        const val MIN_CORRECTION_INLIERS = 5
+        /**
+         * Quanti punti concordi servono per fidarsi della direzione della correzione.
+         *
+         * Erano cinque, cioè lo stesso numero che serve per avere delle *corrispondenze
+         * candidate*: e siccome il consenso geometrico ne scarta sempre qualcuna, con cinque
+         * candidati il consenso non poteva arrivarci mai. Tre punti che concordano sulla
+         * stessa traslazione entro pochi pixel non sono una coincidenza — e la confidenza
+         * minima resta lì a fare il secondo controllo.
+         */
+        const val MIN_CORRECTION_INLIERS = 3
         const val MIN_CORRECTION_CONFIDENCE = 0.30f
         const val MIN_CORRECTION_REMAINING_MS = 420L
         const val VISUAL_SETTLE_MS = 260L

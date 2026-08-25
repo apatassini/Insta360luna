@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
@@ -139,6 +140,9 @@ object LunaIcons {
     val Settings: ImageVector = Icons.Filled.Settings
     val Tune: ImageVector = Icons.Filled.Tune
     val Diagnostics: ImageVector = Icons.Filled.BugReport
+
+    /** La scheda grafica: i passi dell'unione che si possono spostare sulla GPU. */
+    val Gpu: ImageVector = Icons.Filled.Memory
 
     // anteprima
     val Grid: ImageVector = Icons.Filled.GridOn

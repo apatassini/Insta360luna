@@ -169,6 +169,13 @@ class PanoramaCanvas(
 
     private val topY = verticalPixel(topLatitude)
 
+    /** La longitudine da cui partono le colonne: la scheda grafica ricalcola da qui. */
+    val startLongitudeDegrees: Float get() = centerPanDegrees - horizontalDegrees / 2f
+
+    /** Il raggio del cilindro e l'origine verticale, per chi rifà la mappa riga↔latitudine. */
+    val verticalRadius: Float get() = radius
+    val topPixel: Float get() = topY
+
     val width: Int = max(1, (horizontalDegrees * pixelsPerDegree).toInt())
     val height: Int = max(1, (topY - verticalPixel(bottomLatitude)).toInt())
 
@@ -587,6 +594,14 @@ class LocalWarp private constructor(
     /** Lo spostamento più grande del campo, in pixel: serve solo al racconto nel log. */
     val worstShiftPixels: Float,
 ) {
+    /**
+     * I nodi in fila — dx, dy, dx, dy… — per chi deve passarli altrove, per esempio alla
+     * scheda grafica, che il campo lo interpola per conto suo con la stessa formula.
+     */
+    fun interleaved(): FloatArray = FloatArray(dx.size * 2) { i ->
+        if (i % 2 == 0) dx[i / 2] else dy[i / 2]
+    }
+
     fun shiftX(x: Float, y: Float): Float = sample(dx, x, y)
     fun shiftY(x: Float, y: Float): Float = sample(dy, x, y)
 

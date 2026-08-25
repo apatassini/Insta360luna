@@ -447,6 +447,32 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "nuvole o in controluce nessun punto arriva al 95%, e restare senza " +
                         "significherebbe spegnere tutta la rifinitura insieme.",
                 )
+
+                Text("Scheda grafica")
+                ToggleRow(
+                    title = "Ricognizione su GPU",
+                    subtitle = "Dove cade ogni pixel della tela e quanto pesa: solo geometria, " +
+                        "niente colori. È il passo più sicuro da spostare",
+                    checked = settings.stitch.gpuRecognise,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(gpuRecognise = on) } },
+                    icon = LunaIcons.Gpu,
+                )
+                ToggleRow(
+                    title = "Pittura su GPU",
+                    subtitle = "Proiezione, campionamento e fotometria: è il passo che pesa di " +
+                        "più, ed è quello per cui una scheda grafica esiste",
+                    checked = settings.stitch.gpuPaint,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(gpuPaint = on) } },
+                    icon = LunaIcons.Gpu,
+                )
+                Hint(
+                    "Una alla volta, per capire quale porta cosa. Sotto c'è sempre la CPU: se il " +
+                        "contesto grafico non si apre, se l'originale non entra in una texture o " +
+                        "se la scheda non dice le stesse cose della CPU sul riquadro di prova, " +
+                        "l'unione continua com'era e nel log compare il motivo. La scheda di fine " +
+                        "unione riporta sempre «ricognizione su GPU/CPU, pittura su GPU/CPU», " +
+                        "l'autocontrollo con i suoi scarti, e i tempi divisi fra disegno e riporto.",
+                )
             }
         }
 

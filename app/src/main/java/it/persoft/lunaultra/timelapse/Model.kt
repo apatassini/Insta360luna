@@ -102,6 +102,19 @@ data class TimelapseSequence(
     val panoramaHorizontalDegrees: Float = 180f,
     val panoramaVerticalDegrees: Float = 0f,
     val panoramaOverlapPercent: Int = 30,
+
+    /**
+     * Scatti a 12 MP invece che a piena risoluzione.
+     *
+     * Serve alle panoramiche di taratura, dove le foto non si guardano: si misurano. L'unione
+     * lavora comunque a 3200 px sul lato lungo, quindi 4000×3000 sono già più di quanto le serva
+     * per riconoscere i dettagli e ricavare gli angoli — mentre da scaricare sono un terzo, e il
+     * Wi-Fi della camera è la parte lenta di tutto il procedimento.
+     *
+     * Il rapporto fotografico non cambia (4:3 come a piena risoluzione), quindi non cambia il
+     * campo visivo: la geometria misurata è la stessa, solo con meno pixel dentro.
+     */
+    val panoramaLowResolution: Boolean = false,
     /**
      * Unire gli scatti appena la panoramica finisce, senza doverlo chiedere.
      *

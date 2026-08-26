@@ -32,7 +32,7 @@ object LunaOptics {
 
     fun fieldOfView(zoomScale: Int, aspect: PhotoFrameAspect): LensFieldOfView {
         val zoom = zoomScale.takeIf { it in zoomStops } ?: 1
-        val equivalentFocal = 20f * zoom
+        val equivalentFocal = MEASURED_EQUIVALENT_FOCAL_MM * zoom
         // La focale equivalente è riferita alla diagonale full-frame (43,27 mm). Ricaviamo
         // larghezza e altezza equivalenti conservando la diagonale per il rapporto scelto.
         val ratio = aspect.width / aspect.height
@@ -56,6 +56,31 @@ object LunaOptics {
 
     private fun degrees(radians: Double): Float = (radians * 180.0 / PI).toFloat()
     private const val FULL_FRAME_DIAGONAL_MM = 43.266f
+
+    /**
+     * La focale equivalente **misurata**, non quella di catalogo.
+     *
+     * Il catalogo dice 20 mm, che in rapporto 4:3 darebbero 81,74° di campo orizzontale. È il
+     * numero che ho usato per mesi, ed è sbagliato di quasi il sei per cento.
+     *
+     * La misura viene dall'accelerometro che la camera scrive in coda a ogni JPEG, dopo la fine
+     * del file. Fotografa la gravità, quindi dà l'inclinazione della camera in **assoluto**: fra
+     * due scatti della stessa colonna l'angolo fra i due vettori gravità è l'angolo vero di cui
+     * la camera si è girata, senza passare da nessuna ipotesi ottica. Su nove foto quei vettori
+     * hanno modulo costante entro il 4‰ e, a parità di inclinazione, si somigliano entro 0,17°:
+     * lo strumento è buono.
+     *
+     * Con quell'angolo per vero, si cerca la focale che fa quadrare i dettagli abbinati fra le
+     * stesse due foto. Il minimo è netto e vale 77,07° di campo orizzontale su tre coppie
+     * indipendenti, con scarto 0,28°; a 81,74° lo scarto sale a 3,1°.
+     *
+     * Perché era invisibile prima: focale e rotazione si compensano a vicenda. Con la lente
+     * dichiarata larga il 6% in più, le foto combaciano lo stesso — basta credere che il gimbal
+     * si sia mosso il 6% in più di quanto ha fatto. Le due bugie si tengono per mano e la
+     * panoramica esce comunque giusta. A separarle serve un righello esterno, e la gravità è
+     * l'unico che abbiamo.
+     */
+    const val MEASURED_EQUIVALENT_FOCAL_MM = 21.73f
 }
 
 data class PanoramaPlan(

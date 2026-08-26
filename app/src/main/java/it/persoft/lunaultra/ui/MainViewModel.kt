@@ -1290,6 +1290,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Dove guardava il gimbal prima della panoramica: a corsa finita ci si torna. */
     private var panoramaReturnPosition: Pair<Float, Float>? = null
 
+    /** La risoluzione che la camera aveva prima di abbassarla per una panoramica di taratura. */
+    private var photoSizeBeforePanorama: Int? = null
+
     /**
      * Riporta il gimbal all'inquadratura di prima della panoramica.
      *
@@ -1299,6 +1302,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * il loro autore ha deciso che finiscano.
      */
     private fun returnGimbalAfterPanorama() {
+        restorePhotoSizeAfterPanorama()
         val target = panoramaReturnPosition ?: return
         panoramaReturnPosition = null
         if (!sequence.value.waypoints.all { it.generatedByPanoramaPlanner }) return
@@ -1315,6 +1319,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
         }
     }
+
+    /**
+     * Rimette la risoluzione che c'era prima della panoramica.
+     *
+     * Abbassarla e lasciarla abbassata sarebbe il modo di far scattare a dodici megapixel una
+     * foto che si voleva grande, e di scoprirlo dopo. Quindi la si ripristina appena la corsa
+     * finisce, dallo stesso punto in cui il gimbal torna all'inquadratura di partenza.
+     */
+    private fun restorePhotoSizeAfterPanorama() {
+        val previous = photoSizeBeforePanorama ?: return
+        photoSizeBeforePanorama = null
+        viewModelScope.launch {
+            container.commands.setPhotoSize(previous, useSizeId = photoSizeUsesSizeId)
+                .onSuccess {
+                    updatePhotoSettings { it.copy(photoSizeCode = previous) }
+                    container.log.info(
+                        "Risoluzione foto ripristinata: ${LunaProtocolCodes.PhotoSize.label(previous)}",
+                    )
+                }
+                .onFailure {
+                    container.log.warn(
+                        "Risoluzione foto non ripristinata: resta a " +
+                            LunaProtocolCodes.PhotoSize.label(LunaProtocolCodes.PhotoSize.STANDARD_12MP),
+                        it.message,
+                    )
+                }
+        }
+    }
+
+    fun setPanoramaLowResolution(enabled: Boolean) =
+        container.sequenceStore.update { it.copy(panoramaLowResolution = enabled) }
 
     /** Chiude la carta dell'unione: l'errore resta finché non lo si è letto. */
     fun clearStitchState() {
@@ -1346,6 +1381,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // inquadrato una scena non vuole ritrovarsi il gimbal puntato nell'ultimo angolo.
         panoramaReturnPosition = ptz.value.pan to ptz.value.tilt
         viewModelScope.launch {
+            // A dodici megapixel, quando servono i numeri e non i pixel: l'unione lavora
+            // comunque a 3200 px, e da scaricare sono un terzo.
+            val wanted = LunaProtocolCodes.PhotoSize.STANDARD_12MP
+            val current = settings.value.photo.photoSizeCode
+            if (sequence.value.panoramaLowResolution && current != wanted) {
+                container.commands.setPhotoSize(wanted, useSizeId = photoSizeUsesSizeId)
+                    .onSuccess {
+                        photoSizeBeforePanorama = current
+                        updatePhotoSettings { it.copy(photoSizeCode = wanted) }
+                        container.log.info(
+                            "Panoramica a bassa risoluzione: scatti a " +
+                                LunaProtocolCodes.PhotoSize.label(wanted) +
+                                " (si torna a ${LunaProtocolCodes.PhotoSize.label(current)} a fine corsa)",
+                        )
+                    }
+                    .onFailure {
+                        container.log.warn("Risoluzione non abbassata: si scatta com'era", it.message)
+                    }
+            }
             filesBeforePanorama = if (sequence.value.autoStitchPanorama) {
                 container.media.list().getOrElse { emptyList() }
             } else {

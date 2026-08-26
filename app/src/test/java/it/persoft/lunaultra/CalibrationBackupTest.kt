@@ -111,4 +111,39 @@ class CalibrationBackupTest {
         assertTrue(!vecchio.isValid)
         assertEquals("profilo di una versione precedente", vecchio.invalidReason)
     }
+
+    /**
+     * La correzione di scala deve arrivare fino ai gradi al secondo.
+     *
+     * Il campo esisteva già ma valeva solo per i profili vecchi, quelli dedotti dalle immagini:
+     * sui profili misurati a cronometro — cioè tutti quelli che contano — veniva ignorato, e
+     * scriverci dentro non cambiava niente. È il motivo per cui un gimbal che si muoveva del
+     * 31% in più di quanto gli si chiedeva non si poteva correggere senza toccare il codice.
+     */
+    @Test
+    fun `la correzione di scala cambia davvero i gradi al secondo`() {
+        val neutro = profile().copy(panAngularScale = 1f, tiltAngularScale = 1f)
+        val base = neutro.degreesRateAt(40f, panAxis = true)
+        assertEquals(24f, base, 1e-3f)
+
+        val corretto = neutro.withAngularScale(panFactor = 1.224f, tiltFactor = 1.312f)
+        assertEquals(24f * 1.224f, corretto.degreesRateAt(40f, panAxis = true), 1e-3f)
+        assertEquals(20f * 1.312f, corretto.degreesRateAt(40f, panAxis = false), 1e-3f)
+    }
+
+    /**
+     * Due correzioni di fila si compongono, non si sostituiscono.
+     *
+     * Il fattore arriva da una panoramica scattata *con* la correzione già addosso: dice quanto
+     * il comportamento di adesso è ancora sbagliato, non quanto lo era il profilo di fabbrica.
+     */
+    @Test
+    fun `le correzioni successive si moltiplicano fra loro`() {
+        val corretto = profile()
+            .copy(panAngularScale = 1f, tiltAngularScale = 1f)
+            .withAngularScale(1.2f, 1.3f)
+            .withAngularScale(1.05f, 0.95f)
+        assertEquals(1.26f, corretto.panAngularScale, 1e-4f)
+        assertEquals(1.235f, corretto.tiltAngularScale, 1e-4f)
+    }
 }

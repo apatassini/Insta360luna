@@ -333,6 +333,13 @@ class GimbalCalibrator(
             )
             returnHome("Ritorno all'inquadratura di partenza dopo la curva", 88, 90)
 
+            // La correzione di scala sopravvive alla ricalibrazione, e deve.
+            //
+            // Una calibrazione nuova rimisura tempi e impulsi — che erano già giusti — e li
+            // divide di nuovo per la corsa di catalogo, che è il numero sbagliato. Rifare la
+            // calibrazione quindi non ripara la scala: la ricostruisce identica. Buttare via la
+            // correzione qui vorrebbe dire tornare al 31% di errore ogni volta che si ritara.
+            val previous = store.state.value
             val profile = GimbalCalibrationBuilder.buildFromDegrees(
                 panCurve = panCurve.points,
                 tiltCurve = tiltCurve.points,
@@ -340,7 +347,7 @@ class GimbalCalibrator(
                 firmware = firmware,
                 panLimits = panLimits,
                 tiltLimits = tiltLimits,
-            )
+            ).withAngularScale(previous.panAngularScale, previous.tiltAngularScale)
             if (!profile.isValid) {
                 throw IllegalStateException(
                     "${profile.invalidReason ?: "profilo incompleto"} " +

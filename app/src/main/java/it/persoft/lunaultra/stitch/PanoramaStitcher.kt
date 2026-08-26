@@ -210,7 +210,9 @@ class PanoramaStitcher(
                             )
                         }
                         scaleNotes += ("Gimbal fuori taratura: si muove ×%.2f in verticale e ×%.2f in " +
-                            "orizzontale rispetto a quanto gli si chiede%s — angoli corretti " +
+                            "orizzontale rispetto a quanto gli si chiede%s — angoli corretti qui, ma " +
+                            "la sovrapposizione degli scatti resta più stretta di quella impostata " +
+                            "finché non lo si corregge anche nella taratura " +
                             "(misurato su %d giunzioni verticali e %d orizzontali)").format(
                             scale.tilt,
                             scale.pan,

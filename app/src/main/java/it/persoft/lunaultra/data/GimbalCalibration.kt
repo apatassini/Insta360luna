@@ -106,16 +106,28 @@ data class GimbalCalibrationProfile(
     val tiltLimits: GimbalAxisLimits = GimbalAxisLimits(),
 
     /**
-     * Correzione di scala misurata contro i fine corsa, alla fine della calibrazione.
+     * Di quanto la scala in gradi di questo profilo è sbagliata. 1 significa giusta.
      *
-     * Le immagini danno la **forma** della curva — quanto è più veloce il 100% del 10% — ma non
-     * la sua scala in gradi: quella nasce dal tempo impiegato a percorrere la corsa, che è una
-     * misura a cronometro e sbaglia di qualche punto percentuale. Un errore del 10% sulla scala
-     * non si nota su un arco di 45°, ma su 235° diventano 23° e il gimbal manca il fine corsa.
+     * Questo campo esisteva già, ma valeva solo per i profili vecchi — quelli dedotti dalle
+     * immagini — e sui profili misurati a cronometro veniva ignorato. Ignorarlo era un errore,
+     * e qui sotto c'è perché.
      *
-     * Il fine corsa invece è verità assoluta: la camera lo annuncia. Quindi lo si raggiunge, si
-     * confronta quanto il modello *credeva* di aver percorso con quanto c'era davvero da
-     * percorrere, e il rapporto finisce qui. 1 significa modello già giusto.
+     * La calibrazione misura due cose oneste: **quanti secondi** e **quanti impulsi** ci vogliono
+     * per attraversare un asse da un fine corsa all'altro. Poi divide per la corsa in gradi per
+     * ottenere i gradi al secondo — e quella corsa in gradi non la misura nessuno: sono i −57°…
+     * +235° del catalogo, scritti come costanti. Siccome il gimbal naviga a stima, integrando
+     * velocità per tempo senza nessun ritorno di posizione, un errore su quel numero finisce
+     * identico e proporzionale su **ogni** spostamento comandato.
+     *
+     * Su un esemplare vero è successo: le nove foto di una panoramica, misurate una contro
+     * l'altra riconoscendo i dettagli, dicevano che a 32° chiesti ne corrispondevano 42. Il
+     * verticale sbagliava del 31%, l'orizzontale del 22%. Il che implica una corsa reale di
+     * circa 232° in verticale e 357° in orizzontale — e quel 357 a un giro intero ci somiglia
+     * troppo per essere un caso.
+     *
+     * L'errore è puramente moltiplicativo, quindi si corregge senza rifare niente: si moltiplica
+     * qui, e tutta la scala si rimette a posto. Il fattore lo misura [PanoramaStitcher] a ogni
+     * unione, confrontando quanto le foto si sono spostate davvero con quanto era stato chiesto.
      */
     val panAngularScale: Float = 1f,
     val tiltAngularScale: Float = 1f,
@@ -267,8 +279,20 @@ data class GimbalCalibrationProfile(
         return sweepRate * abs(imageRateAt(intensityPercent, panAxis)) / referenceImageRate
     }
 
-    /** Gradi al secondo interpolati fra i punti misurati col cronometro; 0 se non ce ne sono. */
+    /**
+     * Gradi al secondo interpolati fra i punti misurati col cronometro; 0 se non ce ne sono.
+     *
+     * La correzione di scala si applica **qui**, che è il punto in cui i gradi nascono. Prima
+     * valeva solo per la strada vecchia, quella dedotta dalle immagini, e i profili nuovi — che
+     * sono tutti quelli che contano — la saltavano.
+     */
     fun degreesRateAt(intensityPercent: Float, panAxis: Boolean): Float {
+        val scale = (if (panAxis) panAngularScale else tiltAngularScale)
+            .coerceIn(MIN_ANGULAR_SCALE, MAX_ANGULAR_SCALE)
+        return rawDegreesRateAt(intensityPercent, panAxis) * scale
+    }
+
+    private fun rawDegreesRateAt(intensityPercent: Float, panAxis: Boolean): Float {
         val points = responsePoints
             .filter { it.degreesPerSecond(panAxis) > 0f }
             .sortedBy(GimbalResponsePoint::intensityPercent)
@@ -293,6 +317,19 @@ data class GimbalCalibrationProfile(
         angularRateAt(fastestCommandPercent(panAxis).toFloat(), panAxis)
 
     fun limitsFor(panAxis: Boolean): GimbalAxisLimits = if (panAxis) panLimits else tiltLimits
+
+    /**
+     * Applica una correzione di scala misurata, componendola con quella che c'è già.
+     *
+     * Si compone invece di sostituire perché il fattore arriva da una panoramica scattata **con**
+     * la correzione corrente addosso: dice di quanto il comportamento di adesso è ancora
+     * sbagliato, non di quanto lo era il profilo di fabbrica. Applicarlo due volte, o
+     * sostituirlo, vorrebbe dire sbagliare la seconda correzione di tutta la prima.
+     */
+    fun withAngularScale(panFactor: Float, tiltFactor: Float): GimbalCalibrationProfile = copy(
+        panAngularScale = (panAngularScale * panFactor).coerceIn(MIN_ANGULAR_SCALE, MAX_ANGULAR_SCALE),
+        tiltAngularScale = (tiltAngularScale * tiltFactor).coerceIn(MIN_ANGULAR_SCALE, MAX_ANGULAR_SCALE),
+    )
 
     /** Inversa della curva: trasforma la velocità richiesta nell'intensità da inviare. */
     fun commandForMotionFraction(desiredFraction: Float, panAxis: Boolean): Float {

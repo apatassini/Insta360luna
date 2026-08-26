@@ -206,7 +206,7 @@ class PanoramaStitcher(
          * quello che la cucitura avrebbe usato da sola. Se nessuno la passa, non succede niente:
          * è esattamente la cucitura di prima.
          */
-        onPreview: (suspend (Preview) -> PanoramaView?)? = null,
+        onPreview: (suspend (PanoramaPreview) -> PanoramaView?)? = null,
     ): Result<StitchOutcome> = withContext(Dispatchers.Default) {
         runCatching {
             require(shots.size >= 2) { "Servono almeno due scatti per unire una panoramica" }
@@ -584,7 +584,7 @@ class PanoramaStitcher(
                     )
                 }
                 val chosen = onPreview(
-                    Preview(
+                    PreviewPainter(
                         frames = frames,
                         placements = placements,
                         corrections = previewCorrections,
@@ -1042,17 +1042,15 @@ class PanoramaStitcher(
      * Quello che invece c'e` e` la fotometria, perche` senza guadagni una panoramica a
      * scacchiera di esposizioni non si riesce a guardare.
      */
-    inner class Preview internal constructor(
+    private inner class PreviewPainter(
         private val frames: List<Frame>,
         private val placements: List<FramePlacement>,
         private val corrections: List<FrameCorrection>,
         private val lens: PinholeLens,
         private val fillNadir: Boolean,
-        /** Il punto di vista di partenza: quello che la cucitura userebbe da sola. */
-        val suggested: PanoramaView,
-    ) {
-        /** Quanto e` deformata la cima con questo punto di vista, per dirlo mentre si sceglie. */
-        fun deformation(view: PanoramaView): PreviewShape {
+        override val suggested: PanoramaView,
+    ) : PanoramaPreview {
+        override fun deformation(view: PanoramaView): PreviewShape {
             val turned = placements.map { it.seenFrom(view) }
             val projection = view.projection ?: projectionFor(turned, lens, fillNadir)
             val half = lens.verticalFovDegrees / 2f
@@ -1070,7 +1068,8 @@ class PanoramaStitcher(
             )
         }
 
-        suspend fun paint(view: PanoramaView, longSide: Int): PreviewImage = withContext(Dispatchers.Default) {
+        override suspend fun paint(view: PanoramaView, longSide: Int): PreviewImage =
+            withContext(Dispatchers.Default) {
             val turned = placements.map { it.seenFrom(view) }
             val projection = view.projection ?: projectionFor(turned, lens, fillNadir)
             val canvas = PanoramaCanvas.covering(
@@ -1126,10 +1125,7 @@ class PanoramaStitcher(
         }
     }
 
-    // Interna e non privata per un motivo solo: l'anteprima della fase intermedia se la fa
-    // passare nel costruttore, e in Kotlin — al contrario di Java — la classe esterna non puo`
-    // chiamare un costruttore privato della sua annidata. Fuori dal modulo resta invisibile.
-    internal class Frame(
+    private class Frame(
         val bitmap: Bitmap,
         val label: String,
         val file: java.io.File? = null,
@@ -2022,7 +2018,7 @@ class PanoramaStitcher(
      * l'esposizione varia da scatto a scatto, la caduta di luce ai bordi è dell'obiettivo
      * ed è uguale per tutti.
      */
-    internal class FrameCorrection(
+    private class FrameCorrection(
         val gain: Float,
         val vignetteA: Float,
         val vignetteB: Float,
@@ -5796,6 +5792,27 @@ private class SourceBlock(private val bitmap: Bitmap) {
         /** Quanto blocco si tiene alle spalle: la scansione va avanti, non indietro. */
         const val BLOCK_LOOKBEHIND = 4
     }
+}
+
+/**
+ * L'anteprima della fase intermedia, vista da fuori.
+ *
+ * Chi la riceve non ha bisogno di sapere com'e` fatta dentro — fotogrammi, correzioni
+ * fotometriche, obiettivo sono affari dello stitcher e restano suoi. Gli serve poter chiedere
+ * due cose: disegnami la panoramica vista da qui, e dimmi che forma prende. Un'interfaccia
+ * dice esattamente quello, e permette alle parti interne di restare private davvero invece di
+ * diventare interne una dopo l'altra per farsi passare in un costruttore.
+ */
+interface PanoramaPreview {
+
+    /** Il punto di vista di partenza: quello che la cucitura userebbe da sola. */
+    val suggested: PanoramaView
+
+    /** Che forma prende la panoramica cosi`, senza disegnarla: costa niente e si legge subito. */
+    fun deformation(view: PanoramaView): PreviewShape
+
+    /** La panoramica dipinta in piccolo da questo punto di vista, con quanti gradi copre. */
+    suspend fun paint(view: PanoramaView, longSide: Int): PreviewImage
 }
 
 /**

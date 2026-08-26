@@ -325,7 +325,7 @@ class PanoramaStitchJob(
         tuning: StitchTuning = StitchTuning(),
         testMode: Boolean = false,
         /** La fase intermedia: scegliere da dove guardare la panoramica, guardandola. */
-        onPreview: (suspend (PanoramaStitcher.Preview) -> PanoramaView?)? = null,
+        onPreview: (suspend (PanoramaPreview) -> PanoramaView?)? = null,
         onProgress: (Float, String) -> Unit,
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
@@ -408,7 +408,7 @@ class PanoramaStitchJob(
         /** Con che taratura erano state scattate queste foto; null se non lo sappiamo. */
         scaleAtShot: Pair<Float, Float>? = null,
         /** La fase intermedia, se c'è chi la sa mostrare. Senza, la cucitura va dritta. */
-        onPreview: (suspend (PanoramaStitcher.Preview) -> PanoramaView?)? = null,
+        onPreview: (suspend (PanoramaPreview) -> PanoramaView?)? = null,
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
         // La memoria si misura adesso, non all'avvio: quanta ne sia libera dipende da cosa

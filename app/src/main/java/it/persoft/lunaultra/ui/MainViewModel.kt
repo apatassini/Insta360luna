@@ -21,7 +21,7 @@ import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
-import it.persoft.lunaultra.stitch.PanoramaStitcher
+import it.persoft.lunaultra.stitch.PanoramaPreview
 import it.persoft.lunaultra.stitch.PanoramaView
 import it.persoft.lunaultra.stitch.PreviewImage
 import it.persoft.lunaultra.stitch.PreviewShape
@@ -1321,7 +1321,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pointOfViewShape = MutableStateFlow<PreviewShape?>(null)
     val pointOfViewShape: StateFlow<PreviewShape?> = _pointOfViewShape
 
-    private var pointOfViewPainter: PanoramaStitcher.Preview? = null
+    private var pointOfViewPainter: PanoramaPreview? = null
     private var pointOfViewAnswer: CompletableDeferred<PanoramaView?>? = null
     private var pointOfViewJob: Job? = null
 
@@ -1333,7 +1333,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * chiudersi da sola, altrimenti resta lì a chiedere una risposta per una panoramica che non
      * esiste più.
      */
-    private suspend fun choosePointOfView(preview: PanoramaStitcher.Preview): PanoramaView? {
+    private suspend fun choosePointOfView(preview: PanoramaPreview): PanoramaView? {
         val answer = CompletableDeferred<PanoramaView?>()
         pointOfViewPainter = preview
         pointOfViewAnswer = answer

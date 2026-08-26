@@ -2267,10 +2267,20 @@ class PanoramaStitcher(
         val horizontal = measured.filter { !it.first }.map { it.second to it.third }
         if (vertical.isEmpty() && horizontal.isEmpty()) return@coroutineScope null
 
-        // Una misura sola non fa una taratura: due che si somigliano sì, e una schiacciante
-        // pure. Sotto quella soglia si preferisce non toccare niente che sbagliare in blocco.
-        fun trustworthy(values: List<Pair<Float, Float>>): Boolean =
-            values.size >= 2 || values.any { it.second >= SCALE_STRONG_INLIERS }
+        // Quando fidarsi di un asse.
+        //
+        // Una misura sola non fa una taratura — a meno che a votarla non siano stati in tanti.
+        // E due misure che dicono cose diverse non fanno una taratura neanche loro: se il
+        // fattore trovato su una giunzione e quello trovato sull'altra non si somigliano, non
+        // è una scala storta, è un abbinamento sbagliato, e riscalare tutto sarebbe peggio che
+        // lasciare stare. Sulle nove foto le cinque giunzioni verticali stanno fra 1,31 e 1,37
+        // e le due orizzontali fra 1,22 e 1,25: si somigliano, e infatti sono vere.
+        fun trustworthy(values: List<Pair<Float, Float>>): Boolean {
+            if (values.isEmpty()) return false
+            if (values.size == 1) return values[0].second >= SCALE_STRONG_INLIERS
+            val ratios = values.map { it.first }
+            return ratios.max() - ratios.min() <= SCALE_MAX_DISAGREEMENT
+        }
 
         val tilt = if (trustworthy(vertical)) weightedMedian(vertical) else null
         val pan = if (trustworthy(horizontal)) weightedMedian(horizontal) else null
@@ -4528,6 +4538,9 @@ class PanoramaStitcher(
 
         /** Una misura sola vale per due, se a votarla sono stati in tanti. */
         const val SCALE_STRONG_INLIERS = 20f
+
+        /** Oltre questo scarto fra una giunzione e l'altra non è una scala storta: è un errore. */
+        const val SCALE_MAX_DISAGREEMENT = 0.15f
 
         /** Sotto questo scarto il gimbal è tarato: non si tocca niente. */
         const val SCALE_DEADBAND = 0.02f

@@ -324,6 +324,8 @@ class PanoramaStitchJob(
         shotAtMs: Long = System.currentTimeMillis(),
         tuning: StitchTuning = StitchTuning(),
         testMode: Boolean = false,
+        /** La fase intermedia: scegliere da dove guardare la panoramica, guardandola. */
+        onPreview: (suspend (PanoramaStitcher.Preview) -> PanoramaView?)? = null,
         onProgress: (Float, String) -> Unit,
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
@@ -363,6 +365,7 @@ class PanoramaStitchJob(
                         shotAtMs = shotAtMs,
                         tuning = tuning,
                         scaleAtShot = ordered.first().second!!.let { it.panScale to it.tiltScale },
+                        onPreview = onPreview,
                         onProgress = onProgress,
                     )
                 }
@@ -386,7 +389,10 @@ class PanoramaStitchJob(
             if (testMode) {
                 stitchTestVariants(shots, horizontalFovDegrees, wideSearch = true, shotAtMs = shotAtMs, base = tuning, onProgress = onProgress)
             } else {
-                stitchAndSave(shots, horizontalFovDegrees, fillNadir = false, wideSearch = true, shotAtMs = shotAtMs, tuning = tuning, onProgress = onProgress)
+                stitchAndSave(
+                    shots, horizontalFovDegrees, fillNadir = false, wideSearch = true,
+                    shotAtMs = shotAtMs, tuning = tuning, onPreview = onPreview, onProgress = onProgress,
+                )
             }
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
     }
@@ -401,12 +407,16 @@ class PanoramaStitchJob(
         tuning: StitchTuning = StitchTuning(),
         /** Con che taratura erano state scattate queste foto; null se non lo sappiamo. */
         scaleAtShot: Pair<Float, Float>? = null,
+        /** La fase intermedia, se c'è chi la sa mostrare. Senza, la cucitura va dritta. */
+        onPreview: (suspend (PanoramaStitcher.Preview) -> PanoramaView?)? = null,
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
         // La memoria si misura adesso, non all'avvio: quanta ne sia libera dipende da cosa
         // stava facendo il telefono un minuto fa.
         val stitcher = PanoramaStitcher(onProgress, tuning, MemoryBudget.measure(context))
-        val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir, wideSearch).getOrThrow()
+        val outcome = stitcher
+            .stitch(shots, horizontalFovDegrees, fillNadir, wideSearch, onPreview)
+            .getOrThrow()
         // La correzione da girare al profilo del gimbal, resa ripetibile.
         //
         // Quello che l'unione misura è quanto il gimbal ha sbagliato **con la taratura di

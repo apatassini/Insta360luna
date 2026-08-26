@@ -39,6 +39,7 @@ import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.screens.DiagnosticsScreen
 import it.persoft.lunaultra.ui.screens.GalleryScreen
 import it.persoft.lunaultra.ui.screens.PanoramaScreen
+import it.persoft.lunaultra.ui.screens.PointOfViewScreen
 import it.persoft.lunaultra.ui.screens.SequenceScreen
 import it.persoft.lunaultra.ui.screens.SettingsScreen
 import it.persoft.lunaultra.ui.theme.Luna
@@ -95,6 +96,15 @@ fun LunaApp(viewModel: MainViewModel) {
                     Panel.NONE -> Unit
                 }
             }
+        }
+
+        // La fase intermedia sta sopra tutto e non si chiude di lato: sotto c'e` una cucitura
+        // ferma ad aspettare una risposta, e uscirne senza darla la lascerebbe li` per sempre.
+        // Per lo stesso motivo il tasto indietro qui non fa niente.
+        val choosingPointOfView by viewModel.pointOfViewOpen.collectAsState()
+        BackHandler(enabled = choosingPointOfView) { }
+        if (choosingPointOfView) {
+            Box(modifier = Modifier.fillMaxSize()) { PointOfViewScreen(viewModel) }
         }
 
         SnackbarHost(

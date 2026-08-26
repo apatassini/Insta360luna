@@ -193,6 +193,14 @@ data class StitchSettings(
      * stessa texture già verificata. Senza la pittura non ha niente su cui lavorare.
      */
     val gpuBlend: Boolean = true,
+
+    /**
+     * La fase intermedia: fermarsi a scegliere da dove guardare la panoramica.
+     *
+     * Vale per le unioni che si lanciano a mano, non per quella che parte da sola dopo gli
+     * scatti: quella deve arrivare in fondo anche col telefono in tasca.
+     */
+    val chooseViewpoint: Boolean = true,
 )
 
 @Serializable

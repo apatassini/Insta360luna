@@ -1070,7 +1070,7 @@ class PanoramaStitcher(
             )
         }
 
-        suspend fun paint(view: PanoramaView, longSide: Int): Bitmap = withContext(Dispatchers.Default) {
+        suspend fun paint(view: PanoramaView, longSide: Int): PreviewImage = withContext(Dispatchers.Default) {
             val turned = placements.map { it.seenFrom(view) }
             val projection = view.projection ?: projectionFor(turned, lens, fillNadir)
             val canvas = PanoramaCanvas.covering(
@@ -1118,7 +1118,11 @@ class PanoramaStitcher(
                     }
                 }
             }
-            Bitmap.createBitmap(colour, width, height, Bitmap.Config.ARGB_8888)
+            PreviewImage(
+                bitmap = Bitmap.createBitmap(colour, width, height, Bitmap.Config.ARGB_8888),
+                horizontalDegrees = canvas.horizontalDegrees,
+                verticalDegrees = canvas.latitudeAt(0) - canvas.latitudeAt(height - 1),
+            )
         }
     }
 
@@ -5804,4 +5808,18 @@ data class PreviewShape(
     val reachDegrees: Float,
     val horizontalStretch: Float,
     val verticalStretch: Float,
+)
+
+/**
+ * L'anteprima dipinta, con quanti gradi copre.
+ *
+ * I gradi non sono un di piu`: senza, un dito che trascina di cento pixel non sa di quanti
+ * gradi ha girato la panoramica, e il movimento sotto il dito non corrisponde piu` a quello
+ * dell'immagine. Con questi due numeri il trascinamento e` esatto per costruzione, e resta
+ * esatto quando cambia la proiezione o il ritaglio.
+ */
+data class PreviewImage(
+    val bitmap: android.graphics.Bitmap,
+    val horizontalDegrees: Float,
+    val verticalDegrees: Float,
 )

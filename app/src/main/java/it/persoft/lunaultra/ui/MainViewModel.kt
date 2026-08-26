@@ -21,6 +21,10 @@ import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
+import it.persoft.lunaultra.stitch.PanoramaStitcher
+import it.persoft.lunaultra.stitch.PanoramaView
+import it.persoft.lunaultra.stitch.PreviewImage
+import it.persoft.lunaultra.stitch.PreviewShape
 import it.persoft.lunaultra.stitch.PanoJobList
 import it.persoft.lunaultra.stitch.ProcessVitals
 import it.persoft.lunaultra.stitch.StitchVitals
@@ -48,6 +52,7 @@ import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.update.UpdateManager
 import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -1279,9 +1284,136 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Pausa fra una lettura e l'altra: la camera salva una foto in poco più di un secondo. */
     private val FILE_SETTLE_DELAY_MS = 1_500L
 
+    /** Quanto sta fermo il dito prima che l'anteprima si ridisegni. */
+    private val POINT_OF_VIEW_SETTLE_MS = 90L
+
+    /** Il lato lungo dell'anteprima: abbastanza da giudicare, abbastanza poco da seguire il dito. */
+    private val POINT_OF_VIEW_LONG_SIDE = 640
+
+    /** Oltre lo zenit non si va: la panoramica si rovescerebbe. */
+    private val POINT_OF_VIEW_MAX_TILT = 89f
+
     /** Stato dell'unione automatica, per il pannello della panoramica. */
     private val _stitchState = MutableStateFlow<StitchUiState>(StitchUiState.Idle)
     val stitchState: StateFlow<StitchUiState> = _stitchState
+
+    /**
+     * La fase intermedia: la cucitura si è fermata e aspetta che si scelga da dove guardare.
+     *
+     * È un'attesa vera, non una schermata che si può ignorare: la corutina della cucitura sta
+     * ferma su un `await` finché non arriva una risposta. Per questo la finestra si chiude solo
+     * con un tasto — non con il tasto indietro, non uscendo dal pannello — e per questo, quando
+     * si chiude, la promessa viene sempre mantenuta: una corutina lasciata ad aspettare per
+     * sempre e` un lavoro che non finisce e una panoramica che non arriva.
+     */
+    private val _pointOfViewOpen = MutableStateFlow(false)
+    val pointOfViewOpen: StateFlow<Boolean> = _pointOfViewOpen
+
+    /** Il punto di vista scelto in questo momento. */
+    private val _pointOfView = MutableStateFlow(PanoramaView())
+    val pointOfView: StateFlow<PanoramaView> = _pointOfView
+
+    /** L'anteprima dipinta, con quanti gradi copre: senza i gradi il dito non combacia. */
+    private val _pointOfViewImage = MutableStateFlow<PreviewImage?>(null)
+    val pointOfViewImage: StateFlow<PreviewImage?> = _pointOfViewImage
+
+    /** Che forma prende la panoramica così: proiezione, quanto sale, quanto deforma. */
+    private val _pointOfViewShape = MutableStateFlow<PreviewShape?>(null)
+    val pointOfViewShape: StateFlow<PreviewShape?> = _pointOfViewShape
+
+    private var pointOfViewPainter: PanoramaStitcher.Preview? = null
+    private var pointOfViewAnswer: CompletableDeferred<PanoramaView?>? = null
+    private var pointOfViewJob: Job? = null
+
+    /**
+     * Quello che la cucitura chiama quando arriva alla fase intermedia.
+     *
+     * Apre la finestra, dipinge la prima anteprima e si mette ad aspettare. Il `finally` non è
+     * prudenza: se la cucitura viene annullata mentre si sta scegliendo, la finestra deve
+     * chiudersi da sola, altrimenti resta lì a chiedere una risposta per una panoramica che non
+     * esiste più.
+     */
+    private suspend fun choosePointOfView(preview: PanoramaStitcher.Preview): PanoramaView? {
+        val answer = CompletableDeferred<PanoramaView?>()
+        pointOfViewPainter = preview
+        pointOfViewAnswer = answer
+        _pointOfView.value = preview.suggested
+        _pointOfViewImage.value = null
+        _pointOfViewOpen.value = true
+        repaintPointOfView(immediate = true)
+        return try {
+            answer.await()
+        } finally {
+            _pointOfViewOpen.value = false
+            pointOfViewJob?.cancel()
+            pointOfViewJob = null
+            pointOfViewPainter = null
+            pointOfViewAnswer = null
+            _pointOfViewImage.value = null
+            _pointOfViewShape.value = null
+        }
+    }
+
+    /**
+     * Ridipinge l'anteprima, ma non a ogni pixel del dito.
+     *
+     * I numeri della deformazione si aggiornano subito, perché costano niente e sono quelli che
+     * si guardano mentre si muove. Il disegno invece aspetta un attimo di fermo: ridipingerlo a
+     * ogni frame del trascinamento vorrebbe dire buttare via nove disegni su dieci prima ancora
+     * che finiscano, e il decimo arriverebbe comunque in ritardo.
+     */
+    private fun repaintPointOfView(immediate: Boolean = false) {
+        val painter = pointOfViewPainter ?: return
+        val view = _pointOfView.value
+        _pointOfViewShape.value = runCatching { painter.deformation(view) }.getOrNull()
+        pointOfViewJob?.cancel()
+        pointOfViewJob = viewModelScope.launch {
+            if (!immediate) delay(POINT_OF_VIEW_SETTLE_MS)
+            runCatching { painter.paint(view, POINT_OF_VIEW_LONG_SIDE) }
+                .onSuccess { _pointOfViewImage.value = it }
+        }
+    }
+
+    /** Il trascinamento: gira la panoramica di tanti gradi quanti il dito ne ha attraversati. */
+    fun dragPointOfView(panDegrees: Float, tiltDegrees: Float) {
+        val now = _pointOfView.value
+        _pointOfView.value = now.copy(
+            panDegrees = now.panDegrees + panDegrees,
+            tiltDegrees = (now.tiltDegrees + tiltDegrees).coerceIn(-POINT_OF_VIEW_MAX_TILT, POINT_OF_VIEW_MAX_TILT),
+        )
+        repaintPointOfView()
+    }
+
+    fun setPointOfViewRoll(rollDegrees: Float) {
+        _pointOfView.value = _pointOfView.value.copy(rollDegrees = rollDegrees)
+        repaintPointOfView()
+    }
+
+    fun setPointOfViewProjection(projection: StitchProjection?) {
+        _pointOfView.value = _pointOfView.value.copy(projection = projection)
+        repaintPointOfView(immediate = true)
+    }
+
+    fun setPointOfViewLimit(limitDegrees: Float) {
+        _pointOfView.value = _pointOfView.value.copy(verticalLimitDegrees = limitDegrees)
+        repaintPointOfView(immediate = true)
+    }
+
+    /** Torna al punto di vista che la cucitura avrebbe scelto da sola. */
+    fun resetPointOfView() {
+        _pointOfView.value = pointOfViewPainter?.suggested ?: PanoramaView()
+        repaintPointOfView(immediate = true)
+    }
+
+    /** «Cuci così»: la piena risoluzione parte con questo punto di vista. */
+    fun confirmPointOfView() {
+        pointOfViewAnswer?.complete(_pointOfView.value)
+    }
+
+    /** «Lascia decidere all'app»: si va avanti come se la fase intermedia non ci fosse stata. */
+    fun skipPointOfView() {
+        pointOfViewAnswer?.complete(null)
+    }
 
     /** L'elenco dei file com'era prima di scattare: serve a riconoscere quelli nuovi. */
     private var filesBeforePanorama: List<MediaItem> = emptyList()
@@ -1587,6 +1719,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             overlapPercent = seq.panoramaOverlapPercent,
             tuning = stitchTuning(),
             testMode = settings.value.stitch.testMode,
+            onPreview = if (settings.value.stitch.chooseViewpoint) ::choosePointOfView else null,
             onProgress = { fraction, message ->
                 _stitchState.value = StitchUiState.Working(
                     downloadShare + (1f - downloadShare) * fraction,

@@ -473,6 +473,16 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "significherebbe spegnere tutta la rifinitura insieme.",
                 )
 
+                ToggleRow(
+                    title = "Scegli da dove guardarla",
+                    subtitle = "Prima di cucire a piena risoluzione, l'unione si ferma e mostra " +
+                        "la panoramica in piccolo: il dito sposta il centro e la deformazione " +
+                        "cambia mentre lo muovi. Vale per le unioni lanciate a mano",
+                    checked = settings.stitch.chooseViewpoint,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(chooseViewpoint = on) } },
+                    icon = LunaIcons.Panorama,
+                )
+
                 Text("Scheda grafica")
                 ToggleRow(
                     title = "Ricognizione su GPU",

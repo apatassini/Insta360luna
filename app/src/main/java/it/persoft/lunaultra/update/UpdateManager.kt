@@ -1,6 +1,9 @@
 package it.persoft.lunaultra.update
 
 import android.content.Context
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.os.Build
 import it.persoft.lunaultra.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -59,6 +62,10 @@ class UpdateManager(context: Context) {
                 if (!target.isFile || !digestMatches(target, release.sha256)) {
                     download(release.downloadUrl, target, release.sha256, progress)
                 }
+                refusal(target)?.let {
+                    target.delete()
+                    error(it)
+                }
                 DownloadedUpdate(target, release.commitSha, release.publishedAtMs)
             }
         }
@@ -69,6 +76,20 @@ class UpdateManager(context: Context) {
         return connection.inputStream.bufferedReader().use { it.readText() }
     }
 
+    /**
+     * Scarica l'APK e non lo accetta finché i byte non corrispondono all'impronta pubblicata.
+     *
+     * Due tentativi, e il secondo non è scaramanzia. Gli allegati delle release si scaricano da
+     * `releases/download/<tag>/<nome>`, un indirizzo che la rete di distribuzione di GitHub
+     * tiene in cache; il nostro workflow riusa sempre lo stesso tag, e finché ha riusato anche
+     * lo stesso nome di file quell'indirizzo è rimasto identico da una build all'altra. Le
+     * informazioni della release arrivano invece da `api.github.com`, che in cache non ci va:
+     * così poteva capitare che l'app leggesse il commit e l'impronta nuovi e si vedesse
+     * consegnare i byte della build precedente. L'impronta non tornava e l'aggiornamento si
+     * fermava — giustamente, ma senza via d'uscita, perché ritentare dava di nuovo la copia in
+     * cache. Il secondo tentativo chiede espressamente byte freschi. Se non torna nemmeno
+     * quello, allora il file pubblicato è davvero un altro e fermarsi è la cosa giusta.
+     */
     private fun download(
         url: String,
         target: File,
@@ -76,48 +97,146 @@ class UpdateManager(context: Context) {
         progress: DownloadProgress? = null,
     ) {
         val part = File(target.parentFile, "${target.name}.part")
-        part.delete()
         try {
-            val connection = open(url)
-            val declared = connection.contentLengthLong
-            require(declared <= MAX_APK_BYTES || declared < 0) { "APK troppo grande" }
-            connection.inputStream.use { input ->
-                part.outputStream().buffered().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    var total = 0L
-                    var lastReported = 0L
-                    progress?.onBytes(0L, declared)
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        total += read
-                        require(total <= MAX_APK_BYTES) { "APK troppo grande" }
-                        output.write(buffer, 0, read)
-                        // Un avviso ogni 64 KB: abbastanza fitto perché la barra si muova,
-                        // abbastanza rado da non ricomporre la schermata a ogni buffer.
-                        if (total - lastReported >= PROGRESS_STEP_BYTES) {
-                            lastReported = total
-                            progress?.onBytes(total, declared)
-                        }
-                    }
-                    progress?.onBytes(total, declared)
+            for (attempt in 0..1) {
+                part.delete()
+                fetch(if (attempt == 0) url else cacheBusted(url), part, progress, fresh = attempt > 0)
+                require(part.length() > 0L) { "APK vuoto" }
+                if (digestMatches(part, expectedSha256)) {
+                    if (target.exists()) target.delete()
+                    check(part.renameTo(target)) { "Impossibile completare il download" }
+                    return
                 }
             }
-            require(part.length() > 0L) { "APK vuoto" }
-            require(digestMatches(part, expectedSha256)) { "Firma SHA-256 dell'APK non valida" }
-            if (target.exists()) target.delete()
-            check(part.renameTo(target)) { "Impossibile completare il download" }
+            error("L'APK scaricato non corrisponde a quello pubblicato: riprova fra qualche minuto")
         } finally {
             if (part.exists()) part.delete()
         }
     }
 
-    private fun open(url: String): HttpURLConnection =
+    private fun fetch(url: String, part: File, progress: DownloadProgress?, fresh: Boolean) {
+        val connection = open(url, fresh)
+        val declared = connection.contentLengthLong
+        require(declared <= MAX_APK_BYTES || declared < 0) { "APK troppo grande" }
+        connection.inputStream.use { input ->
+            part.outputStream().buffered().use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var total = 0L
+                var lastReported = 0L
+                progress?.onBytes(0L, declared)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    total += read
+                    require(total <= MAX_APK_BYTES) { "APK troppo grande" }
+                    output.write(buffer, 0, read)
+                    // Un avviso ogni 64 KB: abbastanza fitto perché la barra si muova,
+                    // abbastanza rado da non ricomporre la schermata a ogni buffer.
+                    if (total - lastReported >= PROGRESS_STEP_BYTES) {
+                        lastReported = total
+                        progress?.onBytes(total, declared)
+                    }
+                }
+                progress?.onBytes(total, declared)
+            }
+        }
+    }
+
+    private fun open(url: String, fresh: Boolean = false): HttpURLConnection =
         (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", "Insta360Luna/${BuildConfig.VERSION_NAME}")
+            if (fresh) {
+                useCaches = false
+                setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
+                setRequestProperty("Pragma", "no-cache")
+            }
+        }
+
+    /**
+     * È davvero un aggiornamento di questa app, quello che si è appena scaricato?
+     *
+     * Android non installa sopra un pacchetto firmato con una chiave diversa dalla propria, e
+     * se ne accorge a installazione avviata: lo dice a modo suo — «firma non valida» — senza
+     * far capire da dove venga il problema né cosa si possa fare. La stessa verifica qui si fa
+     * prima, sul file scaricato, dove c'è ancora modo di spiegarsi.
+     *
+     * Si controllano tre cose, e ognuna corrisponde a un modo diverso di sbagliare pacchetto:
+     * il nome del pacchetto (è un'altra app), il numero di build (è una copia vecchia — capita
+     * quando una cache consegna i byte di ieri sotto l'indirizzo di oggi) e il certificato di
+     * firma (è la stessa app compilata con un'altra chiave, e lì non c'è aggiornamento che
+     * tenga: va disinstallata).
+     *
+     * Torna il motivo del rifiuto, o `null` se il pacchetto è buono.
+     */
+    private fun refusal(apk: File): String? {
+        val pm = appContext.packageManager
+        val archive = pm.getPackageArchiveInfo(apk.path, signingFlags())
+            ?: return "il file scaricato non è un APK leggibile"
+        // Su parecchie versioni le firme si leggono solo se il pacchetto sa da quale file
+        // viene, e getPackageArchiveInfo quel campo non lo compila da sé.
+        archive.applicationInfo?.let {
+            it.sourceDir = apk.path
+            it.publicSourceDir = apk.path
+        }
+        if (archive.packageName != appContext.packageName) {
+            return "il file scaricato è un'altra app (${archive.packageName})"
+        }
+
+        val installed = runCatching { pm.getPackageInfo(appContext.packageName, signingFlags()) }
+            .getOrNull()
+            ?: return null
+
+        val mineCode = versionCode(installed)
+        val theirsCode = versionCode(archive)
+        if (theirsCode < mineCode) {
+            return "l'APK scaricato è più vecchio di quello installato (build $theirsCode " +
+                "contro $mineCode): la release ha risposto con una copia vecchia, riprova fra " +
+                "qualche minuto"
+        }
+
+        val mine = certificates(installed)
+        val theirs = certificates(archive)
+        if (mine.isEmpty() || theirs.isEmpty()) return null
+        if (mine.any { it in theirs }) return null
+        return "l'aggiornamento è firmato con una chiave diversa da quella dell'app installata: " +
+            "Android non lo installa sopra. Disinstalla l'app una volta sola e reinstallala — " +
+            "da lì in avanti gli aggiornamenti tornano a installarsi da soli"
+    }
+
+    /** L'impronta di ogni certificato con cui il pacchetto è firmato, comprese le rotazioni. */
+    @Suppress("DEPRECATION")
+    private fun certificates(info: PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.let {
+                if (it.hasMultipleSigners()) it.apkContentsSigners else it.signingCertificateHistory
+            }
+        } else {
+            info.signatures
+        }
+        return signatures.orEmpty().filterNotNull().mapTo(HashSet()) { signature ->
+            MessageDigest.getInstance("SHA-256")
+                .digest(signature.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun versionCode(info: PackageInfo): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            info.versionCode.toLong()
+        }
+
+    @Suppress("DEPRECATION")
+    private fun signingFlags(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES
+        } else {
+            PackageManager.GET_SIGNATURES
         }
 
     private fun digestMatches(file: File, expected: String?): Boolean {
@@ -166,6 +285,15 @@ class UpdateManager(context: Context) {
         }
 
         internal fun releaseApi(branch: String): String = RELEASES_BY_TAG + releaseTag(branch)
+
+        /**
+         * Lo stesso indirizzo, con una coda che nessuna cache ha mai visto.
+         *
+         * Le intestazioni `no-cache` chiedono per bene, ma una rete di distribuzione può
+         * ignorarle; un indirizzo mai richiesto prima non può essere in cache per definizione.
+         */
+        internal fun cacheBusted(url: String): String =
+            url + (if (url.contains('?')) "&" else "?") + "fresh=" + System.currentTimeMillis()
 
         internal const val MAX_APK_BYTES = 100L * 1024L * 1024L
         private const val PROGRESS_STEP_BYTES = 64L * 1024L

@@ -59,7 +59,7 @@ jobs:
           set -euo pipefail
           TAG="apk-${BRANCH//\//-}"
           {
-            echo "Build automatica del commit ${COMMIT}. Scarica app-debug.apk qui sotto."
+            echo "Build automatica del commit ${COMMIT}. Scarica l'APK qui sotto."
             echo
             echo "E' una build di debug: sul telefono va consentita l'installazione da origini sconosciute."
             echo
@@ -69,10 +69,20 @@ jobs:
             echo "build vecchia, firmata con una chiave casuale: disinstalla l'app una volta sola e"
             echo "da li in poi gli aggiornamenti si installano sopra."
           } > release-notes.md
+          # Il nome dell'allegato porta dentro il commit, e non e' un vezzo. Gli allegati
+          # si scaricano da releases/download/<tag>/<nome>, un indirizzo che la rete di
+          # distribuzione di GitHub tiene in cache; il tag qui si riusa sempre, e finche' si
+          # riusava anche il nome quell'indirizzo restava identico da una build all'altra.
+          # L'app leggeva da api.github.com — che in cache non ci va — il commit e l'impronta
+          # nuovi, e si vedeva consegnare i byte della build precedente: impronta diversa,
+          # aggiornamento fermo. Con il commit nel nome l'indirizzo e' nuovo ogni volta e in
+          # cache non ci puo' essere per definizione.
+          APK="luna-${COMMIT:0:12}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$APK"
           gh release delete "$TAG" --yes --cleanup-tag || true
           gh release create "$TAG" \
             --target "$COMMIT" \
             --title "APK di debug - $BRANCH" \
             --notes-file release-notes.md \
             --prerelease \
-            app/build/outputs/apk/debug/app-debug.apk
+            "$APK"

@@ -3,6 +3,7 @@ package it.persoft.lunaultra
 import it.persoft.lunaultra.update.UpdateManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -75,6 +76,22 @@ class UpdateManagerTest {
         assertEquals(fallback, UpdateManager.releaseTag(""))
         assertEquals(fallback, UpdateManager.releaseTag("   "))
         assertEquals(fallback, UpdateManager.releaseTag("local"))
+    }
+
+    /**
+     * Il secondo tentativo dello scaricamento serve a saltare una copia in cache: se
+     * l'indirizzo restasse identico non salterebbe niente, e l'aggiornamento resterebbe
+     * bloccato sull'impronta che non torna finché la cache non scade da sola.
+     */
+    @Test
+    fun `il secondo tentativo chiede un indirizzo mai visto`() {
+        val plain = "https://github.com/a/b/releases/download/apk-main/luna.apk"
+        val busted = UpdateManager.cacheBusted(plain)
+        assertTrue(busted.startsWith("$plain?fresh="))
+        assertNotEquals(plain, busted)
+
+        val withQuery = UpdateManager.cacheBusted("$plain?x=1")
+        assertTrue(withQuery.startsWith("$plain?x=1&fresh="))
     }
 
     @Test

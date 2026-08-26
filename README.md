@@ -347,8 +347,12 @@ quindi **non** si installa sopra una build della CI: per provarla, disinstalla p
 All'avvio l'app interroga la release GitHub prima di qualsiasi collegamento alla camera.
 Non tenta più di connettersi automaticamente alla Luna: concluso il controllo resta sul tasto
 **Connetti**, che viene premuto dall'utente. Se il commit è cambiato,
-scarica automaticamente `app-debug.apk`, verifica il digest
-SHA-256 pubblicato da GitHub e apre l'installer di Android. La prima volta va consentito a Luna
+scarica automaticamente l'APK della release, ne verifica il digest
+SHA-256 pubblicato da GitHub e — prima di aprire l'installer di Android — controlla che
+il pacchetto sia davvero questa app, non più vecchio di quello installato e firmato con
+la stessa chiave. Le tre verifiche corrispondono ai tre modi in cui l'aggiornamento può
+arrivare sbagliato, e la terza è quella che Android segnalerebbe solo a installazione
+avviata, con un laconico «firma non valida». La prima volta va consentito a Luna
 Ultra di installare app da questa origine; Android richiede comunque la conferma finale per ogni
 installazione, perché un'app normale non può aggiornarsi silenziosamente senza privilegi di
 sistema. Se GitHub non è raggiungibile, il controllo non blocca la connessione alla camera.

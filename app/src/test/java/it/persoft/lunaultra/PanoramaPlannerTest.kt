@@ -194,22 +194,17 @@ class PanoramaPlannerTest {
     }
 
     /**
-     * La lente è quella misurata contro la gravità, non quella di catalogo.
+     * Il punto di partenza è la specifica: venti millimetri equivalenti, cioè 81,74° in 4:3.
      *
-     * Il catalogo dice 20 mm equivalenti, cioè 81,74° in 4:3. La misura dice 77,07°, e viene
-     * dall'accelerometro che la camera scrive in coda a ogni JPEG: fra due scatti della stessa
-     * colonna l'angolo fra i vettori gravità è l'angolo vero di cui la camera si è girata, senza
-     * passare da nessuna ipotesi ottica. Con quello per vero, la focale che fa quadrare i
-     * dettagli abbinati è netta su tre coppie indipendenti, scarto 0,28°.
-     *
-     * Questo test esiste perché quel numero non torni indietro al valore di catalogo per
-     * distrazione: sembra più «ufficiale», e invece è quello sbagliato.
+     * Non è il campo visivo vero — il file da 37 MP ne misura 77,1, perché la camera ne ritaglia
+     * un pezzo per la stabilizzazione — ma quello lo misura l'unione contro la gravità, e non va
+     * scritto qui. Qui ci va il dato pubblicato, e questo test serve a non vederlo sostituire da
+     * una misura fatta su una camera sola.
      */
     @Test
-    fun `il campo visivo e' quello misurato, non i venti millimetri di catalogo`() {
+    fun `il campo visivo di partenza e' quello di catalogo`() {
         val quattroTerzi = LunaOptics.fieldOfView(1, PhotoFrameAspect.FOUR_THREE)
-        assertEquals(77.07f, quattroTerzi.horizontalDegrees, 0.05f)
-        assertEquals(61.70f, quattroTerzi.verticalDegrees, 0.05f)
-        assertEquals(21.73f, quattroTerzi.equivalentFocalMm, 0.01f)
+        assertEquals(81.74f, quattroTerzi.horizontalDegrees, 0.05f)
+        assertEquals(20f, quattroTerzi.equivalentFocalMm, 0.01f)
     }
 }

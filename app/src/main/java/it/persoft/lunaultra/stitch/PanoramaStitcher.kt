@@ -189,9 +189,10 @@ class PanoramaStitcher(
             onProgress(0.02f, "Leggo gli scatti ($workingLongSide px, heap $heapMb MB)")
             val frames = loadFrames(shots, workingLongSide)
             val first = frames.first().bitmap
-            val lens = PinholeLens(first.width, first.height, horizontalFovDegrees)
+            val declaredLens = PinholeLens(first.width, first.height, horizontalFovDegrees)
 
             var placements = shots.map { FramePlacement(it.panDegrees, it.tiltDegrees) }
+            val lensNotes = mutableListOf<String>()
 
             // L'inclinazione vera, quando la foto se la porta dietro.
             //
@@ -231,6 +232,31 @@ class PanoramaStitcher(
                         append(" · rollio della camera %.2f°".format(rolls.sum() / rolls.size))
                     }
                 }
+            }
+
+            // Quanto è larga la lente **davvero**.
+            //
+            // La specifica dice venti millimetri equivalenti, che in 4:3 fanno 81,74°. Ma quello
+            // descrive la lente, non il file: la camera del file ritaglia un pezzo, e quanto lo
+            // sa solo lei. Con l'inclinazione data dalla gravità l'angolo fra due scatti della
+            // stessa colonna è noto senza passare da nessuna ottica, quindi si può girare la
+            // domanda al contrario: quale focale fa cadere i dettagli abbinati esattamente a
+            // quell'angolo? Sulle nove foto la risposta è 77,07°, netta su tre coppie
+            // indipendenti — quattro gradi e mezzo meno del catalogo.
+            //
+            // Finché non si misura, resta il numero dichiarato: meglio un dato di catalogo che
+            // una misura inventata.
+            val measuredFov = if (haveAttitude) measureLensFov(frames, placements, declaredLens) else null
+            val lens = if (measuredFov != null) {
+                lensNotes += ("Campo visivo misurato contro la gravità: %.2f° invece dei %.2f° " +
+                    "dichiarati (la camera ritaglia il %.0f%% del fotogramma)").format(
+                    measuredFov,
+                    horizontalFovDegrees,
+                    100f * (1f - tan(measuredFov.toRadians() / 2f) / tan(horizontalFovDegrees.toRadians() / 2f)),
+                )
+                PinholeLens(first.width, first.height, measuredFov)
+            } else {
+                declaredLens
             }
 
             // La taratura del gimbal, prima di tutto il resto.
@@ -613,6 +639,7 @@ class PanoramaStitcher(
             verdict.addAll(0, levelNotes)
             verdict.addAll(0, scaleNotes)
             verdict.addAll(0, attitudeNotes)
+            verdict.addAll(0, lensNotes)
             if (placements.size >= 2) {
                 var tightest = Float.MAX_VALUE
                 for (k in 1 until placements.size) {
@@ -2448,6 +2475,70 @@ class PanoramaStitcher(
         }
         return "Giunzioni misurate, chiesto contro fatto:\n" + righe + "\n" +
             (if (ratios.size < 2) giudizio else giudizio.format(spread))
+    }
+
+    /**
+     * Quanto è largo davvero il campo visivo, misurato contro la gravità.
+     *
+     * È la domanda girata al contrario. Di solito si conosce la lente e si misurano gli angoli;
+     * qui gli angoli li sa già la gravità — fra due scatti della stessa colonna l'inclinazione
+     * vera è nota a tre centesimi di grado — e quello che non si conosce è la lente.
+     *
+     * Il conto è diretto. Con la focale dichiarata i dettagli abbinati dicono un angolo che, se
+     * la focale fosse giusta, coinciderebbe con quello della gravità. Se invece dicono il 8% in
+     * più, vuol dire che la focale vera è l'8% più lunga: l'angolo che si legge da uno
+     * spostamento in pixel è, in prima approssimazione, quello spostamento diviso la focale.
+     * L'approssimazione regge benissimo anche a quaranta gradi — misurata, sbaglia mezzo
+     * percento — perché non si sta estrapolando, si sta correggendo.
+     *
+     * Serve la mediana di più coppie: una sola potrebbe aver abbinato male.
+     */
+    private suspend fun measureLensFov(
+        frames: List<Frame>,
+        placements: List<FramePlacement>,
+        lens: PinholeLens,
+    ): Float? = coroutineScope {
+        val pairs = mutableListOf<Pair<Int, Int>>()
+        for (i in placements.indices) {
+            for (j in i + 1 until placements.size) {
+                val dPan = abs(wrapDegrees(placements[j].panDegrees - placements[i].panDegrees))
+                val dTilt = abs(placements[j].tiltDegrees - placements[i].tiltDegrees)
+                if (dPan <= SCALE_ALIGNED_DEGREES && dTilt >= FOV_MIN_STEP_DEGREES &&
+                    dTilt <= lens.verticalFovDegrees
+                ) {
+                    pairs += i to j
+                }
+            }
+        }
+        if (pairs.isEmpty()) return@coroutineScope null
+
+        val focals = pairs.map { (i, j) ->
+            async(Dispatchers.Default) {
+                val offset = registerByFeatures(
+                    moving = frames[j],
+                    fixed = frames[i],
+                    movingPlacement = placements[j],
+                    fixedPlacement = placements[i],
+                    lens = lens,
+                    maxDegrees = SCALE_SEARCH_DEGREES,
+                    searchFraction = SCALE_SEARCH_FRACTION,
+                    cell = SCALE_CELL,
+                    minInliers = SCALE_MIN_INLIERS,
+                    minRatio = SCALE_MIN_RATIO,
+                ) ?: return@async null
+                val truth = placements[j].tiltDegrees - placements[i].tiltDegrees
+                if (abs(truth) < FOV_MIN_STEP_DEGREES) return@async null
+                val seen = truth + offset.tiltDegrees
+                val factor = seen / truth
+                if (factor < FOV_MIN_FACTOR || factor > FOV_MAX_FACTOR) return@async null
+                lens.focalPixels * factor
+            }
+        }.awaitAll().filterNotNull().sorted()
+
+        if (focals.size < FOV_MIN_PAIRS) return@coroutineScope null
+        val focal = focals[focals.size / 2]
+        if (focal <= 1f) return@coroutineScope null
+        2f * atan((lens.imageWidth / 2f) / focal).toDegrees()
     }
 
     /**
@@ -4729,6 +4820,19 @@ class PanoramaStitcher(
 
         /** Sotto questo passo il rapporto fra mosso e chiesto è una divisione per quasi zero. */
         const val SCALE_MIN_STEP_DEGREES = 5f
+
+        /**
+         * La misura del campo visivo vuole coppie **distanti**.
+         *
+         * Il campo visivo si legge dal rapporto fra l'angolo visto e quello vero, e su un passo
+         * di pochi gradi quel rapporto è tutto rumore: mezzo grado di errore su cinque è il
+         * dieci per cento, su quaranta è l'uno. Quindi si guardano solo le coppie che stanno
+         * lontane, e se ne vogliono almeno due che dicano la stessa cosa.
+         */
+        const val FOV_MIN_STEP_DEGREES = 15f
+        const val FOV_MIN_PAIRS = 2
+        const val FOV_MIN_FACTOR = 0.75f
+        const val FOV_MAX_FACTOR = 1.35f
 
         /** Un orizzonte più pendente di così, dentro una foto, non è un orizzonte. */
         const val MAX_HORIZON_ROLL_DEGREES = 25f

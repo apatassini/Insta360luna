@@ -3889,20 +3889,13 @@ class PanoramaStitcher(
         // la correzione della propria sorgente. Le decisioni leggono l'istantanea, mai la
         // mappa viva.
         //
-        // Il corpo della riga è uno solo e serve due strade. Se la scheda grafica c'è, il
-        // colore già corretto e il peso di sfumatura arrivano da lei — il peso nell'alfa, il
-        // colore nei ventiquattro bit bassi — e alla CPU resta l'aritmetica della fusione:
-        // chi possiede il pixel, quale delle due correzioni applicare, quanto sfumarla sul
-        // bordo. Se la scheda non c'è, quei due numeri se li calcola qui, proiettando e
-        // campionando come ha sempre fatto. Un corpo solo perché le due strade non possano
-        // divergere: era questo passaggio a costare trentun secondi su quarantasette di
-        // cucitura, e scriverne una copia per la scheda voleva dire mantenerne due per sempre.
-        //
-        // Una differenza resta, ed è dichiarata: dalla scheda il peso torna quantizzato a
-        // otto bit. È la stessa precisione con cui la mappa dei possessori conserva il peso
-        // vecchio, quindi il confronto fra i due è alla pari; a parità esatta la decisione
-        // può cadere dall'altra parte rispetto alla CPU, ma succede dove i due fotogrammi
-        // pesano identico — cioè dove si assomigliano di più e la scelta non si vede.
+        // Questo è il percorso CPU, e ha due mestieri. È la strada che si prende quando la
+        // scheda grafica non c'è, non ce la fa o non è il caso — la sotto-finestra a cavallo
+        // della giuntura della tela, per esempio. Ed è il **metro** con cui si misura la
+        // scheda: prima di scrivere la prima fascia, la fusione fa girare questo ciclo su una
+        // riga sola e confronta. Per questo la sua traduzione nello shader va tenuta uguale
+        // riga per riga, e per questo qui non c'è nessun ramo «se la scheda c'è»: un metro con
+        // due tacche non misura niente.
 
         // La riga si legge e si riscrive per la sola fetta che serve.
         //
@@ -3917,11 +3910,11 @@ class PanoramaStitcher(
         val spanFrom = if (narrow) spanStart else 0
         val spanWidth = if (narrow) sbw else canvas.width
 
-        fun blendRow(by: Int, rowPixels: IntArray, notes: BlendRowNotes, band: IntArray?, bandBase: Int) {
+        fun blendRow(by: Int, rowPixels: IntArray, notes: BlendRowNotes) {
             val row = subRow0 + by
             val projector = FrameProjector(placement, lens, warp)
-            val source = if (band == null) full?.let { SourceBlock(it) } else null
-            if (band == null) projector.row(canvas.latitudeAt(row))
+            val source = full?.let { SourceBlock(it) }
+            projector.row(canvas.latitudeAt(row))
             output.getPixels(rowPixels, 0, spanWidth, spanFrom, row, spanWidth, 1)
             var touched = false
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
@@ -3958,18 +3951,12 @@ class PanoramaStitcher(
                 var newWeight = 0f
                 var useNew = false
                 if (present) {
-                    // Il peso del nuovo: dalla scheda è l'alfa della fascia, dalla CPU è la
-                    // sfumatura calcolata sul posto. Zero vuol dire «qui questo fotogramma
-                    // non c'è» — fuori dal riquadro, o sul bordo già sfumato a niente.
-                    var packed = 0
-                    if (band != null) {
-                        packed = band[bandBase + bx]
-                        newWeight = (packed ushr 24) / 255f
-                    } else {
-                        projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
-                        if (projector.inside) {
-                            newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
-                        }
+                    // Il peso del nuovo: la sfumatura calcolata sul posto. Zero vuol dire «qui
+                    // questo fotogramma non c'è» — fuori dal riquadro, o sul bordo già sfumato
+                    // a niente.
+                    projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
+                    if (projector.inside) {
+                        newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
                     }
                     if (newWeight > 0f) {
                         // La stessa decisione della griglia ridotta, presa qui alla risoluzione
@@ -3982,18 +3969,12 @@ class PanoramaStitcher(
                         }
                         if (oldWeight <= 0f || ownsNew) {
                             useNew = true
-                            // Il colore corretto: la scheda lo consegna già moltiplicato per
-                            // il guadagno e la vignettatura, la CPU se lo campiona e corregge.
-                            hard = if (band != null) {
-                                packed and 0xFFFFFF
-                            } else {
-                                val color = sampleColor(frame, source, projector.x, projector.y)
-                                val factor = correction.factorAt(projector.x, projector.y)
-                                val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
-                                val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
-                                val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
-                                (r shl 16) or (g shl 8) or b
-                            }
+                            val color = sampleColor(frame, source, projector.x, projector.y)
+                            val factor = correction.factorAt(projector.x, projector.y)
+                            val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                            val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                            val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                            hard = (r shl 16) or (g shl 8) or b
                         }
                     }
                 }
@@ -4028,20 +4009,141 @@ class PanoramaStitcher(
         val applyStartedAt = System.currentTimeMillis()
         var doneRows = 0
         var blendedOnGpu = false
-        if (gpu != null && gpuPlan != null) {
-            blendedOnGpu = gpuBands(
-                gpu, gpuPlan, c0 + sx0, subRow0, sbw, sbh, weightOnly = false,
-            ) { band, bandRow, rows ->
-                parallelRows(
-                    subRow0 + bandRow, rows, spanWidth,
-                    scratch = { BlendRowNotes(snapW, gw) },
-                ) { r, rowPixels, notes ->
-                    blendRow(bandRow + r, rowPixels, notes, band, r * sbw)
-                }
-                doneRows = bandRow + rows
-                true
+        // La fusione per intero sulla scheda.
+        //
+        // Le griglie ridotte diventano texture — l'istantanea dei possessori, le due
+        // correzioni, il confine del taglio — e con loro le quattro interpolazioni bilineari
+        // che costavano a ogni pixel letture sparse su quaranta megabyte le fa l'unità di
+        // campionamento, gratis. La fascia di tela sale anche lei, perché dove il fotogramma
+        // nuovo non vince il colore di partenza è quello che c'è già. Allo shader tocca tutto:
+        // peso vecchio, decisione, correzione della propria sorgente, sfumatura sul bordo.
+        // Alla CPU resta una copia — l'alfa nella mappa dei possessori, il colore sulla tela —
+        // e due chiamate per fascia invece di due per riga.
+        //
+        // Non si prova quando la sotto-finestra scavalca la giuntura della tela: lì le colonne
+        // non sono consecutive, la fascia non è un rettangolo, e per un fotogramma su nove non
+        // vale un secondo percorso da mantenere.
+        if (gpu != null && gpuPlan != null && narrow && sbw <= gpu.renderer.maxTextureSize) {
+            val ownerBytes = ByteArray(snapW * snapH) {
+                (ownerSnap[it] * 255f).roundToInt().coerceIn(0, 255).toByte()
             }
-            if (!blendedOnGpu) gpuGiveUp("la fusione non è tornata dalla scheda")
+            val plan = GpuBlendUniforms(
+                subColumn = 0, subRow = 0, subWidth = sbw, subHeight = sbh,
+                ownerWidth = snapW, ownerHeight = snapH, ownerScale = OWNER_SCALE,
+                gridWidth = gw, gridHeight = gh, gridScale = s,
+                contextPixels = BLEND_CONTEXT_PX,
+                seamLength = seam?.boundary?.size ?: 0,
+                seamVertical = seam?.vertical ?: false,
+                seamHighSide = seam?.newOnHighSide ?: false,
+            )
+            val ready = withContext(gpu.dispatcher) {
+                gpu.renderer.uploadBlendGrids(
+                    ownerBytes, snapW, snapH, corrOver, corrBase, gw, gh, seam?.boundary,
+                )
+            }
+            if (!ready) {
+                gpuGiveUp("le griglie della fusione non si sono caricate sulla scheda")
+            } else {
+                val bandHeight = (GPU_BAND_PIXELS / sbw)
+                    .coerceIn(1, min(sbh, gpu.renderer.maxTextureSize))
+                val oldBand = IntArray(sbw * bandHeight)
+                val outBand = IntArray(sbw * bandHeight)
+                var good = true
+                var checked = false
+                var by = 0
+                while (by < sbh) {
+                    currentCoroutineContext().ensureActive()
+                    val rows = min(bandHeight, sbh - by)
+                    val row = subRow0 + by
+                    output.getPixels(oldBand, 0, sbw, spanFrom, row, sbw, rows)
+                    val drawStartedAt = System.currentTimeMillis()
+                    good = withContext(gpu.dispatcher) {
+                        gpu.renderer.uploadOldBand(oldBand, sbw, rows) &&
+                            gpu.renderer.renderTile(
+                                gpuPlan, c0 + sx0, row, sbw, rows,
+                                into = outBand, intoStride = sbw, blend = plan.at(0, by),
+                            )
+                    }
+                    gpuDrawMillis += System.currentTimeMillis() - drawStartedAt
+                    if (!good) {
+                        gpuGiveUp("la fusione non è tornata dalla scheda")
+                        break
+                    }
+                    if (!checked) {
+                        checked = true
+                        // L'autocontrollo della fusione: la stessa riga, fatta due volte.
+                        //
+                        // Non c'è una terza copia della formula da tenere allineata. Si fa
+                        // girare il ciclo della CPU su una riga sola — la tela lì è ancora
+                        // quella di partenza, perché la fascia non è stata scritta — poi si
+                        // rimette la riga com'era e si confronta con quello che ha disegnato la
+                        // scheda. Se le due strade divergono, la scheda si spegne prima che un
+                        // pixel sbagliato finisca sulla panoramica.
+                        //
+                        // Qualche pixel di scarto è normale e non è un errore: sul confine del
+                        // taglio la decisione si gioca su un peso identico fino all'ultima
+                        // cifra, e chi calcola in un ordine diverso può cadere dall'altra parte.
+                        // Sono pixel dove i due fotogrammi si assomigliano al massimo. Quello
+                        // che non deve succedere è che siano tanti.
+                        val probe = by + rows / 2
+                        val original = IntArray(sbw)
+                        System.arraycopy(oldBand, (probe - by) * sbw, original, 0, sbw)
+                        val mine = IntArray(sbw)
+                        blendRow(probe, mine, BlendRowNotes(snapW, gw))
+                        output.setPixels(original, 0, sbw, spanFrom, subRow0 + probe, sbw, 1)
+                        var worst = 0
+                        var offenders = 0
+                        val from = (probe - by) * sbw
+                        for (bx in 0 until sbw) {
+                            val a = mine[bx]
+                            val b = outBand[from + bx]
+                            val gap = max(
+                                abs(((a shr 16) and 0xFF) - ((b shr 16) and 0xFF)),
+                                max(
+                                    abs(((a shr 8) and 0xFF) - ((b shr 8) and 0xFF)),
+                                    abs((a and 0xFF) - (b and 0xFF)),
+                                ),
+                            )
+                            if (gap > worst) worst = gap
+                            if (gap > GPU_BLEND_TOLERANCE) offenders++
+                        }
+                        gpuNotes += "Autocontrollo fusione ${frame.label}: colore Δmax %d · %d pixel oltre %d su %d"
+                            .format(worst, offenders, GPU_BLEND_TOLERANCE, sbw)
+                        if (offenders > sbw / GPU_BLEND_OFFENDER_SHARE) {
+                            gpuGiveUp(
+                                ("la fusione sulla scheda non dice la stessa cosa della CPU: " +
+                                    "%d pixel su %d oltre %d livelli, il peggiore %d")
+                                    .format(offenders, sbw, GPU_BLEND_TOLERANCE, worst),
+                            )
+                            good = false
+                            break
+                        }
+                    }
+                    // Il riporto: l'alfa è il peso e va nella mappa dei possessori, i
+                    // ventiquattro bit bassi sono il colore e tornano opachi sulla tela.
+                    val mergeStartedAt = System.currentTimeMillis()
+                    parallelRows(row, rows, 0) { r, _ ->
+                        val at = row + r
+                        val from = r * sbw
+                        for (bx in 0 until sbw) {
+                            val packed = outBand[from + bx]
+                            outBand[from + bx] = 0xFF000000.toInt() or (packed and 0xFFFFFF)
+                            val weight = packed ushr 24
+                            if (weight == 0) continue
+                            val index = ownerIndex(canvas.width, at, spanFrom + bx)
+                            if (weight > (ownerWeight[index].toInt() and 0xFF)) {
+                                ownerWeight[index] = weight.toByte()
+                            }
+                        }
+                    }
+                    gpuMergeMillis += System.currentTimeMillis() - mergeStartedAt
+                    output.setPixels(outBand, 0, sbw, spanFrom, row, sbw, rows)
+                    by += rows
+                    doneRows = by
+                }
+                blendedOnGpu = good
+                withContext(gpu.dispatcher) { gpu.renderer.dropBlend() }
+            }
         }
         // Quello che la scheda non ha fatto — tutto, se non c'era; la coda, se si è arresa a
         // metà strada — lo fa la CPU. Si riparte dalla riga dopo l'ultima fascia riuscita:
@@ -4051,7 +4153,7 @@ class PanoramaStitcher(
             subRow0 + doneRows, sbh - doneRows, spanWidth,
             scratch = { BlendRowNotes(snapW, gw) },
         ) { r, rowPixels, notes ->
-            blendRow(doneRows + r, rowPixels, notes, null, 0)
+            blendRow(doneRows + r, rowPixels, notes)
         }
         blendApplyMillis += System.currentTimeMillis() - applyStartedAt
         // La scala della fusione nel log, e chi l'ha materialmente fatta: quando un
@@ -5343,6 +5445,24 @@ class PanoramaStitcher(
          * si sta più stretti.
          */
         const val GPU_BAND_PIXELS = 2 shl 20
+
+        /**
+         * Quanto possono discordare CPU e scheda sulla fusione, in livelli di colore.
+         *
+         * Due livelli su duecentocinquantasei: la correzione multibanda viaggia in mezza
+         * precisione, che ha un passo di un ottavo di livello, e l'arrotondamento finale può
+         * cadere da una parte o dall'altra. Oltre, non è precisione: è un errore.
+         */
+        const val GPU_BLEND_TOLERANCE = 2
+
+        /**
+         * Quanti pixel fuori tolleranza si accettano su una riga, come frazione: uno su cento.
+         *
+         * Sul confine del taglio la decisione si gioca su pesi identici fino all'ultima cifra e
+         * le due strade possono cadere da parti diverse — su una riga che attraversa la
+         * cucitura sono una manciata di pixel. Un errore vero non ne fa una manciata.
+         */
+        const val GPU_BLEND_OFFENDER_SHARE = 100
 
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96

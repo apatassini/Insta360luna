@@ -10,6 +10,7 @@ import android.opengl.GLES30
 import android.opengl.GLUtils
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.nio.IntBuffer
 
 /**
@@ -56,6 +57,15 @@ class GpuStitchRenderer private constructor(
 ) {
 
     private var sourceTexture = 0
+    private var oldTexture = 0
+    private var ownerTexture = 0
+    private var corrOverTexture = 0
+    private var corrBaseTexture = 0
+    private var seamTexture = 0
+    private var oldBuffer: IntBuffer? = null
+    private var oldBufferPixels = 0
+    private var oldWidth = 0
+    private var oldHeight = 0
     private var targetTexture = 0
     private var frameBuffer = 0
     private var targetWidth = 0
@@ -114,6 +124,8 @@ class GpuStitchRenderer private constructor(
         into: IntArray? = null,
         intoOffset: Int = 0,
         intoStride: Int = width,
+        /** Se c'è, si fonde invece di dipingere: serve [uploadBlendGrids] e [uploadOldBand]. */
+        blend: GpuBlendUniforms? = null,
     ): Boolean = runCatching {
         ensureTarget(width, height)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, frameBuffer)
@@ -123,8 +135,11 @@ class GpuStitchRenderer private constructor(
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, if (weightOnly) dummyTexture else sourceTexture)
         GLES30.glUniform1i(location("uSource"), 0)
+        bindBlendTextures(blend != null)
 
         uniforms.apply(::location)
+        blend?.apply(::location)
+        GLES30.glUniform1i(location("uBlend"), if (blend == null) 0 else 1)
         GLES30.glUniform2f(location("uTileOrigin"), column0.toFloat(), row0.toFloat())
         GLES30.glUniform1i(location("uWeightOnly"), if (weightOnly) 1 else 0)
 
@@ -151,6 +166,181 @@ class GpuStitchRenderer private constructor(
         }
         true
     }.getOrDefault(false)
+
+    /**
+     * Carica sulla scheda tutto quello che la fusione ha di ridotto: l'istantanea dei
+     * possessori, le due correzioni multibanda e il confine del taglio.
+     *
+     * Una volta per fotogramma. Sono le griglie che sulla CPU costavano quattro letture
+     * sparse a pixel su un insieme di lavoro da quaranta megabyte; qui diventano texture con
+     * filtro lineare, e l'interpolazione bilineare la fa l'unità di campionamento.
+     *
+     * Le correzioni vanno in mezza precisione: valgono al massimo qualche decina di livelli
+     * di colore, dove un mezzo-float ha un passo di un ottavo di livello — sotto la
+     * risoluzione degli otto bit su cui poi si arrotonda.
+     */
+    fun uploadBlendGrids(
+        owner: ByteArray,
+        ownerWidth: Int,
+        ownerHeight: Int,
+        /** Tre piani, uno per canale, lunghi gridWidth*gridHeight. */
+        corrOver: Array<FloatArray>,
+        corrBase: Array<FloatArray>,
+        gridWidth: Int,
+        gridHeight: Int,
+        /** Il confine del taglio, o null se in questa sotto-finestra decide il peso. */
+        seam: FloatArray?,
+    ): Boolean = runCatching {
+        require(ownerWidth <= maxTextureSize && ownerHeight <= maxTextureSize) {
+            "l'istantanea ${ownerWidth}×$ownerHeight supera il limite di $maxTextureSize"
+        }
+        require(gridWidth <= maxTextureSize && gridHeight <= maxTextureSize) {
+            "le correzioni ${gridWidth}×$gridHeight superano il limite di $maxTextureSize"
+        }
+        releaseBlend()
+
+        ownerTexture = newTexture(GLES30.GL_LINEAR)
+        val ownerBytes = ByteBuffer.allocateDirect(ownerWidth * ownerHeight)
+            .order(ByteOrder.nativeOrder())
+        ownerBytes.put(owner, 0, ownerWidth * ownerHeight)
+        ownerBytes.rewind()
+        GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 1)
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, ownerWidth, ownerHeight, 0,
+            GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, ownerBytes,
+        )
+        GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 4)
+
+        corrOverTexture = correctionTexture(corrOver, gridWidth, gridHeight)
+        corrBaseTexture = correctionTexture(corrBase, gridWidth, gridHeight)
+
+        seamTexture = newTexture(GLES30.GL_NEAREST)
+        val line = seam ?: FloatArray(1)
+        val seamBuffer = ByteBuffer.allocateDirect(line.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        seamBuffer.put(line)
+        seamBuffer.rewind()
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R32F, line.size, 1, 0,
+            GLES30.GL_RED, GLES30.GL_FLOAT, seamBuffer,
+        )
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        checkError("caricamento delle griglie di fusione")
+        true
+    }.getOrDefault(false)
+
+    /**
+     * Carica la tela com'è adesso, per la fascia che si sta per fondere.
+     *
+     * È l'unico ingrediente della fusione che cambia a ogni fascia: dove il fotogramma nuovo
+     * non vince, il colore di partenza è quello che c'è già sulla tela, e senza averlo lo
+     * shader non potrebbe applicargli la propria correzione.
+     */
+    fun uploadOldBand(pixels: IntArray, width: Int, height: Int): Boolean = runCatching {
+        require(width <= maxTextureSize && height <= maxTextureSize) {
+            "la fascia ${width}×$height supera il limite di $maxTextureSize"
+        }
+        if (oldTexture == 0) oldTexture = newTexture(GLES30.GL_NEAREST)
+        else GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, oldTexture)
+        val count = width * height
+        var buffer = oldBuffer
+        if (buffer == null || oldBufferPixels < count) {
+            buffer = ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder()).asIntBuffer()
+            oldBuffer = buffer
+            oldBufferPixels = count
+        }
+        buffer.rewind()
+        buffer.put(pixels, 0, count)
+        buffer.rewind()
+        // Le fasce hanno tutte la stessa forma tranne l'ultima, che è più bassa: finché la
+        // forma non cambia si riscrive dentro la texture che c'è già, invece di farne una
+        // nuova a ogni fascia — sono otto megabyte di allocazione risparmiati quattordici
+        // volte per fotogramma.
+        if (width == oldWidth && height == oldHeight) {
+            GLES30.glTexSubImage2D(
+                GLES30.GL_TEXTURE_2D, 0, 0, 0, width, height,
+                GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buffer,
+            )
+        } else {
+            GLES30.glTexImage2D(
+                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, width, height, 0,
+                GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buffer,
+            )
+            oldWidth = width
+            oldHeight = height
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        checkError("caricamento della fascia di tela")
+        true
+    }.getOrDefault(false)
+
+    /** Libera le texture della fusione: valgono per un fotogramma solo. */
+    fun dropBlend() {
+        runCatching { releaseBlend() }
+    }
+
+    private fun correctionTexture(planes: Array<FloatArray>, width: Int, height: Int): Int {
+        val texture = newTexture(GLES30.GL_LINEAR)
+        val count = width * height
+        val buffer: FloatBuffer = ByteBuffer.allocateDirect(count * 4 * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        for (i in 0 until count) {
+            buffer.put(planes[0][i])
+            buffer.put(planes[1][i])
+            buffer.put(planes[2][i])
+            buffer.put(0f)
+        }
+        buffer.rewind()
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA16F, width, height, 0,
+            GLES30.GL_RGBA, GLES30.GL_FLOAT, buffer,
+        )
+        return texture
+    }
+
+    private fun newTexture(filter: Int): Int {
+        val ids = IntArray(1)
+        GLES30.glGenTextures(1, ids, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, ids[0])
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, filter)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, filter)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        return ids[0]
+    }
+
+    /**
+     * Lega le cinque texture della fusione, o il pixel di comodo quando si dipinge e basta.
+     *
+     * Un'unità di campionamento senza niente attaccato è comportamento indefinito anche se
+     * lo shader poi non la legge: il ramo spento del `main` non è una garanzia.
+     */
+    private fun bindBlendTextures(blending: Boolean) {
+        val names = arrayOf("uOld", "uOwner", "uCorrOver", "uCorrBase", "uSeam")
+        val textures = intArrayOf(oldTexture, ownerTexture, corrOverTexture, corrBaseTexture, seamTexture)
+        for (i in names.indices) {
+            val unit = i + 1
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + unit)
+            val id = if (blending && textures[i] != 0) textures[i] else dummyTexture
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, id)
+            GLES30.glUniform1i(location(names[i]), unit)
+        }
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+    }
+
+    private fun releaseBlend() {
+        val ids = intArrayOf(oldTexture, ownerTexture, corrOverTexture, corrBaseTexture, seamTexture)
+        for (id in ids) if (id != 0) GLES30.glDeleteTextures(1, intArrayOf(id), 0)
+        oldTexture = 0
+        ownerTexture = 0
+        corrOverTexture = 0
+        corrBaseTexture = 0
+        seamTexture = 0
+        oldBuffer = null
+        oldBufferPixels = 0
+        oldWidth = 0
+        oldHeight = 0
+    }
 
     private fun ensureTarget(width: Int, height: Int) {
         // Basta che ci stia: il bersaglio si allarga, non si rifà. La finestra dell'ultima
@@ -216,6 +406,7 @@ class GpuStitchRenderer private constructor(
     fun release() {
         runCatching {
             releaseSource()
+            releaseBlend()
             releaseTarget()
             if (dummyTexture != 0) GLES30.glDeleteTextures(1, intArrayOf(dummyTexture), 0)
             GLES30.glDeleteProgram(program)
@@ -369,6 +560,24 @@ uniform float uVignetteB;
 uniform float uInvNorm;
 
 uniform int  uWeightOnly;       // 1 = solo il peso, niente colore (la ricognizione)
+
+// ---- La fusione: acceso solo quando si cuce la giunzione ----
+uniform int   uBlend;           // 1 = fusione completa invece della sola pittura
+uniform sampler2D uOld;         // la tela com'era, la fascia in corso
+uniform sampler2D uOwner;       // istantanea dei possessori, a passo uOwnerScale
+uniform sampler2D uCorrOver;    // correzione multibanda verso la sorgente nuova
+uniform sampler2D uCorrBase;    // correzione multibanda verso la tela vecchia
+uniform sampler2D uSeam;        // il confine del taglio, un valore per passo
+uniform vec2  uSubOffset;       // dove comincia questa fascia dentro la sotto-finestra
+uniform vec2  uSubSize;         // la sotto-finestra intera, per la sfumatura ai bordi
+uniform vec2  uOwnerSize;       // dimensioni dell'istantanea
+uniform vec2  uGridSize;        // dimensioni delle griglie di correzione
+uniform float uScaleS;          // di quanto è ridotta la griglia
+uniform float uOwnerScale;      // di quanto è ridotta l'istantanea
+uniform float uContextPx;       // la rampa che spegne la correzione sul bordo
+uniform int   uSeamLength;      // 0 = nessun taglio: decide il peso
+uniform int   uSeamVertical;
+uniform int   uSeamHighSide;
 uniform int  uWarpNodes;        // 0 = nessuna deformazione locale
 uniform vec2 uWarpSize;         // nodi in orizzontale e verticale
 uniform vec2 uWarp[128];
@@ -403,9 +612,34 @@ vec2 warpAt(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-void main() {
-    float col = uTileOrigin.x + floor(gl_FragCoord.x);
-    float row = uTileOrigin.y + floor(gl_FragCoord.y);
+float edgeFade(float position, float span) {
+    if (span <= 2.0) return 1.0;
+    float margin = min(uContextPx, floor(span * 0.5));
+    if (margin <= 0.0) return 1.0;
+    float distance = min(position, span - 1.0 - position);
+    if (distance >= margin) return 1.0;
+    float t = (distance + 0.5) / margin;
+    return 0.5 - 0.5 * cos(t * PI);
+}
+
+// Il confine del taglio fra due passi, interpolato: il gemello di Seam.boundaryAt.
+float seamLimit(float along) {
+    float p = clamp(along, 0.0, float(uSeamLength - 1));
+    int i0 = int(floor(p));
+    int i1 = min(i0 + 1, uSeamLength - 1);
+    float f = p - float(i0);
+    return mix(texelFetch(uSeam, ivec2(i0, 0), 0).r, texelFetch(uSeam, ivec2(i1, 0), 0).r, f);
+}
+
+/**
+ * Dove cade questo pixel di tela dentro il fotogramma, quanto pesa e di che colore e`.
+ *
+ * Torna falso se il pixel il fotogramma non lo copre: fuori campo, oppure sul bordo gia`
+ * sfumato a niente. E` la traduzione di FrameProjector piu` featherWeight piu` factorAt.
+ */
+bool sampleFrame(float col, float row, out float feather, out vec3 colour) {
+    feather = 0.0;
+    colour = vec3(0.0);
 
     float lonDeg = uStartLon + (col + 0.5) / uPixelsPerDegree - uPanDegrees;
     float lon = lonDeg * DEG;
@@ -420,7 +654,7 @@ void main() {
     // Rotazione inversa dell'inclinazione, poi del rollio.
     float ty = wy * uCosTilt - wz * uSinTilt;
     float tz = wy * uSinTilt + wz * uCosTilt;
-    if (tz <= MIN_FORWARD) { fragColor = vec4(0.0); return; }
+    if (tz <= MIN_FORWARD) return false;
 
     float rx =  wx * uCosRoll + ty * uSinRoll;
     float ry = -wx * uSinRoll + ty * uCosRoll;
@@ -435,16 +669,15 @@ void main() {
     vec2 limit = uWorkingSize - vec2(1.0);
     bool inside = p.x >= 0.0 && p.y >= 0.0 && p.x <= limit.x && p.y <= limit.y;
     if (uWarpNodes != 0 && inside) p += warpAt(p);
-    if (p.x < 0.0 || p.y < 0.0 || p.x > limit.x || p.y > limit.y) { fragColor = vec4(0.0); return; }
+    if (p.x < 0.0 || p.y < 0.0 || p.x > limit.x || p.y > limit.y) return false;
 
     // La sfumatura: distanza dal bordo più vicino sulla metà del lato corto, al quadrato.
     vec2 edge = min(p, limit - p);
     float scale = min(uWorkingSize.x, uWorkingSize.y) * 0.5;
-    float feather = clamp(min(edge.x, edge.y) / scale, 0.0, 1.0);
+    feather = clamp(min(edge.x, edge.y) / scale, 0.0, 1.0);
     feather = feather * feather;
-    if (feather <= 0.0) { fragColor = vec4(0.0); return; }
+    if (feather <= 0.0) return false;
 
-    vec3 colour = vec3(0.0);
     if (uWeightOnly == 0) {
         colour = texture(uSource, (p * uToTexture + vec2(0.5)) * uInvSource).rgb;
 
@@ -455,14 +688,119 @@ void main() {
         colour = clamp(colour * (uGain / v), 0.0, 1.0);
     }
 
+    return true;
+}
+
+void main() {
+    float col = uTileOrigin.x + floor(gl_FragCoord.x);
+    float row = uTileOrigin.y + floor(gl_FragCoord.y);
+
+    float feather;
+    vec3 colour;
+    bool covered = sampleFrame(col, row, feather, colour);
+
     // Componenti al contrario: riletto come intero little-endian diventa 0xAARRGGBB, che è
     // il formato dei Bitmap. L'alfa non è trasparenza, è il peso della sfumatura — e non
     // scende mai a zero per un pixel coperto, esattamente come sulla CPU, dove il peso
     // arrotondato a zero viene riportato a uno: zero vuol dire «qui non ci sono», e un
     // pixel dentro il fotogramma c'è anche quando pesa pochissimo.
-    fragColor = vec4(colour.b, colour.g, colour.r, max(feather, 1.0 / 255.0));
+    if (uBlend == 0) {
+        if (!covered) { fragColor = vec4(0.0); return; }
+        fragColor = vec4(colour.b, colour.g, colour.r, max(feather, 1.0 / 255.0));
+        return;
+    }
+
+    // ---- La fusione, per intero ----
+    //
+    // Il gemello del ciclo `blendRow` di PanoramaStitcher: peso vecchio dall'istantanea dei
+    // possessori, decisione col taglio o col peso, correzione della propria sorgente sfumata
+    // verso il bordo. Qui le quattro interpolazioni bilineari che sulla CPU costavano letture
+    // sparse su quaranta megabyte le fa l'unità di campionamento, e non costano niente.
+    vec2 sub = uSubOffset + floor(gl_FragCoord.xy);
+    vec4 oldTexel = texelFetch(uOld, ivec2(floor(gl_FragCoord.xy)), 0);
+
+    float newWeight = covered ? feather : 0.0;
+    float oldWeight = texture(uOwner, (sub / uOwnerScale + vec2(0.5)) / uOwnerSize).r;
+
+    // Nessuno dei due copre questo pixel: la tela resta com'era, byte per byte.
+    if (newWeight <= 0.0 && oldWeight <= 0.0) { fragColor = vec4(oldTexel.rgb, 0.0); return; }
+
+    vec2 g = sub / uScaleS - vec2(0.5) + vec2(0.5 / uScaleS);
+
+    bool useNew = false;
+    if (newWeight > 0.0) {
+        bool ownsNew;
+        if (uSeamLength > 0) {
+            float along = (uSeamVertical == 1) ? g.y : g.x;
+            float across = (uSeamVertical == 1) ? g.x : g.y;
+            float limit = seamLimit(along);
+            ownsNew = (uSeamHighSide == 1) ? (across > limit) : (across < limit);
+        } else {
+            ownsNew = newWeight > oldWeight;
+        }
+        useNew = (oldWeight <= 0.0) || ownsNew;
+    }
+
+    // Il texel della tela arriva come (B,G,R,A): rimesso in ordine, e riportato a 0..255
+    // perché è così che il montaggio netto entra nella correzione anche sulla CPU.
+    vec3 hard = useNew
+        ? floor(clamp(colour, 0.0, 1.0) * 255.0 + 0.5)
+        : floor(oldTexel.bgr * 255.0 + 0.5);
+
+    vec2 gridUV = (clamp(g, vec2(0.0), uGridSize - vec2(1.0)) + vec2(0.5)) / uGridSize;
+    vec3 corr = useNew ? texture(uCorrOver, gridUV).rgb : texture(uCorrBase, gridUV).rgb;
+
+    float fade = edgeFade(sub.x, uSubSize.x) * edgeFade(sub.y, uSubSize.y);
+    vec3 done = clamp(floor(hard + fade * corr + 0.5), vec3(0.0), vec3(255.0)) / 255.0;
+
+    fragColor = vec4(done.b, done.g, done.r, clamp(floor(newWeight * 255.0 + 0.5), 0.0, 255.0) / 255.0);
 }
 """
+    }
+}
+
+/**
+ * I numeri della sotto-finestra di fusione, quelli che non cambiano da una fascia all'altra.
+ *
+ * Il gemello del corpo di `blendSubWindow`: se una delle due strade cambia senza l'altra,
+ * l'autocontrollo della fusione se ne accorge sulla prima fascia, confrontando la riga
+ * disegnata dalla scheda con la stessa riga calcolata dalla CPU.
+ */
+class GpuBlendUniforms(
+    /** Dove comincia questa fascia dentro la sotto-finestra: colonna e riga. */
+    private val subColumn: Int,
+    private val subRow: Int,
+    private val subWidth: Int,
+    private val subHeight: Int,
+    private val ownerWidth: Int,
+    private val ownerHeight: Int,
+    private val ownerScale: Int,
+    private val gridWidth: Int,
+    private val gridHeight: Int,
+    private val gridScale: Int,
+    private val contextPixels: Int,
+    /** Lunghezza del confine del taglio, zero se in questa sotto-finestra decide il peso. */
+    private val seamLength: Int,
+    private val seamVertical: Boolean,
+    private val seamHighSide: Boolean,
+) {
+    /** La stessa sotto-finestra, un'altra fascia. */
+    fun at(subColumn: Int, subRow: Int): GpuBlendUniforms = GpuBlendUniforms(
+        subColumn, subRow, subWidth, subHeight, ownerWidth, ownerHeight, ownerScale,
+        gridWidth, gridHeight, gridScale, contextPixels, seamLength, seamVertical, seamHighSide,
+    )
+
+    fun apply(location: (String) -> Int) {
+        GLES30.glUniform2f(location("uSubOffset"), subColumn.toFloat(), subRow.toFloat())
+        GLES30.glUniform2f(location("uSubSize"), subWidth.toFloat(), subHeight.toFloat())
+        GLES30.glUniform2f(location("uOwnerSize"), ownerWidth.toFloat(), ownerHeight.toFloat())
+        GLES30.glUniform2f(location("uGridSize"), gridWidth.toFloat(), gridHeight.toFloat())
+        GLES30.glUniform1f(location("uScaleS"), gridScale.toFloat())
+        GLES30.glUniform1f(location("uOwnerScale"), ownerScale.toFloat())
+        GLES30.glUniform1f(location("uContextPx"), contextPixels.toFloat())
+        GLES30.glUniform1i(location("uSeamLength"), seamLength)
+        GLES30.glUniform1i(location("uSeamVertical"), if (seamVertical) 1 else 0)
+        GLES30.glUniform1i(location("uSeamHighSide"), if (seamHighSide) 1 else 0)
     }
 }
 

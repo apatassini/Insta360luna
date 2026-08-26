@@ -64,6 +64,10 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
     val image by viewModel.pointOfViewImage.collectAsState()
     val view by viewModel.pointOfView.collectAsState()
     val shape by viewModel.pointOfViewShape.collectAsState()
+    // Dentro un job la scelta si puo` anche solo salvare: la cucitura si lancia quando si
+    // vuole, magari tutti i lavori insieme. Fuori da un job non ci sarebbe dove salvarla, e
+    // quel tasto non compare.
+    val forJob by viewModel.pointOfViewForJob.collectAsState()
 
     Column(
         modifier = Modifier
@@ -213,7 +217,20 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             ) {
                 ButtonLabel(LunaIcons.Panorama, "Decidi tu")
             }
-            Button(
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (forJob != null) {
+                Button(
+                    onClick = viewModel::savePointOfView,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    ButtonLabel(LunaIcons.Download, "Salva e chiudi")
+                }
+            }
+            OutlinedButton(
                 onClick = viewModel::confirmPointOfView,
                 modifier = Modifier.weight(1f),
             ) {
@@ -221,8 +238,14 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             }
         }
         Hint(
-            "La cucitura a piena risoluzione è ferma qui e aspetta: parte quando scegli. " +
-                "«Decidi tu» va avanti come se questa finestra non ci fosse stata.",
+            if (forJob != null) {
+                "«Salva e chiudi» tiene questa scelta sul lavoro e non cuce niente: la " +
+                    "cucitura la lanci quando vuoi, anche tutti i lavori insieme. «Cuci così» " +
+                    "parte adesso da qui — l'allineamento è già fatto e non si rifà."
+            } else {
+                "La cucitura a piena risoluzione è ferma qui e aspetta: parte quando scegli. " +
+                    "«Decidi tu» va avanti come se questa finestra non ci fosse stata."
+            },
         )
     }
 }

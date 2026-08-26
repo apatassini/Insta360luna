@@ -21,7 +21,9 @@ import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
+import it.persoft.lunaultra.stitch.AfterPreview
 import it.persoft.lunaultra.stitch.PanoramaPreview
+import it.persoft.lunaultra.stitch.PreviewStopped
 import it.persoft.lunaultra.stitch.PanoramaView
 import it.persoft.lunaultra.stitch.PreviewImage
 import it.persoft.lunaultra.stitch.PreviewShape
@@ -1322,7 +1324,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val pointOfViewShape: StateFlow<PreviewShape?> = _pointOfViewShape
 
     private var pointOfViewPainter: PanoramaPreview? = null
-    private var pointOfViewAnswer: CompletableDeferred<PanoramaView?>? = null
+    private var pointOfViewAnswer: CompletableDeferred<AfterPreview>? = null
     private var pointOfViewJob: Job? = null
 
     /**
@@ -1333,8 +1335,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * chiudersi da sola, altrimenti resta lì a chiedere una risposta per una panoramica che non
      * esiste più.
      */
-    private suspend fun choosePointOfView(preview: PanoramaPreview): PanoramaView? {
-        val answer = CompletableDeferred<PanoramaView?>()
+    private suspend fun choosePointOfView(preview: PanoramaPreview): AfterPreview {
+        val answer = CompletableDeferred<AfterPreview>()
         pointOfViewPainter = preview
         pointOfViewAnswer = answer
         _pointOfView.value = preview.suggested
@@ -1405,15 +1407,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         repaintPointOfView(immediate = true)
     }
 
-    /** «Cuci così»: la piena risoluzione parte con questo punto di vista. */
+    /** «Cuci così»: la piena risoluzione parte adesso con questo punto di vista. */
     fun confirmPointOfView() {
-        pointOfViewAnswer?.complete(_pointOfView.value)
+        pointOfViewAnswer?.complete(AfterPreview.Stitch(_pointOfView.value))
     }
 
-    /** «Lascia decidere all'app»: si va avanti come se la fase intermedia non ci fosse stata. */
+    /** «Lascia decidere all'app»: si cuce adesso, come se la fase intermedia non ci fosse stata. */
     fun skipPointOfView() {
-        pointOfViewAnswer?.complete(null)
+        pointOfViewAnswer?.complete(AfterPreview.Stitch(null))
     }
+
+    /**
+     * «Salva e chiudi»: la scelta resta sul job, la cucitura la si lancia quando si vuole.
+     *
+     * È il motivo per cui questa fase esiste dentro il job e non dentro la cucitura. Guardare e
+     * decidere costa un minuto con le foto ridotte; cucire sono minuti di calcolo. Legarli
+     * insieme voleva dire stare a guardare una barra subito dopo aver deciso — esattamente
+     * quello che i job servono a evitare.
+     */
+    fun savePointOfView() {
+        pointOfViewAnswer?.complete(AfterPreview.StopHere(_pointOfView.value))
+    }
+
+    /** Vero quando la scelta si sta facendo dentro un job, e quindi si può salvare e basta. */
+    private val _pointOfViewForJob = MutableStateFlow<String?>(null)
+    val pointOfViewForJob: StateFlow<String?> = _pointOfViewForJob
 
     /** L'elenco dei file com'era prima di scattare: serve a riconoscere quelli nuovi. */
     private var filesBeforePanorama: List<MediaItem> = emptyList()
@@ -1883,6 +1901,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 shotAtMs = job.createdAtMs,
                 tuning = stitchTuning(),
                 testMode = testMode,
+                // Chi ha gia` guardato non riguarda: la scelta salvata si applica e basta. Chi
+                // non ha guardato cuce come ha sempre fatto — la fase intermedia e` un passo in
+                // piu` da fare quando si vuole, non un pedaggio da pagare a ogni cucitura.
+                view = job.view,
                 onProgress = { fraction, message ->
                     _stitchState.value = StitchUiState.Working(fraction, message)
                 },
@@ -1905,6 +1927,131 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita")
             }
         }
+    }
+
+    /**
+     * Prepara un job: allinea, mostra l'anteprima, salva il punto di vista. Non cuce.
+     *
+     * È la fase intermedia messa dove serve. L'allineamento lavora sulle copie ridotte e dura
+     * qualche decina di secondi; scegliere costa un minuto; cucire sono minuti di calcolo. I
+     * primi due si fanno adesso, col telefono in mano, e il terzo si lancia quando si vuole —
+     * anche tutti i job insieme, anche stasera. Se invece si preme «Cuci così», la cucitura
+     * parte subito da dov'era: l'allineamento è già fatto e non si rifà.
+     */
+    fun preparePanoJob(job: PanoJob) {
+        if (stitchJob?.isActive == true) {
+            showMessage("Un'unione è già in corso")
+            return
+        }
+        stitchJob = viewModelScope.launch {
+            val files = job.files.map { java.io.File(it) }.filter { it.exists() && it.length() > 0 }
+            if (files.size < 2) {
+                _stitchState.value = StitchUiState.Failed(
+                    "Del job restano ${files.size} foto su ${job.files.size}: non c'è niente da preparare.",
+                )
+                return@launch
+            }
+            _pointOfViewForJob.value = job.id
+            _stitchState.value = StitchUiState.Working(0f, "Allineo le ${files.size} foto per l'anteprima")
+            try {
+                container.stitchJob.runOnFiles(
+                    files = files,
+                    horizontalFovDegrees = effectiveFov(job.fovDegrees),
+                    overlapPercent = sequence.value.panoramaOverlapPercent,
+                    fillNadir = job.spherical,
+                    shotAtMs = job.createdAtMs,
+                    tuning = stitchTuning(),
+                    onPreview = ::choosePointOfView,
+                    onProgress = { fraction, message ->
+                        _stitchState.value = StitchUiState.Working(fraction, message)
+                    },
+                ).onSuccess { done ->
+                    // Ha scelto «Cuci così»: la panoramica c'è, e vale la stessa regola di
+                    // sempre su cosa buttare.
+                    finishJob(job, files, done)
+                }.onFailure { error ->
+                    if (error is PreviewStopped) {
+                        container.panoJobStore.update { list ->
+                            list.copy(
+                                jobs = list.jobs.map { if (it.id == job.id) it.withView(error.view) else it },
+                            )
+                        }
+                        _stitchState.value = StitchUiState.Idle
+                        showMessage("Punto di vista salvato: il job è pronto da cucire")
+                    } else {
+                        _stitchState.value = StitchUiState.Failed(error.message ?: "preparazione non riuscita")
+                    }
+                }
+            } finally {
+                _pointOfViewForJob.value = null
+            }
+        }
+    }
+
+    /**
+     * Cuce tutti i job in coda, uno dopo l'altro.
+     *
+     * Ognuno con il punto di vista che si è scelto per lui, se se n'è scelto uno. È il modo in
+     * cui questi lavori vogliono essere fatti: si prepara tutto in giro col telefono in mano, e
+     * la sera si mette in carica e si lancia il mucchio.
+     */
+    fun runAllPanoJobs() {
+        if (stitchJob?.isActive == true) {
+            showMessage("Un'unione è già in corso")
+            return
+        }
+        val queue = panoJobs.value.jobs
+        if (queue.isEmpty()) {
+            showMessage("Non c'è nessun lavoro in coda")
+            return
+        }
+        stitchJob = viewModelScope.launch {
+            var done = 0
+            var failed = 0
+            for ((index, job) in queue.withIndex()) {
+                if (!isActive) break
+                val files = job.files.map { java.io.File(it) }.filter { it.exists() && it.length() > 0 }
+                if (files.size < 2) {
+                    failed++
+                    continue
+                }
+                container.stitchJob.runOnFiles(
+                    files = files,
+                    horizontalFovDegrees = effectiveFov(job.fovDegrees),
+                    overlapPercent = sequence.value.panoramaOverlapPercent,
+                    fillNadir = job.spherical,
+                    shotAtMs = job.createdAtMs,
+                    tuning = stitchTuning(),
+                    view = job.view,
+                    onProgress = { fraction, message ->
+                        _stitchState.value = StitchUiState.Working(
+                            (index + fraction) / queue.size,
+                            "Lavoro ${index + 1} di ${queue.size} · $message",
+                        )
+                    },
+                ).onSuccess {
+                    done++
+                    finishJob(job, files, it)
+                }.onFailure { failed++ }
+            }
+            showMessage(
+                if (failed == 0) "Unite tutte: $done panoramiche"
+                else "Unite $done panoramiche, $failed non riuscite",
+            )
+        }
+    }
+
+    /** La regola di sempre su cosa buttare a unione riuscita, in un punto solo. */
+    private suspend fun finishJob(job: PanoJob, files: List<java.io.File>, done: StitchUiState.Done) {
+        if (settings.value.deleteJobAfterStitch) {
+            withContext(Dispatchers.IO) {
+                container.stitchJob.discardJobFiles(files.map { it.absolutePath })
+            }
+            container.panoJobStore.update { list ->
+                list.copy(jobs = list.jobs.filterNot { it.id == job.id })
+            }
+        }
+        _stitchState.value = done
     }
 
     /** A unione riuscita: buttare scatti e job, o tenerli per la prova successiva? */

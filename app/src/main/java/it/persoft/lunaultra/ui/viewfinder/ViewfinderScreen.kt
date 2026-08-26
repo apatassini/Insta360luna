@@ -327,6 +327,14 @@ fun ViewfinderScreen(
                         jobsSheetOpen = false
                         viewModel.runPanoJob(it)
                     },
+                    onPrepare = {
+                        jobsSheetOpen = false
+                        viewModel.preparePanoJob(it)
+                    },
+                    onRunAll = {
+                        jobsSheetOpen = false
+                        viewModel.runAllPanoJobs()
+                    },
                     onCancel = viewModel::cancelPanoJob,
                     onClose = { jobsSheetOpen = false },
                     modifier = Modifier

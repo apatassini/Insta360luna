@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -40,6 +41,9 @@ fun PanoJobsSheet(
     deleteOnFinish: Boolean,
     onDeleteOnFinish: (Boolean) -> Unit,
     onRun: (PanoJob) -> Unit,
+    /** Allinea e fa scegliere il punto di vista, senza cucire. */
+    onPrepare: (PanoJob) -> Unit,
+    onRunAll: () -> Unit,
     onCancel: (PanoJob) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -100,11 +104,24 @@ fun PanoJobsSheet(
                         color = Color.White,
                     )
                     Text(
-                        text = jobDateLabel(job.createdAtMs),
+                        text = if (job.viewChosen) {
+                            jobDateLabel(job.createdAtMs) + " · punto di vista scelto"
+                        } else {
+                            jobDateLabel(job.createdAtMs)
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = Luna.OnSurfaceDim,
+                        color = if (job.viewChosen) Luna.Ok else Luna.OnSurfaceDim,
                     )
                 }
+                HudIconButton(
+                    icon = LunaIcons.Panorama,
+                    contentDescription = "Guarda e scegli il punto di vista",
+                    onClick = { onPrepare(job) },
+                    enabled = !busy,
+                    size = 40.dp,
+                    selected = job.viewChosen,
+                    activeColor = Luna.Ok,
+                )
                 HudIconButton(
                     icon = LunaIcons.Play,
                     contentDescription = "Unisci adesso",
@@ -121,6 +138,19 @@ fun PanoJobsSheet(
                     size = 40.dp,
                     activeColor = Luna.Rec,
                 )
+            }
+        }
+
+        // Tutti insieme: e` il modo in cui questi lavori vogliono essere fatti davvero. Si
+        // prepara in giro col telefono in mano, e la sera si mette in carica e si lancia il
+        // mucchio — ognuno con il punto di vista che si e` scelto per lui.
+        if (jobs.size > 1) {
+            TextButton(
+                onClick = onRunAll,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Uniscile tutte (${jobs.size})")
             }
         }
 

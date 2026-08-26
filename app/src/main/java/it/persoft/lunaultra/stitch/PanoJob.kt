@@ -20,7 +20,53 @@ data class PanoJob(
     val files: List<String>,
     val fovDegrees: Float,
     val spherical: Boolean = false,
-)
+
+    /**
+     * Il punto di vista scelto guardando l'anteprima, se qualcuno l'ha scelto.
+     *
+     * Sta qui e non nella cucitura perche` sono due mestieri diversi in due momenti diversi.
+     * Guardare e decidere si fa in un minuto, con le foto ridotte e il telefono in mano;
+     * cucire sono minuti di calcolo che si lanciano quando si vuole — la sera, tutti i job
+     * insieme, con il telefono in carica. Legarli l'uno all'altro obbligava a stare a guardare
+     * una barra subito dopo aver deciso, che e` esattamente quello che i job servono a evitare.
+     *
+     * Campi sciolti e non un oggetto: cosi` un elenco salvato da una versione che non li aveva
+     * si rilegge senza saltare per aria, e i valori mancanti valgono zero — che vuol dire «non
+     * scelto», cioe` il comportamento di prima.
+     */
+    val viewPanDegrees: Float = 0f,
+    val viewTiltDegrees: Float = 0f,
+    val viewRollDegrees: Float = 0f,
+    /** La proiezione voluta come ordinale, o -1 per lasciar decidere alla copertura. */
+    val viewProjectionCode: Int = -1,
+    val viewVerticalLimitDegrees: Float = 0f,
+    /** Vero solo quando qualcuno ha davvero guardato e salvato: zero non basta a dirlo. */
+    val viewChosen: Boolean = false,
+) {
+    /** Il punto di vista salvato, o null se per questo job nessuno l'ha ancora scelto. */
+    val view: PanoramaView?
+        get() = if (!viewChosen) {
+            null
+        } else {
+            PanoramaView(
+                panDegrees = viewPanDegrees,
+                tiltDegrees = viewTiltDegrees,
+                rollDegrees = viewRollDegrees,
+                projection = StitchProjection.entries.getOrNull(viewProjectionCode),
+                verticalLimitDegrees = viewVerticalLimitDegrees,
+            )
+        }
+
+    /** Lo stesso job, con il punto di vista appena scelto. */
+    fun withView(view: PanoramaView): PanoJob = copy(
+        viewPanDegrees = view.panDegrees,
+        viewTiltDegrees = view.tiltDegrees,
+        viewRollDegrees = view.rollDegrees,
+        viewProjectionCode = view.projection?.ordinal ?: -1,
+        viewVerticalLimitDegrees = view.verticalLimitDegrees,
+        viewChosen = true,
+    )
+}
 
 /** L'elenco persistente dei job: sopravvive alla chiusura dell'app, che è il suo mestiere. */
 @Serializable

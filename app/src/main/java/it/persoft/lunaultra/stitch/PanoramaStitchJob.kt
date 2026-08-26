@@ -325,7 +325,9 @@ class PanoramaStitchJob(
         tuning: StitchTuning = StitchTuning(),
         testMode: Boolean = false,
         /** La fase intermedia: scegliere da dove guardare la panoramica, guardandola. */
-        onPreview: (suspend (PanoramaPreview) -> PanoramaView?)? = null,
+        onPreview: (suspend (PanoramaPreview) -> AfterPreview)? = null,
+        /** Il punto di vista gia` scelto per questo lavoro, se qualcuno l'ha scelto. */
+        view: PanoramaView? = null,
         onProgress: (Float, String) -> Unit,
     ): Result<StitchUiState.Done> = withContext(Dispatchers.IO) {
         runCatching {
@@ -366,38 +368,129 @@ class PanoramaStitchJob(
                         tuning = tuning,
                         scaleAtShot = ordered.first().second!!.let { it.panScale to it.tiltScale },
                         onPreview = onPreview,
+                        view = view,
                         onProgress = onProgress,
                     )
                 }
             }
 
-            val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
-            val start = -stepDegrees * (files.size - 1) / 2f
-            val shots = files.mapIndexed { index, file ->
-                PanoramaShot(
-                    file = file,
-                    panDegrees = start + index * stepDegrees,
-                    tiltDegrees = 0f,
-                    label = "Foto ${index + 1}",
-                )
+            // Niente passaporto EXIF: sono foto qualsiasi, prese dal telefono o da una
+            // galleria. Ma se a scattarle è stata la Luna, in coda al file c'è lo stesso la
+            // traccia inerziale — ed è la metà più importante di quello che avrebbe detto il
+            // gimbal. L'inclinazione e il rollio arrivano dalla gravità, che non si sbaglia e
+            // non ha bisogno di taratura; resta da indovinare solo il pan.
+            val attitudes = files.map { InstaTrailer.readAttitude(it) }
+            val known = attitudes.count { it != null }
+            val shots = if (known == files.size) {
+                shotsFromAttitude(files, attitudes.map { it!! }, horizontalFovDegrees, overlapPercent)
+            } else {
+                if (known > 0) {
+                    log.info(
+                        "UNIONE MANUALE",
+                        "Solo $known foto su ${files.size} portano la traccia inerziale: " +
+                            "non basta a dividerle in file, si assume una fila sola.",
+                    )
+                }
+                evenRow(files, horizontalFovDegrees, overlapPercent)
             }
-            log.info(
-                "UNIONE MANUALE",
-                "${files.size} foto nell'ordine dato · passo assunto %.1f° (FOV %.1f°, sovrapposizione $overlapPercent%%)"
-                    .format(stepDegrees, horizontalFovDegrees),
-            )
             if (testMode) {
                 stitchTestVariants(shots, horizontalFovDegrees, wideSearch = true, shotAtMs = shotAtMs, base = tuning, onProgress = onProgress)
             } else {
                 stitchAndSave(
                     shots, horizontalFovDegrees, fillNadir = false, wideSearch = true,
-                    shotAtMs = shotAtMs, tuning = tuning, onPreview = onPreview, onProgress = onProgress,
+                    shotAtMs = shotAtMs, tuning = tuning, onPreview = onPreview, view = view,
+                    onProgress = onProgress,
                 )
             }
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
     }
 
     /** Il tratto comune: unione, salvataggio in galleria, racconto nel log. */
+    /**
+     * Le foto disposte a righe, leggendo dove guardava la camera nella coda del file.
+     *
+     * Le foto di una panoramica si scattano quasi sempre una fila per volta, e fra una fila e
+     * l'altra l'inclinazione fa un salto. Quel salto si vede: basta guardare l'inclinazione
+     * misurata dalla gravità e tagliare dove cambia di più di un terzo del campo visivo. Dentro
+     * ogni fila il pan resta indovinato — la camera la sua rotazione attorno alla verticale non
+     * la dice, e nemmeno la gravità — ma indovinarlo su tre foto per fila invece che su nove di
+     * seguito è tutta un'altra cosa: la ricerca larga parte già vicina, e la griglia non viene
+     * srotolata in una striscia.
+     */
+    private fun shotsFromAttitude(
+        files: List<File>,
+        attitudes: List<ShotAttitude>,
+        horizontalFovDegrees: Float,
+        overlapPercent: Int,
+    ): List<PanoramaShot> {
+        val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
+        val split = horizontalFovDegrees * ROW_SPLIT_SHARE
+
+        // Le file, nell'ordine in cui sono state scattate: si taglia dove l'inclinazione salta.
+        val rows = mutableListOf<MutableList<Int>>()
+        var reference = attitudes.first().pitchDegrees
+        var current = mutableListOf<Int>()
+        for (index in files.indices) {
+            val pitch = attitudes[index].pitchDegrees
+            if (current.isNotEmpty() && kotlin.math.abs(pitch - reference) > split) {
+                rows += current
+                current = mutableListOf()
+            }
+            if (current.isEmpty()) reference = pitch
+            current += index
+        }
+        if (current.isNotEmpty()) rows += current
+
+        val shots = arrayOfNulls<PanoramaShot>(files.size)
+        for (row in rows) {
+            val start = -stepDegrees * (row.size - 1) / 2f
+            row.forEachIndexed { position, index ->
+                shots[index] = PanoramaShot(
+                    file = files[index],
+                    panDegrees = start + position * stepDegrees,
+                    tiltDegrees = attitudes[index].pitchDegrees,
+                    label = "Foto ${index + 1}",
+                    measuredTiltDegrees = attitudes[index].pitchDegrees,
+                    measuredRollDegrees = attitudes[index].rollDegrees,
+                )
+            }
+        }
+        log.info(
+            "UNIONE MANUALE · LETTA DALLE FOTO",
+            "${files.size} foto in ${rows.size} " +
+                (if (rows.size == 1) "fila" else "file") +
+                " (${rows.joinToString(" · ") { "${it.size}" }}), inclinazione e rollio dalla " +
+                "gravità: %s. Il pan resta assunto, passo %.1f°.".format(
+                    rows.joinToString(" · ") { row -> "%+.0f°".format(attitudes[row.first()].pitchDegrees) },
+                    stepDegrees,
+                ),
+        )
+        return shots.filterNotNull()
+    }
+
+    /** Il ripiego di sempre: una fila sola, passo assunto dal campo visivo e dalla sovrapposizione. */
+    private fun evenRow(
+        files: List<File>,
+        horizontalFovDegrees: Float,
+        overlapPercent: Int,
+    ): List<PanoramaShot> {
+        val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
+        val start = -stepDegrees * (files.size - 1) / 2f
+        log.info(
+            "UNIONE MANUALE",
+            "${files.size} foto nell'ordine dato · passo assunto %.1f° (FOV %.1f°, sovrapposizione $overlapPercent%%)"
+                .format(stepDegrees, horizontalFovDegrees),
+        )
+        return files.mapIndexed { index, file ->
+            PanoramaShot(
+                file = file,
+                panDegrees = start + index * stepDegrees,
+                tiltDegrees = 0f,
+                label = "Foto ${index + 1}",
+            )
+        }
+    }
+
     private suspend fun stitchAndSave(
         shots: List<PanoramaShot>,
         horizontalFovDegrees: Float,
@@ -408,14 +501,16 @@ class PanoramaStitchJob(
         /** Con che taratura erano state scattate queste foto; null se non lo sappiamo. */
         scaleAtShot: Pair<Float, Float>? = null,
         /** La fase intermedia, se c'è chi la sa mostrare. Senza, la cucitura va dritta. */
-        onPreview: (suspend (PanoramaPreview) -> PanoramaView?)? = null,
+        onPreview: (suspend (PanoramaPreview) -> AfterPreview)? = null,
+        /** Il punto di vista già scelto: si cuce e basta, senza fermarsi a chiedere. */
+        view: PanoramaView? = null,
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
         // La memoria si misura adesso, non all'avvio: quanta ne sia libera dipende da cosa
         // stava facendo il telefono un minuto fa.
         val stitcher = PanoramaStitcher(onProgress, tuning, MemoryBudget.measure(context))
         val outcome = stitcher
-            .stitch(shots, horizontalFovDegrees, fillNadir, wideSearch, onPreview)
+            .stitch(shots, horizontalFovDegrees, fillNadir, wideSearch, onPreview, view)
             .getOrThrow()
         // La correzione da girare al profilo del gimbal, resa ripetibile.
         //
@@ -799,5 +894,15 @@ class PanoramaStitchJob(
          * migliora niente, e una panoramica è già un file grande di suo.
          */
         const val JPEG_QUALITY = 92
+
+        /**
+         * Quanto deve saltare l'inclinazione perché sia una fila nuova, in frazione di campo.
+         *
+         * Un terzo del campo visivo: dentro una fila l'inclinazione non si muove di più di
+         * qualche grado — la mano trema, non alza la camera — mentre fra una fila e l'altra il
+         * salto vale piu` di mezzo campo, altrimenti le due file non si sovrapporrebbero
+         * abbastanza da poter essere unite. In mezzo c'e` un abisso, e la soglia ci sta comoda.
+         */
+        const val ROW_SPLIT_SHARE = 0.35f
     }
 }

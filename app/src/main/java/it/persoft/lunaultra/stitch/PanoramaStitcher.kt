@@ -206,7 +206,13 @@ class PanoramaStitcher(
          * quello che la cucitura avrebbe usato da sola. Se nessuno la passa, non succede niente:
          * è esattamente la cucitura di prima.
          */
-        onPreview: (suspend (PanoramaPreview) -> PanoramaView?)? = null,
+        onPreview: (suspend (PanoramaPreview) -> AfterPreview)? = null,
+        /**
+         * Il punto di vista gia` scelto, quando c'e`: si cuce e basta, senza fermarsi a
+         * chiedere. E` la seconda meta` della fase intermedia — chi ha guardato ieri non deve
+         * riguardare oggi.
+         */
+        view: PanoramaView? = null,
     ): Result<StitchOutcome> = withContext(Dispatchers.Default) {
         runCatching {
             require(shots.size >= 2) { "Servono almeno due scatti per unire una panoramica" }
@@ -571,7 +577,9 @@ class PanoramaStitcher(
             // ancora stata dimensionata, e la sua forma dipende proprio da quello che si sta per
             // scegliere. Un passo prima non ci sarebbe niente da vedere, un passo dopo sarebbe
             // troppo tardi. Le copie di lavoro sono ancora aperte, ed è l'anteprima a servirsene.
-            if (onPreview != null) {
+            if (view != null) {
+                applyPointOfView(view, levelNotes) { placements = it(placements) }
+            } else if (onPreview != null) {
                 onProgress(0.32f, "Scegli da dove guardarla")
                 val fit = if (tuning.photometric) fitPhotometric(refinement.photometric, frames.size) else null
                 val previewCorrections = frames.mapIndexed { i, frame ->
@@ -583,7 +591,7 @@ class PanoramaStitcher(
                         frame.height,
                     )
                 }
-                val chosen = onPreview(
+                val answer = onPreview(
                     PreviewPainter(
                         frames = frames,
                         placements = placements,
@@ -593,22 +601,14 @@ class PanoramaStitcher(
                         suggested = PanoramaView(verticalLimitDegrees = tuning.verticalLimitDegrees),
                     ),
                 )
-                if (chosen != null) {
-                    if (chosen.turned) placements = placements.map { it.seenFrom(chosen) }
-                    tuning = tuning.copy(
-                        projection = chosen.projection ?: tuning.projection,
-                        verticalLimitDegrees = chosen.verticalLimitDegrees,
-                    )
-                    levelNotes += ("Punto di vista scelto a mano: pan %+.1f° · inclinazione %+.1f° · " +
-                        "rollio %+.1f° · %s%s").format(
-                        chosen.panDegrees, chosen.tiltDegrees, chosen.rollDegrees,
-                        tuning.projection.label,
-                        if (chosen.verticalLimitDegrees > 0f) {
-                            " · tela fino a %.0f° dall'orizzonte".format(chosen.verticalLimitDegrees)
-                        } else {
-                            ""
-                        },
-                    )
+                when (answer) {
+                    is AfterPreview.StopHere -> {
+                        frames.forEach { it.releaseWorkingData() }
+                        throw PreviewStopped(answer.view)
+                    }
+                    is AfterPreview.Stitch -> answer.view?.let {
+                        applyPointOfView(it, levelNotes) { turn -> placements = turn(placements) }
+                    }
                 }
             }
             frames.forEach { it.releaseWorkingData() }
@@ -896,6 +896,36 @@ class PanoramaStitcher(
                 }
             }
         }
+    }
+
+    /**
+     * Applica il punto di vista scelto: gira i fotogrammi e riscrive la ricetta.
+     *
+     * Una funzione sola per le due strade — chi ha appena guardato e chi aveva guardato ieri —
+     * perche` se divergessero la panoramica salvata dal job verrebbe diversa da quella
+     * dell'anteprima, e sarebbe il genere di differenza che poi non si spiega guardando il
+     * risultato.
+     */
+    private fun applyPointOfView(
+        view: PanoramaView,
+        notes: MutableList<String>,
+        turn: ((List<FramePlacement>) -> List<FramePlacement>) -> Unit,
+    ) {
+        if (view.turned) turn { placements -> placements.map { it.seenFrom(view) } }
+        tuning = tuning.copy(
+            projection = view.projection ?: tuning.projection,
+            verticalLimitDegrees = view.verticalLimitDegrees,
+        )
+        notes += ("Punto di vista scelto a mano: pan %+.1f° · inclinazione %+.1f° · rollio %+.1f° · %s%s")
+            .format(
+                view.panDegrees, view.tiltDegrees, view.rollDegrees,
+                tuning.projection.label,
+                if (view.verticalLimitDegrees > 0f) {
+                    " · tela fino a %.0f° dall'orizzonte".format(view.verticalLimitDegrees)
+                } else {
+                    ""
+                },
+            )
     }
 
     private fun projectionFor(
@@ -5803,6 +5833,32 @@ private class SourceBlock(private val bitmap: Bitmap) {
  * dice esattamente quello, e permette alle parti interne di restare private davvero invece di
  * diventare interne una dopo l'altra per farsi passare in un costruttore.
  */
+/**
+ * Cosa fare dopo aver guardato l'anteprima.
+ *
+ * Le due strade sono diverse davvero, non due nomi della stessa. Cucire subito ha senso quando
+ * si sta gia` aspettando; salvare e basta ha senso quando si sta preparando il lavoro — si
+ * decide adesso, con le foto ridotte e un minuto di tempo, e si cuce quando si vuole, magari
+ * tutti i job insieme la sera. E` la ragione per cui i job esistono.
+ */
+sealed interface AfterPreview {
+
+    /** Vai avanti: cuci con questo punto di vista, o con quello che avresti scelto tu. */
+    data class Stitch(val view: PanoramaView?) : AfterPreview
+
+    /** Fermati qui: la scelta e` presa, la cucitura la lancera` qualcun altro quando vuole. */
+    data class StopHere(val view: PanoramaView) : AfterPreview
+}
+
+/**
+ * L'anteprima e` stata guardata, la scelta e` presa, e la cucitura non doveva partire.
+ *
+ * Passa per la strada degli errori perche` la cucitura non ha un'uscita a meta`: o produce una
+ * panoramica o non la produce. Ma non e` un guasto, e chi la riceve deve distinguerla da uno —
+ * per questo si porta dietro il punto di vista invece di un messaggio e basta.
+ */
+class PreviewStopped(val view: PanoramaView) : Exception("Punto di vista scelto, cucitura rimandata")
+
 interface PanoramaPreview {
 
     /** Il punto di vista di partenza: quello che la cucitura userebbe da sola. */

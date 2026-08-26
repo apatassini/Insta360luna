@@ -1042,7 +1042,7 @@ class PanoramaStitcher(
      * Quello che invece c'e` e` la fotometria, perche` senza guadagni una panoramica a
      * scacchiera di esposizioni non si riesce a guardare.
      */
-    inner class Preview private constructor(
+    inner class Preview internal constructor(
         private val frames: List<Frame>,
         private val placements: List<FramePlacement>,
         private val corrections: List<FrameCorrection>,
@@ -1126,7 +1126,10 @@ class PanoramaStitcher(
         }
     }
 
-    private class Frame(
+    // Interna e non privata per un motivo solo: l'anteprima della fase intermedia se la fa
+    // passare nel costruttore, e in Kotlin — al contrario di Java — la classe esterna non puo`
+    // chiamare un costruttore privato della sua annidata. Fuori dal modulo resta invisibile.
+    internal class Frame(
         val bitmap: Bitmap,
         val label: String,
         val file: java.io.File? = null,
@@ -2019,7 +2022,7 @@ class PanoramaStitcher(
      * l'esposizione varia da scatto a scatto, la caduta di luce ai bordi è dell'obiettivo
      * ed è uguale per tutti.
      */
-    private class FrameCorrection(
+    internal class FrameCorrection(
         val gain: Float,
         val vignetteA: Float,
         val vignetteB: Float,

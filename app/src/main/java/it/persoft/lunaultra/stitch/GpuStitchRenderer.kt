@@ -723,7 +723,7 @@ void main() {
     float oldWeight = texture(uOwner, (sub / uOwnerScale + vec2(0.5)) / uOwnerSize).r;
 
     // Nessuno dei due copre questo pixel: la tela resta com'era, byte per byte.
-    if (newWeight <= 0.0 && oldWeight <= 0.0) { fragColor = vec4(oldTexel.rgb, 0.0); return; }
+    if (newWeight <= 0.0 && oldWeight <= 0.0) { fragColor = vec4(oldTexel.rgb, 1.0); return; }
 
     vec2 g = sub / uScaleS - vec2(0.5) + vec2(0.5 / uScaleS);
 
@@ -753,7 +753,12 @@ void main() {
     float fade = edgeFade(sub.x, uSubSize.x) * edgeFade(sub.y, uSubSize.y);
     vec3 done = clamp(floor(hard + fade * corr + 0.5), vec3(0.0), vec3(255.0)) / 255.0;
 
-    fragColor = vec4(done.b, done.g, done.r, clamp(floor(newWeight * 255.0 + 0.5), 0.0, 255.0) / 255.0);
+    // Qui l'alfa non porta niente: e` opaca, come vuole la tela. Il peso della sfumatura non
+    // serve piu` a chi riceve la fascia — la mappa dei possessori si aggiorna alla fine del
+    // fotogramma, in un colpo solo, dai pesi della ricognizione — e questo permette di
+    // consegnare i pixel riletti dalla scheda direttamente alla tela, senza una passata di
+    // mezzo che li rilegga e li riscriva tutti.
+    fragColor = vec4(done.b, done.g, done.r, 1.0);
 }
 """
     }

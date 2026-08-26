@@ -151,6 +151,9 @@ class PanoramaStitcher(
      * taglio; `piramidi` è la fusione multibanda vera; `riporto` è il ciclo a piena
      * risoluzione, l'unico dei tre che la scheda grafica tocchi.
      */
+    /** La mappa dei possessori, aggiornata in fondo a ogni fotogramma in una passata sola. */
+    private var ownerMillis = 0L
+
     private var blendGridMillis = 0L
     private var blendPyramidMillis = 0L
     private var blendApplyMillis = 0L
@@ -617,12 +620,13 @@ class PanoramaStitcher(
             notes += memory.describe()
             notes += composeDetail
             notes += ("Tempi: allineamento %.0f s · cucitura %.0f s — riconoscimento %.0f s · " +
-                "fusione %.0f s · pittura %.0f s · apertura originali %.0f s").format(
+                "fusione %.0f s · pittura %.0f s · possessori %.0f s · apertura originali %.0f s").format(
                 refineSeconds,
                 composeSeconds,
                 recogniseMillis / 1000f,
                 blendMillis / 1000f,
                 paintMillis / 1000f,
+                ownerMillis / 1000f,
                 decodeMillis / 1000f,
             )
             // Il tempo della scheda non è un tempo in più: sta già dentro riconoscimento e
@@ -3573,10 +3577,6 @@ class PanoramaStitcher(
                         }
                         rowPixels[columns[bx]] = 0xFF000000.toInt() or (packed and 0xFFFFFF)
                         touched = true
-                        val index = ownerIndex(canvas.width, row0 + by, columns[bx])
-                        if (weightByte > (ownerWeight[index].toInt() and 0xFF)) {
-                            ownerWeight[index] = weightByte.toByte()
-                        }
                     }
                     if (touched) {
                         output.setPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
@@ -3615,10 +3615,6 @@ class PanoramaStitcher(
                 val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
                 rowPixels[columns[bx]] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
                 touched = true
-                val index = ownerIndex(canvas.width, row0 + by, columns[bx])
-                if (weightByte > (ownerWeight[index].toInt() and 0xFF)) {
-                    ownerWeight[index] = weightByte.toByte()
-                }
             }
             if (touched) {
                 output.setPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
@@ -3626,6 +3622,36 @@ class PanoramaStitcher(
         }
 
         paintMillis += System.currentTimeMillis() - paintStartedAt
+
+        // La mappa dei possessori si aggiorna adesso, tutta insieme, e non piu` pixel per
+        // pixel dentro i cicli caldi.
+        //
+        // Quella mappa non dice chi ha *vinto* un pixel: dice quanto pesa, li`, il fotogramma
+        // che meglio lo copre. La fusione infatti registrava il peso del nuovo anche quando a
+        // vincere era la tela vecchia. E il peso e` esattamente quello che la ricognizione ha
+        // gia` calcolato e messo in `newW`, per tutta la finestra. Quindi non serviva
+        // ricalcolarlo, ne` intrecciarlo alla pittura: una passata lineare alla fine dice la
+        // stessa identica cosa. Tolto di li`, il ciclo della fusione consegna alla tela i
+        // pixel riletti dalla scheda senza nemmeno guardarli, e la pittura risparmia un
+        // confronto e un indice per pixel.
+        //
+        // Va dopo tutto il resto, mai prima: l'istantanea su cui la fusione decide si prende
+        // a mappa ancora vergine, ed e` proprio quella verginita` a far cadere la cucitura in
+        // un posto solo invece che a righe alterne.
+        val ownerStartedAt = System.currentTimeMillis()
+        parallelRows(row0, bh, 0) { by, _ ->
+            val row = row0 + by
+            val from = by * bw
+            for (bx in 0 until bw) {
+                val weight = newW[from + bx].toInt() and 0xFF
+                if (weight == 0) continue
+                val index = ownerIndex(canvas.width, row, columns[bx])
+                if (weight > (ownerWeight[index].toInt() and 0xFF)) {
+                    ownerWeight[index] = weight.toByte()
+                }
+            }
+        }
+        ownerMillis += System.currentTimeMillis() - ownerStartedAt
 
         // La memoria della scheda è poca: la sorgente di questo fotogramma se ne va subito.
         if (gpuUploaded && gpu != null) withContext(gpu.dispatcher) { gpu.renderer.dropSource() }
@@ -3991,12 +4017,6 @@ class PanoramaStitcher(
                 val blue = correctedChannel(hard, 0, slices[2], gw, gxf, fade)
                 rowPixels[at] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
                 touched = true
-
-                val quantized = (newWeight * 255f).roundToInt().coerceIn(0, 255)
-                val ownerIdx = ownerIndex(canvas.width, row, col)
-                if (quantized > (ownerWeight[ownerIdx].toInt() and 0xFF)) {
-                    ownerWeight[ownerIdx] = quantized.toByte()
-                }
             }
             if (touched) {
                 output.setPixels(rowPixels, 0, spanWidth, spanFrom, row, spanWidth, 1)
@@ -4119,24 +4139,10 @@ class PanoramaStitcher(
                             break
                         }
                     }
-                    // Il riporto: l'alfa è il peso e va nella mappa dei possessori, i
-                    // ventiquattro bit bassi sono il colore e tornano opachi sulla tela.
-                    val mergeStartedAt = System.currentTimeMillis()
-                    parallelRows(row, rows, 0) { r, _ ->
-                        val at = row + r
-                        val from = r * sbw
-                        for (bx in 0 until sbw) {
-                            val packed = outBand[from + bx]
-                            outBand[from + bx] = 0xFF000000.toInt() or (packed and 0xFFFFFF)
-                            val weight = packed ushr 24
-                            if (weight == 0) continue
-                            val index = ownerIndex(canvas.width, at, spanFrom + bx)
-                            if (weight > (ownerWeight[index].toInt() and 0xFF)) {
-                                ownerWeight[index] = weight.toByte()
-                            }
-                        }
-                    }
-                    gpuMergeMillis += System.currentTimeMillis() - mergeStartedAt
+                    // E il riporto non c'è: la fascia riletta dalla scheda è già la tela,
+                    // alfa opaca compresa, e va sulla bitmap così com'è. La passata di mezzo
+                    // che rileggeva e riscriveva tutti i pixel per estrarne il peso costava
+                    // più di quanto il disegno sulla scheda avesse fatto risparmiare.
                     output.setPixels(outBand, 0, sbw, spanFrom, row, sbw, rows)
                     by += rows
                     doneRows = by

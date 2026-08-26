@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -61,7 +62,6 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
     val image by viewModel.pointOfViewImage.collectAsState()
     val view by viewModel.pointOfView.collectAsState()
     val shape by viewModel.pointOfViewShape.collectAsState()
-    val dragging by viewModel.pointOfViewDragging.collectAsState()
     // Dentro un job la scelta si può anche solo salvare: la cucitura si lancia quando si vuole.
     val forJob by viewModel.pointOfViewForJob.collectAsState()
 
@@ -91,6 +91,24 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxSize()
+                        // Un tocco posa il punto di fuga dove si e` toccato. Trascinare va bene
+                        // per aggiustare, ma per **scegliere** il gesto giusto e` indicare: si
+                        // tocca la cima del palazzo e la cima del palazzo va al centro, senza
+                        // portarcela a mano attraverso mezzo schermo.
+                        .pointerInput(painted) {
+                            val fit = min(
+                                size.width.toFloat() / painted.bitmap.width,
+                                size.height.toFloat() / painted.bitmap.height,
+                            )
+                            val perPixelX = painted.horizontalDegrees / (painted.bitmap.width * fit)
+                            val perPixelY = painted.verticalDegrees / (painted.bitmap.height * fit)
+                            detectTapGestures { where ->
+                                viewModel.placePointOfView(
+                                    panDegrees = (where.x - size.width / 2f) * perPixelX,
+                                    tiltDegrees = -(where.y - size.height / 2f) * perPixelY,
+                                )
+                            }
+                        }
                         .pointerInput(painted) {
                             // Il rapporto fra pixel dello schermo e gradi di panoramica, preso
                             // sull'immagine come viene mostrata davvero: l'anteprima dichiara
@@ -227,10 +245,8 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
 
         // ---- I numeri: si leggono, non si toccano, e stanno sotto i comandi ----
         Text(
-            "Centro pan %+.0f° · alto/basso %+.0f°%s".format(
-                view.panDegrees, view.tiltDegrees,
-                if (dragging) " · sto disegnando in fretta" else "",
-            ),
+            "Tocca un punto per portarlo al centro, o trascina · pan %+.0f° · alto/basso %+.0f°"
+                .format(view.panDegrees, view.tiltDegrees),
             style = MaterialTheme.typography.labelMedium,
             color = Luna.OnSurfaceDim,
         )

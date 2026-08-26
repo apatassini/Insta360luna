@@ -22,6 +22,8 @@ import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
 import it.persoft.lunaultra.stitch.AfterPreview
+import it.persoft.lunaultra.stitch.PanoPrepStore
+import it.persoft.lunaultra.stitch.PreparedPreview
 import it.persoft.lunaultra.stitch.PanoramaPreview
 import it.persoft.lunaultra.stitch.PreviewStopped
 import it.persoft.lunaultra.stitch.PanoramaView
@@ -1327,6 +1329,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pointOfViewAnswer: CompletableDeferred<AfterPreview>? = null
     private var pointOfViewJob: Job? = null
     private var pointOfViewRendering = false
+    /** Dove mettere l'appunto, quando l'anteprima arriva da un allineamento appena fatto. */
+    private var pointOfViewSaveTo: java.io.File? = null
+    /** Da dove partire: la scelta gia` salvata sul lavoro, se c'e`. */
+    private var pointOfViewStart: PanoramaView? = null
     private var pointOfViewStale = false
 
     /**
@@ -1338,10 +1344,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * esiste più.
      */
     private suspend fun choosePointOfView(preview: PanoramaPreview): AfterPreview {
+        // L'appunto si scrive adesso, subito dopo l'allineamento e prima di mostrare qualcosa:
+        // e` l'unico momento in cui i fotogrammi ridotti sono in mano a qualcuno. Da qui in
+        // avanti riaprire questo lavoro non costera` piu` niente.
+        pointOfViewSaveTo?.let { directory ->
+            withContext(Dispatchers.IO) { runCatching { preview.save(directory) } }
+        }
         val answer = CompletableDeferred<AfterPreview>()
         pointOfViewPainter = preview
         pointOfViewAnswer = answer
-        _pointOfView.value = preview.suggested
+        _pointOfView.value = pointOfViewStart ?: preview.suggested
         _pointOfViewImage.value = null
         _pointOfViewOpen.value = true
         repaintPointOfView(immediate = true)
@@ -1358,6 +1370,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _pointOfViewDragging.value = false
             pointOfViewRendering = false
             pointOfViewStale = false
+            pointOfViewSaveTo = null
+            pointOfViewStart = null
         }
     }
 
@@ -1418,6 +1432,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         repaintPointOfView(immediate = true)
     }
 
+    /**
+     * Un tocco: il punto toccato diventa il centro, e basta.
+     *
+     * Trascinare va bene per aggiustare, ma per **scegliere** un punto di fuga il gesto giusto
+     * e` indicarlo. Si tocca la cima del palazzo e la cima del palazzo va al centro: un colpo
+     * solo, senza portarcela a mano attraverso mezzo schermo.
+     */
+    fun placePointOfView(panDegrees: Float, tiltDegrees: Float) {
+        val now = _pointOfView.value
+        _pointOfView.value = now.copy(
+            panDegrees = now.panDegrees + panDegrees,
+            tiltDegrees = (now.tiltDegrees + tiltDegrees).coerceIn(-POINT_OF_VIEW_MAX_TILT, POINT_OF_VIEW_MAX_TILT),
+        )
+        repaintPointOfView(immediate = true)
+    }
+
     /** Il trascinamento: gira la panoramica di tanti gradi quanti il dito ne ha attraversati. */
     fun dragPointOfView(panDegrees: Float, tiltDegrees: Float) {
         val now = _pointOfView.value
@@ -1445,7 +1475,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Torna al punto di vista che la cucitura avrebbe scelto da sola. */
     fun resetPointOfView() {
-        _pointOfView.value = pointOfViewPainter?.suggested ?: PanoramaView()
+        _pointOfView.value = pointOfViewStart ?: pointOfViewPainter?.suggested ?: PanoramaView()
         repaintPointOfView(immediate = true)
     }
 
@@ -1980,22 +2010,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * anche tutti i job insieme, anche stasera. Se invece si preme «Cuci così», la cucitura
      * parte subito da dov'era: l'allineamento è già fatto e non si rifà.
      */
+    /** La cartella degli appunti: i file privati dell'app, non la galleria. */
+    private val prepRoot: java.io.File get() = getApplication<Application>().filesDir
+
+    /**
+     * Apre un lavoro per scegliere il punto di vista. La prima volta allinea, poi mai piu`.
+     *
+     * Allineare nove fotogrammi sono decine di secondi di calcolo che non cambiano — le foto
+     * sono quelle, le posizioni pure — e rifarli ogni volta che si riapre un lavoro per spostare
+     * il centro di due gradi e` lavoro buttato, e si sente: fra il dito e l'immagine ci si mette
+     * una barra di avanzamento. Quindi la prima volta si allinea e si mette da parte tutto
+     * quello che serve; dalla seconda in poi si riapre l'appunto e si e` subito dentro, con la
+     * scelta di prima gia` sui cursori — perche` riaprire per continuare a modificare e`
+     * esattamente il motivo per cui si riapre.
+     */
     fun preparePanoJob(job: PanoJob) {
         if (stitchJob?.isActive == true) {
             showMessage("Un'unione è già in corso")
             return
         }
+        val files = job.files.map { java.io.File(it) }.filter { it.exists() && it.length() > 0 }
+        if (files.size < 2) {
+            _stitchState.value = StitchUiState.Failed(
+                "Del job restano ${files.size} foto su ${job.files.size}: non c'è niente da preparare.",
+            )
+            return
+        }
         stitchJob = viewModelScope.launch {
-            val files = job.files.map { java.io.File(it) }.filter { it.exists() && it.length() > 0 }
-            if (files.size < 2) {
-                _stitchState.value = StitchUiState.Failed(
-                    "Del job restano ${files.size} foto su ${job.files.size}: non c'è niente da preparare.",
-                )
-                return@launch
-            }
             _pointOfViewForJob.value = job.id
-            _stitchState.value = StitchUiState.Working(0f, "Allineo le ${files.size} foto per l'anteprima")
+            pointOfViewStart = job.view
+            val directory = PanoPrepStore.directory(prepRoot, job.id)
             try {
+                val ready = if (PanoPrepStore.exists(prepRoot, job.id)) {
+                    withContext(Dispatchers.IO) {
+                        PreparedPreview.open(directory, job.view ?: PanoramaView())
+                    }
+                } else {
+                    null
+                }
+                if (ready != null) {
+                    // Nessun conto da rifare: si entra e basta.
+                    when (val answer = choosePointOfView(ready)) {
+                        is AfterPreview.StopHere -> rememberPointOfView(job, answer.view)
+                        is AfterPreview.Stitch -> {
+                            answer.view?.let { rememberPointOfView(job, it, quiet = true) }
+                            stitchJobNow(job, files, answer.view ?: job.view)
+                        }
+                    }
+                    return@launch
+                }
+
+                // Prima volta: si allinea, e l'appunto si scrive appena l'anteprima e` pronta.
+                pointOfViewSaveTo = directory
+                _stitchState.value = StitchUiState.Working(0f, "Allineo le ${files.size} foto per l'anteprima")
                 container.stitchJob.runOnFiles(
                     files = files,
                     horizontalFovDegrees = effectiveFov(job.fovDegrees),
@@ -2008,18 +2075,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _stitchState.value = StitchUiState.Working(fraction, message)
                     },
                 ).onSuccess { done ->
-                    // Ha scelto «Cuci così»: la panoramica c'è, e vale la stessa regola di
-                    // sempre su cosa buttare.
                     finishJob(job, files, done)
                 }.onFailure { error ->
                     if (error is PreviewStopped) {
-                        container.panoJobStore.update { list ->
-                            list.copy(
-                                jobs = list.jobs.map { if (it.id == job.id) it.withView(error.view) else it },
-                            )
-                        }
-                        _stitchState.value = StitchUiState.Idle
-                        showMessage("Punto di vista salvato: il job è pronto da cucire")
+                        rememberPointOfView(job, error.view)
                     } else {
                         _stitchState.value = StitchUiState.Failed(error.message ?: "preparazione non riuscita")
                     }
@@ -2028,6 +2087,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _pointOfViewForJob.value = null
             }
         }
+    }
+
+    /** Scrive la scelta sul lavoro: da qui in poi la cucitura la applica senza chiedere. */
+    private fun rememberPointOfView(job: PanoJob, view: PanoramaView, quiet: Boolean = false) {
+        container.panoJobStore.update { list ->
+            list.copy(jobs = list.jobs.map { if (it.id == job.id) it.withView(view) else it })
+        }
+        if (!quiet) {
+            _stitchState.value = StitchUiState.Idle
+            showMessage("Punto di vista salvato: il job è pronto da cucire")
+        }
+    }
+
+    /** Cuce adesso questo lavoro, con il punto di vista dato. */
+    private suspend fun stitchJobNow(job: PanoJob, files: List<java.io.File>, view: PanoramaView?) {
+        _stitchState.value = StitchUiState.Working(0f, "Unisco le ${files.size} foto del job")
+        container.stitchJob.runOnFiles(
+            files = files,
+            horizontalFovDegrees = effectiveFov(job.fovDegrees),
+            overlapPercent = sequence.value.panoramaOverlapPercent,
+            fillNadir = job.spherical,
+            shotAtMs = job.createdAtMs,
+            tuning = stitchTuning(),
+            view = view,
+            onProgress = { fraction, message ->
+                _stitchState.value = StitchUiState.Working(fraction, message)
+            },
+        ).onSuccess { finishJob(job, files, it) }
+            .onFailure { _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita") }
     }
 
     /**
@@ -2092,6 +2180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.panoJobStore.update { list ->
                 list.copy(jobs = list.jobs.filterNot { it.id == job.id })
             }
+            PanoPrepStore.discard(prepRoot, job.id)
         }
         _stitchState.value = done
     }
@@ -2177,6 +2266,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         container.panoJobStore.update { list ->
             list.copy(jobs = list.jobs.filterNot { it.id == job.id })
         }
+        // L'appunto dell'anteprima non e` un archivio: da solo non serve a niente, e se ne va
+        // con il lavoro a cui apparteneva.
+        PanoPrepStore.discard(prepRoot, job.id)
         showMessage("Job annullato: le foto restano in DCIM › Luna Ultra › Panoramiche")
     }
 

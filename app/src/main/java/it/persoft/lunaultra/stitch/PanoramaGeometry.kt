@@ -923,3 +923,70 @@ private fun multiply(a: FloatArray, b: FloatArray): FloatArray {
 
 /** Sotto questo coseno dell'inclinazione, pan e rollio non si distinguono piu`. */
 private const val GIMBAL_LOCK_COSINE = 1e-4f
+
+/**
+ * Di quanto una proiezione allunga in verticale il pixel piu` lontano dall'orizzonte.
+ *
+ * Il numero che conta davvero, e non e` l'angolo: la cilindrica moltiplica la scala verticale
+ * per `1/cos²`, Mercatore per `1/cos`, l'equirettangolare per niente. A trentacinque gradi la
+ * cilindrica stira di una volta e mezza — si vede appena. A sessantacinque stira di cinque
+ * volte e mezza, e quei pixel la tela deve inventarseli.
+ */
+fun verticalStretchOf(projection: StitchProjection, reachDegrees: Float): Float {
+    val phi = min(reachDegrees, projection.limitDegrees - 0.5f).toRadians()
+    val secant = 1f / cos(phi).coerceAtLeast(1e-3f)
+    return when (projection) {
+        StitchProjection.EQUIRECTANGULAR -> 1f
+        StitchProjection.CYLINDRICAL -> secant * secant
+        StitchProjection.MERCATOR -> secant
+    }
+}
+
+/**
+ * E di quanto lo allarga in orizzontale: la secante, per tutte e tre.
+ *
+ * E` la larghezza del parallelo, che verso il polo si accorcia sulla sfera e sulla tela no.
+ * Cambia solo quello che fanno in verticale, ed e` per questo che le forme si conservano
+ * soltanto in Mercatore.
+ */
+fun horizontalStretchOf(projection: StitchProjection, reachDegrees: Float): Float {
+    val phi = min(reachDegrees, projection.limitDegrees - 0.5f).toRadians()
+    return 1f / cos(phi).coerceAtLeast(1e-3f)
+}
+
+/** Fin dove arrivano le foto, in gradi dall'orizzonte, col ritaglio gia` applicato. */
+fun verticalReachOf(
+    placements: List<FramePlacement>,
+    lens: PinholeLens,
+    limitDegrees: Float,
+): Float {
+    val half = lens.verticalFovDegrees / 2f
+    val top = placements.maxOf { it.effectiveTilt } + half
+    val bottom = placements.minOf { it.effectiveTilt } - half
+    val seen = max(abs(top), abs(bottom))
+    return if (limitDegrees > 0f) min(seen, limitDegrees) else seen
+}
+
+/**
+ * La proiezione che regge questa copertura: quella voluta, o l'equirettangolare se stira troppo.
+ *
+ * Una funzione sola, chiamata dalla cucitura e dall'anteprima. Se fossero due, l'anteprima
+ * potrebbe mostrare una proiezione e la panoramica finale uscirne un'altra — ed e` esattamente
+ * la differenza che poi non si spiega guardando il risultato.
+ */
+fun projectionThatHolds(
+    placements: List<FramePlacement>,
+    lens: PinholeLens,
+    fillNadir: Boolean,
+    preferred: StitchProjection,
+    limitDegrees: Float,
+    maxVerticalStretch: Float,
+): StitchProjection {
+    // La sferica non ha scelta: e` l'unica che arriva ai poli e l'unica che un visualizzatore
+    // 360° sa leggere.
+    if (fillNadir) return StitchProjection.EQUIRECTANGULAR
+    val reach = verticalReachOf(placements, lens, limitDegrees)
+    if (verticalStretchOf(preferred, reach) <= maxVerticalStretch) return preferred
+    // Quando la scelta non regge si va diritti all'equirettangolare, che non stira affatto.
+    return StitchProjection.EQUIRECTANGULAR
+}

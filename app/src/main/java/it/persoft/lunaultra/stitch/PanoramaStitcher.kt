@@ -792,18 +792,8 @@ class PanoramaStitcher(
      * È il numero che decide se una proiezione è utilizzabile: ognuna ha una latitudine oltre
      * la quale non ci arriva, e la tela non lo dice — ci arriva e basta, clampando.
      */
-    private fun verticalReach(placements: List<FramePlacement>, lens: PinholeLens): Float {
-        val half = lens.verticalFovDegrees / 2f
-        val top = placements.maxOf { it.effectiveTilt } + half
-        val bottom = placements.minOf { it.effectiveTilt } - half
-        val seen = max(abs(top), abs(bottom))
-        // Se la tela si ferma prima, la proiezione va giudicata dove si ferma: è tutto il senso
-        // del limite verticale. Chiedere la cilindrica su una panoramica che arriva allo zenit
-        // non ha senso; chiederla su quella stessa panoramica tagliata a sessanta gradi sì, ed è
-        // esattamente quello che si fa in Autopano scegliendo la cilindrica e ritagliando.
-        val limit = tuning.verticalLimitDegrees
-        return if (limit > 0f) min(seen, limit) else seen
-    }
+    private fun verticalReach(placements: List<FramePlacement>, lens: PinholeLens): Float =
+        verticalReachOf(placements, lens, tuning.verticalLimitDegrees)
 
     /**
      * La proiezione che la tela può davvero reggere, che non sempre è quella chiesta.
@@ -829,15 +819,8 @@ class PanoramaStitcher(
      * pixel la tela deve inventarseli, perché nella foto non ci sono. Il file diventa enorme
      * e il dettaglio no — è esattamente l'aria di «risoluzione altissima e immagine molle».
      */
-    private fun verticalStretch(projection: StitchProjection, reachDegrees: Float): Float {
-        val phi = min(reachDegrees, projection.limitDegrees - 0.5f).toRadians()
-        val secant = 1f / cos(phi).coerceAtLeast(1e-3f)
-        return when (projection) {
-            StitchProjection.EQUIRECTANGULAR -> 1f
-            StitchProjection.CYLINDRICAL -> secant * secant
-            StitchProjection.MERCATOR -> secant
-        }
-    }
+    private fun verticalStretch(projection: StitchProjection, reachDegrees: Float): Float =
+        verticalStretchOf(projection, reachDegrees)
 
     /**
      * Di quanto la stessa proiezione allarga quel pixel nell'altro senso.
@@ -846,10 +829,8 @@ class PanoramaStitcher(
      * parallelo, che verso il polo si accorcia sulla sfera e sulla tela no. Cambia solo cosa
      * fanno in verticale, ed e` per questo che le forme si conservano soltanto in Mercatore.
      */
-    private fun horizontalStretch(projection: StitchProjection, reachDegrees: Float): Float {
-        val phi = min(reachDegrees, projection.limitDegrees - 0.5f).toRadians()
-        return 1f / cos(phi).coerceAtLeast(1e-3f)
-    }
+    private fun horizontalStretch(projection: StitchProjection, reachDegrees: Float): Float =
+        horizontalStretchOf(projection, reachDegrees)
 
     /**
      * Quanto deforma il cielo alto, e che cosa costerebbe tagliarlo.
@@ -935,14 +916,16 @@ class PanoramaStitcher(
     ): StitchProjection {
         // La sferica non ha scelta: è l'unica che arriva ai poli e l'unica che un
         // visualizzatore 360° sa leggere.
-        if (fillNadir) return StitchProjection.EQUIRECTANGULAR
-        val reach = verticalReach(placements, lens)
-        if (verticalStretch(tuning.projection, reach) <= MAX_VERTICAL_STRETCH) return tuning.projection
-        // Quando la scelta non regge si va **diritti all'equirettangolare**, che non stira
-        // affatto. Mercatore come ripiego automatico era la mossa peggiore delle tre: a
-        // sessantacinque gradi stira di due volte e mezza — cioè quasi quanto la cilindrica
-        // che si era appena rifiutata — e nessuno l'aveva chiesta.
-        return StitchProjection.EQUIRECTANGULAR
+        // Mercatore come ripiego automatico era la mossa peggiore delle tre: a sessantacinque
+        // gradi stira di due volte e mezza — quasi quanto la cilindrica che si era appena
+        // rifiutata — e nessuno l'aveva chiesta. La regola sta in un punto solo, condivisa con
+        // l'anteprima, perché mostrarne una e cucirne un'altra sarebbe la beffa peggiore.
+        return projectionThatHolds(
+            placements, lens, fillNadir,
+            preferred = tuning.projection,
+            limitDegrees = tuning.verticalLimitDegrees,
+            maxVerticalStretch = MAX_VERTICAL_STRETCH,
+        )
     }
 
     private fun chooseDensity(
@@ -1097,6 +1080,48 @@ class PanoramaStitcher(
                 verticalStretch = verticalStretch(projection, reach),
             )
         }
+
+        override suspend fun save(directory: java.io.File): Boolean =
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    directory.deleteRecursively()
+                    directory.mkdirs()
+                    val entries = frames.mapIndexed { index, frame ->
+                        val name = "%02d.jpg".format(index)
+                        PreparedPreview.writeThumbnail(
+                            frame.bitmap,
+                            java.io.File(directory, name),
+                            PreparedPreview.THUMBNAIL_LONG_SIDE,
+                        )
+                        val placement = placements[index]
+                        val correction = corrections.getOrNull(index)
+                        PreparedFrame(
+                            label = frame.label,
+                            image = name,
+                            // Gli angoli nominali e le correzioni si fondono: dopo
+                            // l'allineamento la distinzione non serve piu` a nessuno, e
+                            // l'anteprima deve solo sapere dove guarda ogni fotogramma.
+                            panDegrees = placement.effectivePan,
+                            tiltDegrees = placement.effectiveTilt,
+                            rollDegrees = placement.rollDegrees,
+                            focalScale = placement.focalScale,
+                            gain = correction?.gain ?: 1f,
+                            vignetteA = correction?.vignetteA ?: 0f,
+                            vignetteB = correction?.vignetteB ?: 0f,
+                        )
+                    }
+                    PanoPrepStore.write(
+                        directory,
+                        PreparedPano(
+                            jobId = directory.name,
+                            fovDegrees = lens.horizontalFovDegrees,
+                            spherical = fillNadir,
+                            frames = entries,
+                        ),
+                    )
+                    true
+                }.getOrDefault(false)
+            }
 
         override suspend fun paint(view: PanoramaView, longSide: Int): PreviewImage =
             withContext(Dispatchers.Default) {
@@ -5869,6 +5894,16 @@ interface PanoramaPreview {
 
     /** La panoramica dipinta in piccolo da questo punto di vista, con quanti gradi copre. */
     suspend fun paint(view: PanoramaView, longSide: Int): PreviewImage
+
+    /**
+     * Mette da parte tutto quello che serve a rifare questa anteprima senza rifare i conti.
+     *
+     * Allineare sono decine di secondi che non cambiano — le foto sono quelle, le posizioni
+     * pure — e rifarli ogni volta che si riapre un lavoro per spostare il centro di due gradi
+     * e` lavoro buttato. Quello che si scrive e` un appunto, non un archivio: sta in una
+     * cartella intitolata al lavoro, e quando il lavoro se ne va se ne va anche lei.
+     */
+    suspend fun save(directory: java.io.File): Boolean
 }
 
 /**

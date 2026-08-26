@@ -3517,6 +3517,7 @@ class PanoramaStitcher(
             seamNote = blendSubWindow(
                 output, ownerWeight, frame, placement, correction, lens, canvas,
                 columns, row0, bw, newW, sx0, sx1, sy0, sy1, full, warp, lonSin, lonCos,
+                gpu = gpu, gpuPlan = if (gpuColours) gpuPlan else null, c0 = c0,
             )
             blendMillis += System.currentTimeMillis() - blendStartedAt
         }
@@ -3652,6 +3653,10 @@ class PanoramaStitcher(
         /** Seno e coseno di ogni colonna della finestra, tabulati una volta da [pasteFrame]. */
         lonSin: FloatArray,
         lonCos: FloatArray,
+        /** La scheda grafica, se c'è: disegna la sotto-finestra invece di ricampionarla a mano. */
+        gpu: GpuSession?,
+        gpuPlan: GpuFrameUniforms?,
+        c0: Int,
     ): String {
         val sbw = sx1 - sx0 + 1
         val sbh = sy1 - sy0 + 1
@@ -3836,11 +3841,26 @@ class PanoramaStitcher(
         // 3) Riga per riga a piena risoluzione, tutte le CPU insieme: montaggio netto più
         // la correzione della propria sorgente. Le decisioni leggono l'istantanea, mai la
         // mappa viva.
-        parallelRows(subRow0, sbh, canvas.width) { by, rowPixels ->
+        //
+        // Il corpo della riga è uno solo e serve due strade. Se la scheda grafica c'è, il
+        // colore già corretto e il peso di sfumatura arrivano da lei — il peso nell'alfa, il
+        // colore nei ventiquattro bit bassi — e alla CPU resta l'aritmetica della fusione:
+        // chi possiede il pixel, quale delle due correzioni applicare, quanto sfumarla sul
+        // bordo. Se la scheda non c'è, quei due numeri se li calcola qui, proiettando e
+        // campionando come ha sempre fatto. Un corpo solo perché le due strade non possano
+        // divergere: era questo passaggio a costare trentun secondi su quarantasette di
+        // cucitura, e scriverne una copia per la scheda voleva dire mantenerne due per sempre.
+        //
+        // Una differenza resta, ed è dichiarata: dalla scheda il peso torna quantizzato a
+        // otto bit. È la stessa precisione con cui la mappa dei possessori conserva il peso
+        // vecchio, quindi il confronto fra i due è alla pari; a parità esatta la decisione
+        // può cadere dall'altra parte rispetto alla CPU, ma succede dove i due fotogrammi
+        // pesano identico — cioè dove si assomigliano di più e la scelta non si vede.
+        fun blendRow(by: Int, rowPixels: IntArray, band: IntArray?, bandBase: Int) {
             val row = subRow0 + by
             val projector = FrameProjector(placement, lens, warp)
-            val source = full?.let { SourceBlock(it) }
-            projector.row(canvas.latitudeAt(row))
+            val source = if (band == null) full?.let { SourceBlock(it) } else null
+            if (band == null) projector.row(canvas.latitudeAt(row))
             output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
             var touched = false
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
@@ -3866,9 +3886,20 @@ class PanoramaStitcher(
                 var newWeight = 0f
                 var useNew = false
                 if (present) {
-                    projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
-                    if (projector.inside) {
-                        newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
+                    // Il peso del nuovo: dalla scheda è l'alfa della fascia, dalla CPU è la
+                    // sfumatura calcolata sul posto. Zero vuol dire «qui questo fotogramma
+                    // non c'è» — fuori dal riquadro, o sul bordo già sfumato a niente.
+                    var packed = 0
+                    if (band != null) {
+                        packed = band[bandBase + bx]
+                        newWeight = (packed ushr 24) / 255f
+                    } else {
+                        projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
+                        if (projector.inside) {
+                            newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
+                        }
+                    }
+                    if (newWeight > 0f) {
                         // La stessa decisione della griglia ridotta, presa qui alla risoluzione
                         // vera: il taglio scelto sul minimo disaccordo, o la mediana geometrica
                         // se non c'era abbastanza sovrapposizione per sceglierlo.
@@ -3877,14 +3908,20 @@ class PanoramaStitcher(
                         } else {
                             newWeight > oldWeight
                         }
-                        if (newWeight > 0f && (oldWeight <= 0f || ownsNew)) {
+                        if (oldWeight <= 0f || ownsNew) {
                             useNew = true
-                            val color = sampleColor(frame, source, projector.x, projector.y)
-                            val factor = correction.factorAt(projector.x, projector.y)
-                            val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
-                            val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
-                            val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
-                            hard = (r shl 16) or (g shl 8) or b
+                            // Il colore corretto: la scheda lo consegna già moltiplicato per
+                            // il guadagno e la vignettatura, la CPU se lo campiona e corregge.
+                            hard = if (band != null) {
+                                packed and 0xFFFFFF
+                            } else {
+                                val color = sampleColor(frame, source, projector.x, projector.y)
+                                val factor = correction.factorAt(projector.x, projector.y)
+                                val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                                val g = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                                val b = (factor * (color and 0xFF)).roundToInt().coerceIn(0, 255)
+                                (r shl 16) or (g shl 8) or b
+                            }
                         }
                     }
                 }
@@ -3912,18 +3949,45 @@ class PanoramaStitcher(
                 output.setPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
             }
         }
+
+        // La scheda disegna la sotto-finestra a fasce, come già fa per la pittura: una
+        // fascia alla volta, così la memoria non deve reggere l'intero rettangolo — che a
+        // sei megapixel per fotogramma sarebbe un centinaio di megabyte in una volta sola.
+        var doneRows = 0
+        var blendedOnGpu = false
+        if (gpu != null && gpuPlan != null) {
+            blendedOnGpu = gpuBands(
+                gpu, gpuPlan, c0 + sx0, subRow0, sbw, sbh, weightOnly = false,
+            ) { band, bandRow, rows ->
+                parallelRows(subRow0 + bandRow, rows, canvas.width) { r, rowPixels ->
+                    blendRow(bandRow + r, rowPixels, band, r * sbw)
+                }
+                doneRows = bandRow + rows
+                true
+            }
+            if (!blendedOnGpu) gpuGiveUp("la fusione non è tornata dalla scheda")
+        }
+        // Quello che la scheda non ha fatto — tutto, se non c'era; la coda, se si è arresa a
+        // metà strada — lo fa la CPU. Si riparte dalla riga dopo l'ultima fascia riuscita:
+        // rifare una riga già fusa non sarebbe innocuo come rifare una riga già dipinta,
+        // perché la correzione si applicherebbe due volte sullo stesso pixel.
+        if (!blendedOnGpu) parallelRows(subRow0 + doneRows, sbh - doneRows, canvas.width) { r, rowPixels ->
+            blendRow(doneRows + r, rowPixels, null, 0)
+        }
+        // La scala della fusione nel log, e chi l'ha materialmente fatta: quando un
+        // fotogramma ci mette ottantatré secondi invece di sei, la prima cosa da sapere è se
+        // ha lavorato a una scala diversa dagli altri, o su una strada diversa, o se era il
+        // telefono a essere occupato altrove.
+        val come = "fusione a 1/%d su %s".format(s, if (blendedOnGpu) "GPU" else "CPU")
         return when {
             manySided ->
-                "confine sul peso (vicini su più lati: un taglio solo non basterebbe), fusione a 1/$s"
+                "confine sul peso (vicini su più lati: un taglio solo non basterebbe), $come"
             seam == null && tuning.seamMinimalDifference ->
-                "taglio a metà strada (la polarità della sovrapposizione non è chiara), fusione a 1/$s"
-            seam == null -> "taglio a metà strada, fusione a 1/$s"
-            // La scala della fusione nel log: quando un fotogramma ci mette ottantatré secondi
-            // invece di sei, la prima cosa da sapere è se ha lavorato a una scala diversa
-            // dagli altri o se era il telefono a essere occupato altrove.
-            else -> "taglio sul minimo disaccordo, %s, fusione a 1/%d".format(
+                "taglio a metà strada (la polarità della sovrapposizione non è chiara), $come"
+            seam == null -> "taglio a metà strada, $come"
+            else -> "taglio sul minimo disaccordo, %s, %s".format(
                 if (seam.vertical) "verticale" else "orizzontale",
-                s,
+                come,
             )
         }
     }

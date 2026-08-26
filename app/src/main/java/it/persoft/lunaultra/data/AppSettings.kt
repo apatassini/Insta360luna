@@ -185,6 +185,14 @@ data class StitchSettings(
 
     /** Pittura (proiezione, campionamento, fotometria) sulla scheda grafica. */
     val gpuPaint: Boolean = false,
+
+    /**
+     * Fusione (il riporto a piena risoluzione della giunzione) sulla scheda grafica.
+     *
+     * Accesa di serie: non è un passo nuovo da provare, è lo stesso shader della pittura sulla
+     * stessa texture già verificata. Senza la pittura non ha niente su cui lavorare.
+     */
+    val gpuBlend: Boolean = true,
 )
 
 @Serializable

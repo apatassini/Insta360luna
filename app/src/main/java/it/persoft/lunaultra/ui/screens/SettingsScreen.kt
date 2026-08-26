@@ -490,13 +490,24 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     onCheckedChange = { on -> viewModel.updateStitch { it.copy(gpuPaint = on) } },
                     icon = LunaIcons.Gpu,
                 )
+                ToggleRow(
+                    title = "Fusione su GPU",
+                    subtitle = "La giunzione riportata a piena risoluzione. Va con la pittura: " +
+                        "stesso shader, stessa texture, stesso autocontrollo. Senza pittura " +
+                        "non ha niente su cui lavorare",
+                    checked = settings.stitch.gpuBlend,
+                    enabled = settings.stitch.gpuPaint,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(gpuBlend = on) } },
+                    icon = LunaIcons.Gpu,
+                )
                 Hint(
                     "Una alla volta, per capire quale porta cosa. Sotto c'è sempre la CPU: se il " +
                         "contesto grafico non si apre, se l'originale non entra in una texture o " +
                         "se la scheda non dice le stesse cose della CPU sul riquadro di prova, " +
                         "l'unione continua com'era e nel log compare il motivo. La scheda di fine " +
-                        "unione riporta sempre «ricognizione su GPU/CPU, pittura su GPU/CPU», " +
-                        "l'autocontrollo con i suoi scarti, e i tempi divisi fra disegno e riporto.",
+                        "unione riporta sempre su cosa hanno girato i tre passi, l'autocontrollo " +
+                        "con i suoi scarti, i tempi divisi fra disegno e riporto, e — dentro la " +
+                        "fusione — quanto pesano la griglia ridotta, le piramidi e il riporto.",
                 )
             }
         }

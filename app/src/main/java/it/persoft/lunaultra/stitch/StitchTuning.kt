@@ -145,6 +145,16 @@ data class StitchTuning(
      * il log dice perché.
      */
     val gpuPaint: Boolean = false,
+
+    /**
+     * La fusione — il riporto a piena risoluzione della giunzione — sulla scheda grafica.
+     *
+     * Nasce accesa, al contrario delle altre due, perché non è un passo nuovo da provare: usa
+     * lo stesso shader della pittura, sulla stessa texture già caricata e con lo stesso piano
+     * già passato dall'autocontrollo. Se la pittura è spenta, questa non ha niente su cui
+     * lavorare e resta spenta di conseguenza.
+     */
+    val gpuBlend: Boolean = true,
 )
 
 /** Una ricetta della modalità test: lettera per il nome del file, titolo per il log. */

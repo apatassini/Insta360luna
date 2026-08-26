@@ -142,6 +142,20 @@ class PanoramaStitcher(
     private var paintMillis = 0L
 
     /**
+     * I tre pezzi dentro la fusione, perché «fusione» da sola non basta più a decidere.
+     *
+     * Spostata la fusione sulla scheda grafica il totale è sceso di un terzo, non della metà
+     * che ci si aspettava: senza sapere quale dei tre pezzi sia rimasto indietro, la mossa
+     * successiva sarebbe di nuovo a tentoni. `griglia` è tutto quello che si fa a scala
+     * ridotta — l'istantanea dei possessori, il campionamento delle celle, la ricerca del
+     * taglio; `piramidi` è la fusione multibanda vera; `riporto` è il ciclo a piena
+     * risoluzione, l'unico dei tre che la scheda grafica tocchi.
+     */
+    private var blendGridMillis = 0L
+    private var blendPyramidMillis = 0L
+    private var blendApplyMillis = 0L
+
+    /**
      * Il tempo della scheda grafica, separato in disegno e riporto.
      *
      * Sono due cose diverse e conviene vederle separate: `disegno` è quello che fa la GPU,
@@ -614,6 +628,14 @@ class PanoramaStitcher(
             // Il tempo della scheda non è un tempo in più: sta già dentro riconoscimento e
             // pittura. Separarlo dice l'unica cosa che serve per la mossa successiva — se il
             // collo di bottiglia è ancora il disegno o si è spostato sul riporto.
+            if (blendMillis > 0L) {
+                notes += ("Dentro la fusione: griglia ridotta %.1f s · piramidi %.1f s · " +
+                    "riporto a piena risoluzione %.1f s").format(
+                    blendGridMillis / 1000f,
+                    blendPyramidMillis / 1000f,
+                    blendApplyMillis / 1000f,
+                )
+            }
             if (gpuDrawMillis + gpuMergeMillis + gpuUploadMillis > 0L) {
                 notes += ("Di cui sulla scheda grafica: disegno %.1f s · riporto sulla tela %.1f s · " +
                     "caricamento delle sorgenti %.1f s").format(
@@ -3031,6 +3053,7 @@ class PanoramaStitcher(
             listOfNotNull(
                 "ricognizione".takeIf { tuning.gpuRecognise },
                 "pittura".takeIf { tuning.gpuPaint },
+                "fusione".takeIf { tuning.gpuPaint && tuning.gpuBlend },
             ).joinToString(" e ")
         return GpuSession(renderer, dispatcher)
     }
@@ -3517,7 +3540,7 @@ class PanoramaStitcher(
             seamNote = blendSubWindow(
                 output, ownerWeight, frame, placement, correction, lens, canvas,
                 columns, row0, bw, newW, sx0, sx1, sy0, sy1, full, warp, lonSin, lonCos,
-                gpu = gpu, gpuPlan = if (gpuColours) gpuPlan else null, c0 = c0,
+                gpu = gpu, gpuPlan = if (gpuColours && tuning.gpuBlend) gpuPlan else null, c0 = c0,
             )
             blendMillis += System.currentTimeMillis() - blendStartedAt
         }
@@ -3673,6 +3696,7 @@ class PanoramaStitcher(
         val gw = (sbw + s - 1) / s
         val gh = (sbh + s - 1) / s
         val gcount = gw * gh
+        val gridStartedAt = System.currentTimeMillis()
 
         // L'istantanea dei possessori, presa PRIMA di qualsiasi scrittura. Senza, la riga
         // dispari di ogni coppia leggeva il peso appena scritto dalla riga sopra (stessa
@@ -3812,6 +3836,8 @@ class PanoramaStitcher(
         fillHoles(baseColor, valid, gw, gh)
         for (g in 0 until gcount) if (!valid[g]) newColor[g] = baseColor[g]
 
+        blendGridMillis += System.currentTimeMillis() - gridStartedAt
+
         // 2) La fusione sulla versione ridotta, un canale per volta. Della fusione si
         // tengono DUE correzioni — rispetto al nuovo e rispetto al vecchio — così ogni
         // pixel a piena risoluzione applica quella della propria sorgente: al confine le
@@ -3821,6 +3847,7 @@ class PanoramaStitcher(
         val corrBase = Array(3) { FloatArray(gcount) }
         // Manopola multibanda spenta: correzioni a zero, il montaggio resta a taglio netto —
         // è la ricetta diagnostica che mostra dove cadono le giunzioni.
+        val pyramidStartedAt = System.currentTimeMillis()
         for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
             if (!tuning.multiband) break
             val baseChannel = FloatArray(gcount) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
@@ -3837,6 +3864,7 @@ class PanoramaStitcher(
                 corrBase[channel][g] = blended[g] - baseChannel[g]
             }
         }
+        blendPyramidMillis += System.currentTimeMillis() - pyramidStartedAt
 
         // 3) Riga per riga a piena risoluzione, tutte le CPU insieme: montaggio netto più
         // la correzione della propria sorgente. Le decisioni leggono l'istantanea, mai la
@@ -3953,6 +3981,7 @@ class PanoramaStitcher(
         // La scheda disegna la sotto-finestra a fasce, come già fa per la pittura: una
         // fascia alla volta, così la memoria non deve reggere l'intero rettangolo — che a
         // sei megapixel per fotogramma sarebbe un centinaio di megabyte in una volta sola.
+        val applyStartedAt = System.currentTimeMillis()
         var doneRows = 0
         var blendedOnGpu = false
         if (gpu != null && gpuPlan != null) {
@@ -3974,6 +4003,7 @@ class PanoramaStitcher(
         if (!blendedOnGpu) parallelRows(subRow0 + doneRows, sbh - doneRows, canvas.width) { r, rowPixels ->
             blendRow(doneRows + r, rowPixels, null, 0)
         }
+        blendApplyMillis += System.currentTimeMillis() - applyStartedAt
         // La scala della fusione nel log, e chi l'ha materialmente fatta: quando un
         // fotogramma ci mette ottantatré secondi invece di sei, la prima cosa da sapere è se
         // ha lavorato a una scala diversa dagli altri, o su una strada diversa, o se era il

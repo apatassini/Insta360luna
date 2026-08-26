@@ -364,6 +364,23 @@ data class GimbalCalibrationProfile(
         // da una misura che dipendeva da cosa c'era davanti all'obiettivo.
         const val CURRENT_SCHEMA = 5
 
+        /**
+         * La correzione da applicare al profilo, resa ripetibile.
+         *
+         * [measured] è quanto il gimbal ha sbagliato **con la taratura in vigore al momento
+         * dello scatto**. Se da allora la taratura è cambiata — perché una prima unione l'aveva
+         * già corretta — riapplicare la misura intera correggerebbe due volte lo stesso errore:
+         * riunendo tre volte le stesse foto, 1,31 diventerebbe 2,25 e il gimbal comincerebbe a
+         * mancare i finecorsa.
+         *
+         * Il rapporto fra la taratura di allora e quella di adesso rimette le cose a posto. La
+         * prima volta vale uno e passa la misura intera; la seconda volta la taratura di adesso
+         * è già quella di allora moltiplicata per la misura, quindi il rapporto vale l'inverso
+         * della misura e la correzione risultante è esattamente 1: nulla cambia.
+         */
+        fun repeatableCorrection(measured: Float, scaleAtShot: Float, scaleNow: Float): Float =
+            if (scaleNow <= 0f) 1f else measured * scaleAtShot / scaleNow
+
         /** Oltre questi limiti la correzione non è una taratura, è un sintomo. */
         const val MIN_ANGULAR_SCALE = 0.4f
         const val MAX_ANGULAR_SCALE = 2.5f

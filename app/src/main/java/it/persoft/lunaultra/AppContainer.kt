@@ -25,6 +25,7 @@ import it.persoft.lunaultra.timelapse.TimelapseEngine
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import kotlinx.coroutines.CoroutineScope
 import java.io.File
+import kotlin.math.abs
 
 /** Composizione manuale delle dipendenze: l'app è piccola e non richiede un framework DI. */
 class AppContainer(context: Context, private val scope: CoroutineScope) {
@@ -86,8 +87,46 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     /** Risponde alla domanda «si può scrivere sulla scheda della camera?» provandoci. */
     val writeProbe = CameraWriteProbe(wifiBinder, log)
 
-    /** Dagli scatti di una panoramica alla panoramica unita nella galleria del telefono. */
-    val stitchJob = PanoramaStitchJob(appContext, media, log, locationDiary)
+    /**
+     * L'unione delle panoramiche, che è anche il nostro strumento di taratura del gimbal.
+     *
+     * Il gimbal non ha ritorno di posizione: la Luna Ultra manda la notifica 8302 con due soli
+     * bit — i finecorsa — e gli altri sette campi restano a zero sempre. Quindi la posizione la
+     * calcoliamo noi, integrando velocità per tempo, e la scala di quella velocità nasceva da un
+     * numero di catalogo mai verificato. Su un esemplare vero sbagliava del 31%.
+     *
+     * L'unica misura affidabile degli angoli veri sono le foto, dove il righello è il campo
+     * visivo dell'obiettivo. Quindi ogni panoramica unita corregge la taratura: si compone con
+     * quella che c'è già, così ogni panoramica successiva la rifinisce invece di ripartire.
+     */
+    val stitchJob = PanoramaStitchJob(
+        context = appContext,
+        media = media,
+        log = log,
+        locations = locationDiary,
+        onGimbalScale = { pan, tilt ->
+            val before = calibrationStore.state.value
+            if (before.isValid && (abs(pan - 1f) >= 0.01f || abs(tilt - 1f) >= 0.01f)) {
+                calibrationStore.update { it.withAngularScale(pan, tilt) }
+                val after = calibrationStore.state.value
+                log.info(
+                    "TARATURA DEL GIMBAL CORRETTA DALLE FOTO",
+                    "Verticale ×%.3f → ×%.3f · orizzontale ×%.3f → ×%.3f\n".format(
+                        before.tiltAngularScale,
+                        after.tiltAngularScale,
+                        before.panAngularScale,
+                        after.panAngularScale,
+                    ) +
+                        "Misurato sulle foto appena unite: è l'unico righello che abbiamo, " +
+                        "perché la camera la sua posizione non la dice.",
+                )
+            }
+        },
+        gimbalScaleNow = {
+            val profile = calibrationStore.state.value
+            profile.panAngularScale to profile.tiltAngularScale
+        },
+    )
 
     /** Le panoramiche scattate e non ancora unite: scaricate, marcate, in attesa del via. */
     val panoJobStore = JsonFileStore(

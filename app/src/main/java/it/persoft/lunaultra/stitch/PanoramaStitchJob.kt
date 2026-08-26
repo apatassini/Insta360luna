@@ -7,6 +7,7 @@ import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.media.GALLERY_FOLDER
 import it.persoft.lunaultra.media.GALLERY_RELATIVE_PATH
 import it.persoft.lunaultra.media.GALLERY_ROOT
@@ -60,6 +61,20 @@ class PanoramaStitchJob(
     private val media: MediaRepository,
     private val log: EventLog,
     private val locations: it.persoft.lunaultra.media.LocationDiary? = null,
+    /**
+     * Che fare della taratura misurata sulle foto.
+     *
+     * L'unione misura, come effetto secondario, di quanto il gimbal si è mosso davvero rispetto
+     * a quanto gli era stato chiesto. Correggere gli angoli qui rimette a posto *questa*
+     * panoramica; scrivere la misura nel profilo del gimbal rimette a posto anche la
+     * sovrapposizione dei prossimi scatti, che altrimenti resta più stretta di quella impostata.
+     *
+     * Passa di qui e non dal pacchetto `stitch` perché lo stitcher non deve sapere che esiste un
+     * gimbal con un profilo salvato: lui misura e lo dice, decide chi lo ha chiamato.
+     */
+    private val onGimbalScale: (pan: Float, tilt: Float) -> Unit = { _, _ -> },
+    /** La taratura del gimbal in vigore adesso: si scrive nei tag e serve a non correggere due volte. */
+    private val gimbalScaleNow: () -> Pair<Float, Float> = { 1f to 1f },
 ) {
 
     suspend fun run(
@@ -96,6 +111,8 @@ class PanoramaStitchJob(
                         panDegrees = angle.panDegrees,
                         tiltDegrees = angle.tiltDegrees,
                         fovDegrees = horizontalFovDegrees,
+                        panScale = gimbalScaleNow().first,
+                        tiltScale = gimbalScaleNow().second,
                     ),
                 )
                 PanoramaShot(
@@ -106,7 +123,12 @@ class PanoramaStitchJob(
                 )
             }
 
-            stitchAndSave(shots, horizontalFovDegrees, fillNadir) { fraction, message ->
+            stitchAndSave(
+                shots,
+                horizontalFovDegrees,
+                fillNadir,
+                scaleAtShot = gimbalScaleNow(),
+            ) { fraction, message ->
                 onProgress(DOWNLOAD_SHARE + (1f - DOWNLOAD_SHARE) * fraction, message)
             }
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
@@ -154,6 +176,8 @@ class PanoramaStitchJob(
                         panDegrees = angle.panDegrees,
                         tiltDegrees = angle.tiltDegrees,
                         fovDegrees = horizontalFovDegrees,
+                        panScale = gimbalScaleNow().first,
+                        tiltScale = gimbalScaleNow().second,
                     ),
                 )
                 locations?.stampFile(draft, item.takenAtMs)
@@ -326,7 +350,15 @@ class PanoramaStitchJob(
                 return@runCatching if (testMode) {
                     stitchTestVariants(shots, fov, wideSearch = false, shotAtMs = shotAtMs, base = tuning, onProgress = onProgress)
                 } else {
-                    stitchAndSave(shots, fov, fillNadir = fillNadir, shotAtMs = shotAtMs, tuning = tuning, onProgress = onProgress)
+                    stitchAndSave(
+                        shots,
+                        fov,
+                        fillNadir = fillNadir,
+                        shotAtMs = shotAtMs,
+                        tuning = tuning,
+                        scaleAtShot = ordered.first().second!!.let { it.panScale to it.tiltScale },
+                        onProgress = onProgress,
+                    )
                 }
             }
 
@@ -361,12 +393,35 @@ class PanoramaStitchJob(
         wideSearch: Boolean = false,
         shotAtMs: Long = System.currentTimeMillis(),
         tuning: StitchTuning = StitchTuning(),
+        /** Con che taratura erano state scattate queste foto; null se non lo sappiamo. */
+        scaleAtShot: Pair<Float, Float>? = null,
         onProgress: (Float, String) -> Unit,
     ): StitchUiState.Done {
         // La memoria si misura adesso, non all'avvio: quanta ne sia libera dipende da cosa
         // stava facendo il telefono un minuto fa.
         val stitcher = PanoramaStitcher(onProgress, tuning, MemoryBudget.measure(context))
         val outcome = stitcher.stitch(shots, horizontalFovDegrees, fillNadir, wideSearch).getOrThrow()
+        // La correzione da girare al profilo del gimbal, resa ripetibile.
+        //
+        // Quello che l'unione misura è quanto il gimbal ha sbagliato **con la taratura di
+        // allora**. Se da allora la taratura è cambiata — perché una prima unione l'aveva già
+        // corretta — riapplicare la misura intera vorrebbe dire correggere due volte lo stesso
+        // errore. Riunendo tre volte le stesse foto, 1,31 diventerebbe 2,25 e il gimbal
+        // comincerebbe a mancare i finecorsa.
+        //
+        // Il rapporto fra la taratura di allora e quella di adesso rimette le cose a posto: la
+        // prima volta vale uno e passa la misura intera, la seconda vale l'inverso della misura
+        // e la annulla. Senza sapere con che taratura erano state scattate — foto vecchie, senza
+        // il campo nel tag — non si tocca niente e ci si limita a raccontarlo nel verdetto.
+        val panScale = outcome.report.gimbalScalePan
+        val tiltScale = outcome.report.gimbalScaleTilt
+        if (panScale != null && tiltScale != null && scaleAtShot != null) {
+            val (panNow, tiltNow) = gimbalScaleNow()
+            onGimbalScale(
+                GimbalCalibrationProfile.repeatableCorrection(panScale, scaleAtShot.first, panNow),
+                GimbalCalibrationProfile.repeatableCorrection(tiltScale, scaleAtShot.second, tiltNow),
+            )
+        }
         val unaligned = outcome.report.refinements.count { it.contains("resta dov'era") }
         if (unaligned > 0) {
             log.warn(

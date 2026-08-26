@@ -55,6 +55,17 @@ data class StitchReport(
      * sovrappongono le foto, il campo visivo misurato, e se qualcosa non ha funzionato.
      */
     val verdict: List<String> = emptyList(),
+    /**
+     * Di quanto il gimbal si è mosso davvero rispetto a quanto gli era stato chiesto.
+     *
+     * Nullo quando non si è potuto misurare. Non è un dato da referto: è una **taratura**, e
+     * chi riceve questo report la scrive nel profilo del gimbal. La panoramica è lo strumento
+     * di misura migliore che abbiamo — il righello è il campo visivo dell'obiettivo, che è un
+     * dato ottico verificabile, mentre la corsa degli assi era un numero di catalogo che
+     * nessuno aveva mai controllato.
+     */
+    val gimbalScalePan: Float? = null,
+    val gimbalScaleTilt: Float? = null,
 )
 
 data class StitchOutcome(val bitmap: Bitmap, val report: StitchReport)
@@ -187,6 +198,8 @@ class PanoramaStitcher(
             // l'orizzonte dove l'inclinazione dice che dovrebbe stare, e la rifinitura ha una
             // finestra di quattro gradi, che con dieci gradi di errore non serve a niente.
             val scaleNotes = mutableListOf<String>()
+            var measuredPanScale: Float? = null
+            var measuredTiltScale: Float? = null
             if (!wideSearch && tuning.calibrateGimbal && shots.size >= 3) {
                 onProgress(0.06f, "Verifico gli angoli del gimbal")
                 val scale = measureGimbalScale(frames, placements, lens)
@@ -198,6 +211,12 @@ class PanoramaStitcher(
                         scaleNotes += ("Gimbal: angoli verificati su %d giunzioni, si è mosso di quello che " +
                             "gli era stato chiesto").format(scale.panPairs + scale.tiltPairs)
                     } else {
+                        // La misura esce di qui: chi ha chiamato la userà per correggere la
+                        // taratura del gimbal, che è l'unico posto dove serve davvero. Correggerla
+                        // qui rimette a posto questa panoramica; correggerla là rimette a posto
+                        // anche la sovrapposizione dei prossimi scatti.
+                        measuredPanScale = scale.pan
+                        measuredTiltScale = scale.tilt
                         // Si scala attorno al centro della panoramica, non attorno allo zero del
                         // gimbal: quello che si misura è quanto **si è mosso**, e il punto da cui
                         // si è mosso è dove è cominciata la panoramica.
@@ -210,9 +229,9 @@ class PanoramaStitcher(
                             )
                         }
                         scaleNotes += ("Gimbal fuori taratura: si muove ×%.2f in verticale e ×%.2f in " +
-                            "orizzontale rispetto a quanto gli si chiede%s — angoli corretti qui, ma " +
-                            "la sovrapposizione degli scatti resta più stretta di quella impostata " +
-                            "finché non lo si corregge anche nella taratura " +
+                            "orizzontale rispetto a quanto gli si chiede%s — angoli corretti qui, e la " +
+                            "misura va anche nel profilo del gimbal, così i prossimi scatti si " +
+                            "sovrappongono di quanto gli si chiede " +
                             "(misurato su %d giunzioni verticali e %d orizzontali)").format(
                             scale.tilt,
                             scale.pan,
@@ -565,6 +584,8 @@ class PanoramaStitcher(
                     worstCorrectionDegrees = refinement.worstCorrection,
                     nadirPatchRows = patchedRows,
                     verdict = verdict,
+                    gimbalScalePan = measuredPanScale,
+                    gimbalScaleTilt = measuredTiltScale,
                 ),
             )
         }

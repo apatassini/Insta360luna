@@ -146,4 +146,35 @@ class CalibrationBackupTest {
         assertEquals(1.26f, corretto.panAngularScale, 1e-4f)
         assertEquals(1.235f, corretto.tiltAngularScale, 1e-4f)
     }
+
+    /**
+     * Riunire due volte le stesse foto non deve correggere due volte.
+     *
+     * È il rischio vero di far tarare il gimbal dalle panoramiche: le foto restano sul telefono
+     * e si riuniscono quando si vuole. Senza questo conto, tre unioni delle stesse nove foto
+     * porterebbero la scala da 1,31 a 2,25, e il gimbal comincerebbe a mancare i finecorsa.
+     */
+    @Test
+    fun `correggere due volte le stesse foto non cambia niente la seconda volta`() {
+        val misura = 1.312f
+        val alloScatto = 1f
+
+        val prima = GimbalCalibrationProfile.repeatableCorrection(misura, alloScatto, scaleNow = 1f)
+        assertEquals(misura, prima, 1e-5f)
+
+        // Applicata: adesso il profilo vale 1,312. Le stesse foto restano scattate a 1.
+        val adesso = 1f * prima
+        val seconda = GimbalCalibrationProfile.repeatableCorrection(misura, alloScatto, scaleNow = adesso)
+        assertEquals(1f, seconda, 1e-5f)
+
+        // E una terza volta pure.
+        val terza = GimbalCalibrationProfile.repeatableCorrection(misura, alloScatto, scaleNow = adesso * seconda)
+        assertEquals(1f, terza, 1e-5f)
+    }
+
+    /** Una taratura a zero non manda in divisione per zero: si lascia stare tutto com'è. */
+    @Test
+    fun `una taratura a zero non corregge niente`() {
+        assertEquals(1f, GimbalCalibrationProfile.repeatableCorrection(1.3f, 1f, scaleNow = 0f), 0f)
+    }
 }

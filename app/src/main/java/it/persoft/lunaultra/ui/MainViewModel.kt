@@ -1286,11 +1286,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Pausa fra una lettura e l'altra: la camera salva una foto in poco più di un secondo. */
     private val FILE_SETTLE_DELAY_MS = 1_500L
 
-    /** Quanto sta fermo il dito prima che l'anteprima si ridisegni. */
-    private val POINT_OF_VIEW_SETTLE_MS = 90L
+    /** Il lato lungo dell'anteprima a dito alzato: abbastanza da giudicare com'e` venuta. */
+    private val POINT_OF_VIEW_LONG_SIDE = 720
 
-    /** Il lato lungo dell'anteprima: abbastanza da giudicare, abbastanza poco da seguire il dito. */
-    private val POINT_OF_VIEW_LONG_SIDE = 640
+    /** E quello mentre il dito trascina: un quarto dei pixel, il doppio dei disegni al secondo. */
+    private val POINT_OF_VIEW_DRAG_LONG_SIDE = 360
 
     /** Oltre lo zenit non si va: la panoramica si rovescerebbe. */
     private val POINT_OF_VIEW_MAX_TILT = 89f
@@ -1326,6 +1326,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pointOfViewPainter: PanoramaPreview? = null
     private var pointOfViewAnswer: CompletableDeferred<AfterPreview>? = null
     private var pointOfViewJob: Job? = null
+    private var pointOfViewRendering = false
+    private var pointOfViewStale = false
 
     /**
      * Quello che la cucitura chiama quando arriva alla fase intermedia.
@@ -1353,27 +1355,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             pointOfViewAnswer = null
             _pointOfViewImage.value = null
             _pointOfViewShape.value = null
+            _pointOfViewDragging.value = false
+            pointOfViewRendering = false
+            pointOfViewStale = false
         }
     }
 
+    /** Vero mentre il dito sta trascinando: serve a disegnare piccolo e in fretta. */
+    private val _pointOfViewDragging = MutableStateFlow(false)
+    val pointOfViewDragging: StateFlow<Boolean> = _pointOfViewDragging
+
     /**
-     * Ridipinge l'anteprima, ma non a ogni pixel del dito.
+     * Ridipinge l'anteprima appresso al dito, senza fare la fila.
      *
-     * I numeri della deformazione si aggiornano subito, perché costano niente e sono quelli che
-     * si guardano mentre si muove. Il disegno invece aspetta un attimo di fermo: ridipingerlo a
-     * ogni frame del trascinamento vorrebbe dire buttare via nove disegni su dieci prima ancora
-     * che finiscano, e il decimo arriverebbe comunque in ritardo.
+     * Aspettare un attimo di fermo prima di ridisegnare era la scelta prudente, e si vedeva:
+     * l'immagine restava indietro e ripartiva a scatti. Aspettare non serve — quello che serve
+     * e` non accumulare lavoro. Qui il disegno in corso non si annulla mai a meta` (buttarlo
+     * vuol dire aver disegnato per niente): si segna che nel frattempo la vista e` cambiata, e
+     * appena finisce si riparte dall'ultima. Uno alla volta, sempre l'ultimo, mai una coda.
+     *
+     * Mentre il dito e` giu` si disegna piccolo: meta` lato vuol dire un quarto dei pixel e il
+     * doppio abbondante di disegni al secondo. Al dito alzato ne parte uno a piena qualita`.
+     *
+     * I numeri della deformazione non passano di qui: costano niente e si aggiornano subito.
      */
     private fun repaintPointOfView(immediate: Boolean = false) {
         val painter = pointOfViewPainter ?: return
-        val view = _pointOfView.value
-        _pointOfViewShape.value = runCatching { painter.deformation(view) }.getOrNull()
-        pointOfViewJob?.cancel()
-        pointOfViewJob = viewModelScope.launch {
-            if (!immediate) delay(POINT_OF_VIEW_SETTLE_MS)
-            runCatching { painter.paint(view, POINT_OF_VIEW_LONG_SIDE) }
-                .onSuccess { _pointOfViewImage.value = it }
+        _pointOfViewShape.value = runCatching { painter.deformation(_pointOfView.value) }.getOrNull()
+        if (pointOfViewRendering) {
+            pointOfViewStale = true
+            return
         }
+        pointOfViewRendering = true
+        pointOfViewJob = viewModelScope.launch {
+            try {
+                while (true) {
+                    pointOfViewStale = false
+                    val view = _pointOfView.value
+                    val side = if (_pointOfViewDragging.value) {
+                        POINT_OF_VIEW_DRAG_LONG_SIDE
+                    } else {
+                        POINT_OF_VIEW_LONG_SIDE
+                    }
+                    runCatching { painter.paint(view, side) }
+                        .onSuccess { _pointOfViewImage.value = it }
+                    if (!pointOfViewStale) break
+                }
+            } finally {
+                pointOfViewRendering = false
+            }
+        }
+    }
+
+    /** Il dito e` sceso sull'immagine: da qui in avanti il punto toccato lo segue. */
+    fun beginPointOfViewDrag() {
+        _pointOfViewDragging.value = true
+    }
+
+    /** Il dito si e` alzato: un ultimo disegno a piena qualita`. */
+    fun endPointOfViewDrag() {
+        _pointOfViewDragging.value = false
+        repaintPointOfView(immediate = true)
     }
 
     /** Il trascinamento: gira la panoramica di tanti gradi quanti il dito ne ha attraversati. */

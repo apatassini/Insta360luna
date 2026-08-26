@@ -110,8 +110,16 @@ data class StitchOutcome(val bitmap: Bitmap, val report: StitchReport)
  */
 class PanoramaStitcher(
     private val onProgress: (Float, String) -> Unit = { _, _ -> },
-    /** La ricetta: le manopole regolabili dell'unione. Il default è la ricetta completa. */
-    private val tuning: StitchTuning = StitchTuning(),
+    /**
+     * La ricetta: le manopole regolabili dell'unione. Il default è la ricetta completa.
+     *
+     * È una `var` per una ragione sola, e circoscritta: la fase intermedia, dove chi guarda
+     * sceglie la proiezione e fin dove far salire la tela. Quella scelta arriva **dopo**
+     * l'allineamento e deve valere per tutta la composizione, che legge la ricetta in una
+     * dozzina di punti; riscriverla qui è l'unico modo di non passarne due versioni in giro.
+     * Nessun altro la tocca, e uno stitcher serve per una panoramica sola.
+     */
+    private var tuning: StitchTuning = StitchTuning(),
     /**
      * Quanta memoria c'è davvero. Senza, si resta sulla vecchia stima prudente — e il log lo
      * dichiara, invece di far passare un'ipotesi per una misura.
@@ -189,6 +197,16 @@ class PanoramaStitcher(
          * un gimbal calibrato. Costa di più, e per le foto fatte a mano è l'unico modo.
          */
         wideSearch: Boolean = false,
+        /**
+         * La fase intermedia: scegliere da dove guardare la panoramica, guardandola.
+         *
+         * Arriva a fotogrammi allineati e tela non ancora dimensionata — l'unico momento in cui
+         * la scelta è ancora libera e le informazioni ci sono già tutte. Chi la riceve dipinge
+         * l'anteprima quante volte vuole e torna il punto di vista scelto, o null per tenere
+         * quello che la cucitura avrebbe usato da sola. Se nessuno la passa, non succede niente:
+         * è esattamente la cucitura di prima.
+         */
+        onPreview: (suspend (Preview) -> PanoramaView?)? = null,
     ): Result<StitchOutcome> = withContext(Dispatchers.Default) {
         runCatching {
             require(shots.size >= 2) { "Servono almeno due scatti per unire una panoramica" }
@@ -547,6 +565,52 @@ class PanoramaStitcher(
             )
             val refineSeconds = (System.currentTimeMillis() - refineStartedAt) / 1000f
             placements = refinement.placements
+
+            // La fase intermedia. Va qui e in nessun altro punto: i fotogrammi sono allineati —
+            // quindi l'anteprima mostra la panoramica vera e non un'ipotesi — ma la tela non è
+            // ancora stata dimensionata, e la sua forma dipende proprio da quello che si sta per
+            // scegliere. Un passo prima non ci sarebbe niente da vedere, un passo dopo sarebbe
+            // troppo tardi. Le copie di lavoro sono ancora aperte, ed è l'anteprima a servirsene.
+            if (onPreview != null) {
+                onProgress(0.32f, "Scegli da dove guardarla")
+                val fit = if (tuning.photometric) fitPhotometric(refinement.photometric, frames.size) else null
+                val previewCorrections = frames.mapIndexed { i, frame ->
+                    FrameCorrection(
+                        fit?.gains?.getOrNull(i) ?: 1f,
+                        fit?.vignetteA ?: 0f,
+                        fit?.vignetteB ?: 0f,
+                        frame.width,
+                        frame.height,
+                    )
+                }
+                val chosen = onPreview(
+                    Preview(
+                        frames = frames,
+                        placements = placements,
+                        corrections = previewCorrections,
+                        lens = lens,
+                        fillNadir = fillNadir,
+                        suggested = PanoramaView(verticalLimitDegrees = tuning.verticalLimitDegrees),
+                    ),
+                )
+                if (chosen != null) {
+                    if (chosen.turned) placements = placements.map { it.seenFrom(chosen) }
+                    tuning = tuning.copy(
+                        projection = chosen.projection ?: tuning.projection,
+                        verticalLimitDegrees = chosen.verticalLimitDegrees,
+                    )
+                    levelNotes += ("Punto di vista scelto a mano: pan %+.1f° · inclinazione %+.1f° · " +
+                        "rollio %+.1f° · %s%s").format(
+                        chosen.panDegrees, chosen.tiltDegrees, chosen.rollDegrees,
+                        tuning.projection.label,
+                        if (chosen.verticalLimitDegrees > 0f) {
+                            " · tela fino a %.0f° dall'orizzonte".format(chosen.verticalLimitDegrees)
+                        } else {
+                            ""
+                        },
+                    )
+                }
+            }
             frames.forEach { it.releaseWorkingData() }
 
             // La tela si rifà sulle posizioni **corrette**, non su quelle di partenza.
@@ -776,6 +840,18 @@ class PanoramaStitcher(
     }
 
     /**
+     * Di quanto la stessa proiezione allarga quel pixel nell'altro senso.
+     *
+     * Tutte e tre allargano in orizzontale della secante della latitudine: e` la larghezza del
+     * parallelo, che verso il polo si accorcia sulla sfera e sulla tela no. Cambia solo cosa
+     * fanno in verticale, ed e` per questo che le forme si conservano soltanto in Mercatore.
+     */
+    private fun horizontalStretch(projection: StitchProjection, reachDegrees: Float): Float {
+        val phi = min(reachDegrees, projection.limitDegrees - 0.5f).toRadians()
+        return 1f / cos(phi).coerceAtLeast(1e-3f)
+    }
+
+    /**
      * Quanto deforma il cielo alto, e che cosa costerebbe tagliarlo.
      *
      * È la riga che mancava, ed è quella che risponde a «i rami in alto sono tiratissimi». Non è
@@ -945,6 +1021,106 @@ class PanoramaStitcher(
      * quattro volte meno byte sono quattro volte meno letture dalla RAM.
      */
     private class GrayLevel(val data: ByteArray, val width: Int, val height: Int)
+
+    /**
+     * La panoramica in piccolo, ridipinta abbastanza in fretta da seguire un dito.
+     *
+     * Serve alla fase intermedia: scegliere **da dove** guardare la panoramica non e` una cosa
+     * che si decide leggendo dei gradi, si decide guardando. E per guardare bisogna vedere il
+     * risultato cambiare mentre si muove il dito, non fra trenta secondi.
+     *
+     * Le scorciatoie che la rendono immediata sono tre, e nessuna cambia la geometria — quella
+     * e` identica alla cucitura vera, altrimenti l'anteprima mentirebbe:
+     *
+     * - si dipinge su una tela da qualche centinaio di pixel invece che da quattordicimila,
+     *   cioe` su un millesimo dei pixel;
+     * - si campiona dalla copia di lavoro e a pixel intero, senza aprire gli originali;
+     * - niente fusione multibanda, niente taglio sul minimo disaccordo, niente deformazione
+     *   locale: vince il fotogramma che in quel punto pesa di piu`, e basta. Le giunzioni si
+     *   vedranno un po', ma quello che si sta scegliendo qui non e` la giunzione.
+     *
+     * Quello che invece c'e` e` la fotometria, perche` senza guadagni una panoramica a
+     * scacchiera di esposizioni non si riesce a guardare.
+     */
+    inner class Preview private constructor(
+        private val frames: List<Frame>,
+        private val placements: List<FramePlacement>,
+        private val corrections: List<FrameCorrection>,
+        private val lens: PinholeLens,
+        private val fillNadir: Boolean,
+        /** Il punto di vista di partenza: quello che la cucitura userebbe da sola. */
+        val suggested: PanoramaView,
+    ) {
+        /** Quanto e` deformata la cima con questo punto di vista, per dirlo mentre si sceglie. */
+        fun deformation(view: PanoramaView): PreviewShape {
+            val turned = placements.map { it.seenFrom(view) }
+            val projection = view.projection ?: projectionFor(turned, lens, fillNadir)
+            val half = lens.verticalFovDegrees / 2f
+            val seen = max(
+                abs(turned.maxOf { it.effectiveTilt } + half),
+                abs(turned.minOf { it.effectiveTilt } - half),
+            )
+            val limit = view.verticalLimitDegrees
+            val reach = if (limit > 0f) min(seen, limit) else seen
+            return PreviewShape(
+                projection = projection,
+                reachDegrees = reach,
+                horizontalStretch = horizontalStretch(projection, reach),
+                verticalStretch = verticalStretch(projection, reach),
+            )
+        }
+
+        suspend fun paint(view: PanoramaView, longSide: Int): Bitmap = withContext(Dispatchers.Default) {
+            val turned = placements.map { it.seenFrom(view) }
+            val projection = view.projection ?: projectionFor(turned, lens, fillNadir)
+            val canvas = PanoramaCanvas.covering(
+                placements = turned,
+                lens = lens,
+                // Densita` altissima e lato lungo piccolo: cosi` a decidere e` il ritaglio, e la
+                // tela viene grande quanto ci sta invece che grande quanto vorrebbe.
+                requestedPixelsPerDegree = PREVIEW_DENSITY,
+                maximumLongSide = longSide.coerceAtLeast(64),
+                projection = projection,
+                verticalLimitDegrees = view.verticalLimitDegrees,
+            )
+            val width = canvas.width
+            val height = canvas.height
+            val colour = IntArray(width * height)
+            val weight = FloatArray(width * height)
+
+            for ((index, placement) in turned.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                val frame = frames[index]
+                val correction = corrections.getOrNull(index)
+                val lonSin = FloatArray(width)
+                val lonCos = FloatArray(width)
+                for (col in 0 until width) {
+                    val delta = (canvas.longitudeAt(col) - placement.effectivePan).toRadians()
+                    lonSin[col] = sin(delta)
+                    lonCos[col] = cos(delta)
+                }
+                parallelRows(0, height, 0) { row, _ ->
+                    val projector = FrameProjector(placement, lens, null)
+                    projector.row(canvas.latitudeAt(row))
+                    val base = row * width
+                    for (col in 0 until width) {
+                        projector.project(lonSin[col], lonCos[col])
+                        if (!projector.inside) continue
+                        val here = featherWeight(projector.x, projector.y, frame.width, frame.height)
+                        if (here <= weight[base + col]) continue
+                        val sampled = sample(frame, projector.x, projector.y)
+                        val factor = correction?.factorAt(projector.x, projector.y) ?: 1f
+                        val r = (factor * ((sampled shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val g = (factor * ((sampled shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
+                        val b = (factor * (sampled and 0xFF)).roundToInt().coerceIn(0, 255)
+                        weight[base + col] = here
+                        colour[base + col] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+                    }
+                }
+            }
+            Bitmap.createBitmap(colour, width, height, Bitmap.Config.ARGB_8888)
+        }
+    }
 
     private class Frame(
         val bitmap: Bitmap,
@@ -5453,6 +5629,15 @@ class PanoramaStitcher(
         const val GPU_BAND_PIXELS = 2 shl 20
 
         /**
+         * La densita` che l'anteprima chiede: assurdamente alta apposta.
+         *
+         * A decidere le dimensioni della tela dell'anteprima deve essere il lato lungo che le
+         * si passa, non la densita`: chiedendone tantissima si e` sicuri che il ritaglio scatti
+         * sempre, e la miniatura viene grande esattamente quanto si e` chiesto.
+         */
+        const val PREVIEW_DENSITY = 10_000f
+
+        /**
          * Quanto possono discordare CPU e scheda sulla fusione, in livelli di colore.
          *
          * Due livelli su duecentocinquantasei: la correzione multibanda viaggia in mezza
@@ -5605,3 +5790,18 @@ private class SourceBlock(private val bitmap: Bitmap) {
         const val BLOCK_LOOKBEHIND = 4
     }
 }
+
+/**
+ * Che forma prende la panoramica da un certo punto di vista.
+ *
+ * Sono i numeri che accompagnano l'anteprima mentre si sceglie: non basta vedere l'immagine
+ * cambiare, serve sapere **di quanto** si sta pagando la cima — cinque volte e mezza in
+ * orizzontale non si vede a colpo d'occhio su una miniatura, ma su quattordicimila pixel si`.
+ */
+data class PreviewShape(
+    val projection: StitchProjection,
+    /** Fin dove arriva la tela, in gradi dall'orizzonte. */
+    val reachDegrees: Float,
+    val horizontalStretch: Float,
+    val verticalStretch: Float,
+)

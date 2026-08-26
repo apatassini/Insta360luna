@@ -33,6 +33,14 @@ data class PanoramaShot(
     val panDegrees: Float,
     val tiltDegrees: Float,
     val label: String,
+    /**
+     * L'inclinazione **vera** al momento dello scatto, letta dalla gravità nella coda del JPEG.
+     *
+     * Quando c'è, [tiltDegrees] diventa una curiosità: quello era l'angolo *chiesto* al gimbal,
+     * questo è quello che il gimbal ha fatto. Nullo per le foto che quella coda non ce l'hanno.
+     */
+    val measuredTiltDegrees: Float? = null,
+    val measuredRollDegrees: Float? = null,
 )
 
 /** Cosa è successo durante l'unione, per chi guarda e per il log. */
@@ -185,6 +193,46 @@ class PanoramaStitcher(
 
             var placements = shots.map { FramePlacement(it.panDegrees, it.tiltDegrees) }
 
+            // L'inclinazione vera, quando la foto se la porta dietro.
+            //
+            // Ogni JPEG della Luna ha in coda, dopo la fine dell'immagine, una traccia inerziale
+            // a mille campioni al secondo. A camera ferma l'accelerometro misura la gravità, cioè
+            // indica dov'è il basso: da lì l'inclinazione esce **in assoluto**, senza cercare
+            // l'orizzonte nell'immagine, senza fidarsi della taratura del gimbal e senza
+            // dipendere da quanto è larga la lente.
+            //
+            // Quando c'è, non c'è più niente da stimare in verticale: l'angolo chiesto al gimbal
+            // diventa una curiosità e conta quello che il gimbal ha fatto. Sulle nove foto della
+            // spiaggia, comandando -32, 0 e +32 gradi, la camera stava a -32,11, +6,86 e +46,97:
+            // quel +6,86 a «zero» è il mare curvo, misurato invece che dedotto.
+            val attitudeNotes = mutableListOf<String>()
+            var tiltScaleFromGravity: Float? = null
+            val measuredTilts = shots.map { it.measuredTiltDegrees }
+            val haveAttitude = measuredTilts.all { it != null }
+            if (haveAttitude) {
+                placements = placements.mapIndexed { index, placement ->
+                    placement.copy(tiltDegrees = measuredTilts[index]!!)
+                }
+                val commanded = shots.map { it.tiltDegrees }
+                val slope = tiltSlope(commanded, measuredTilts.map { it!! })
+                tiltScaleFromGravity = slope
+                val rolls = shots.mapNotNull { it.measuredRollDegrees }
+                attitudeNotes += buildString {
+                    append("Inclinazione presa dalla gravità, non stimata: ")
+                    append(
+                        shots.indices.joinToString(" · ") {
+                            "%.0f°→%.1f°".format(commanded[it], measuredTilts[it]!!)
+                        },
+                    )
+                    if (slope != null) {
+                        append(" (il gimbal si muove ×%.3f di quanto gli si chiede)".format(slope))
+                    }
+                    if (rolls.isNotEmpty()) {
+                        append(" · rollio della camera %.2f°".format(rolls.sum() / rolls.size))
+                    }
+                }
+            }
+
             // La taratura del gimbal, prima di tutto il resto.
             //
             // Per mesi ho dato per buoni gli angoli scritti nei tag: li ha decisi l'app, li ha
@@ -282,6 +330,13 @@ class PanoramaStitcher(
                     return@run
                 }
                 if (!tuning.levelHorizon) return@run
+                if (haveAttitude) {
+                    // Non c'è niente da raddrizzare: le inclinazioni sono già quelle vere,
+                    // riferite all'orizzontale della gravità. Cercare l'orizzonte nell'immagine
+                    // qui vorrebbe dire misurare peggio una cosa già misurata bene.
+                    levelNotes += "Orizzonte: non serve cercarlo, l'inclinazione viene dalla gravità"
+                    return@run
+                }
 
                 // Un fotogramma per core: la misura dell'orizzonte è indipendente per ognuno.
                 // Chi ha l'orizzonte fuori inquadratura si scarta subito, senza cercarlo.
@@ -557,6 +612,7 @@ class PanoramaStitcher(
             val verdict = refinement.verdict.toMutableList()
             verdict.addAll(0, levelNotes)
             verdict.addAll(0, scaleNotes)
+            verdict.addAll(0, attitudeNotes)
             if (placements.size >= 2) {
                 var tightest = Float.MAX_VALUE
                 for (k in 1 until placements.size) {
@@ -586,7 +642,9 @@ class PanoramaStitcher(
                     nadirPatchRows = patchedRows,
                     verdict = verdict,
                     gimbalScalePan = measuredPanScale,
-                    gimbalScaleTilt = measuredTiltScale,
+                    // Sul verticale vince la gravità: quella misura non passa dalla lente né
+                    // dai dettagli abbinati, quindi non può portarsi dietro i loro errori.
+                    gimbalScaleTilt = tiltScaleFromGravity ?: measuredTiltScale,
                 ),
             )
         }
@@ -2390,6 +2448,31 @@ class PanoramaStitcher(
         }
         return "Giunzioni misurate, chiesto contro fatto:\n" + righe + "\n" +
             (if (ratios.size < 2) giudizio else giudizio.format(spread))
+    }
+
+    /**
+     * Di quanto il gimbal si muove davvero in verticale, dai soli angoli misurati.
+     *
+     * È la pendenza della retta fra angolo chiesto e angolo fatto, ai minimi quadrati. Con
+     * l'inclinazione vera in mano questa misura non ha più niente di ottico: non passa dalla
+     * lente, non passa dai dettagli abbinati, non passa da niente che si possa sbagliare. È la
+     * taratura del gimbal letta dalla gravità.
+     */
+    private fun tiltSlope(commanded: List<Float>, measured: List<Float>): Float? {
+        if (commanded.size < 2) return null
+        val n = commanded.size
+        val meanX = commanded.sum() / n
+        val meanY = measured.sum() / n
+        var top = 0.0
+        var bottom = 0.0
+        for (i in 0 until n) {
+            val dx = (commanded[i] - meanX).toDouble()
+            top += dx * (measured[i] - meanY)
+            bottom += dx * dx
+        }
+        if (bottom < 1.0) return null
+        val slope = (top / bottom).toFloat()
+        return slope.takeIf { it > SCALE_MIN_FACTOR && it < SCALE_MAX_FACTOR }
     }
 
     /** La mediana pesata: il valore che divide a metà non il numero di voci ma il loro peso. */

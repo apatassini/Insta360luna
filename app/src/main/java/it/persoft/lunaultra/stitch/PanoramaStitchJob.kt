@@ -115,11 +115,14 @@ class PanoramaStitchJob(
                         tiltScale = gimbalScaleNow().second,
                     ),
                 )
+                val attitude = InstaTrailer.readAttitude(file)
                 PanoramaShot(
                     file = file,
                     panDegrees = angle.panDegrees,
                     tiltDegrees = angle.tiltDegrees,
                     label = "Scatto ${index + 1}",
+                    measuredTiltDegrees = attitude?.pitchDegrees,
+                    measuredRollDegrees = attitude?.rollDegrees,
                 )
             }
 
@@ -335,11 +338,14 @@ class PanoramaStitchJob(
                 val ordered = files.zip(tags).sortedBy { it.second!!.index }
                 val fov = ordered.first().second!!.fovDegrees.takeIf { it > 10f } ?: horizontalFovDegrees
                 val shots = ordered.map { (file, tag) ->
+                    val attitude = InstaTrailer.readAttitude(file)
                     PanoramaShot(
                         file = file,
                         panDegrees = tag!!.panDegrees,
                         tiltDegrees = tag.tiltDegrees,
                         label = "Foto ${tag.index}",
+                        measuredTiltDegrees = attitude?.pitchDegrees,
+                        measuredRollDegrees = attitude?.rollDegrees,
                     )
                 }
                 log.info(
@@ -415,11 +421,18 @@ class PanoramaStitchJob(
         // il campo nel tag — non si tocca niente e ci si limita a raccontarlo nel verdetto.
         val panScale = outcome.report.gimbalScalePan
         val tiltScale = outcome.report.gimbalScaleTilt
-        if (panScale != null && tiltScale != null && scaleAtShot != null) {
+        // Un asse alla volta: la gravità può dare il verticale anche quando le immagini non
+        // danno l'orizzontale, e viceversa. L'asse non misurato passa con fattore uno, che
+        // significa «questo lascialo com'è».
+        if ((panScale != null || tiltScale != null) && scaleAtShot != null) {
             val (panNow, tiltNow) = gimbalScaleNow()
             onGimbalScale(
-                GimbalCalibrationProfile.repeatableCorrection(panScale, scaleAtShot.first, panNow),
-                GimbalCalibrationProfile.repeatableCorrection(tiltScale, scaleAtShot.second, tiltNow),
+                panScale?.let {
+                    GimbalCalibrationProfile.repeatableCorrection(it, scaleAtShot.first, panNow)
+                } ?: 1f,
+                tiltScale?.let {
+                    GimbalCalibrationProfile.repeatableCorrection(it, scaleAtShot.second, tiltNow)
+                } ?: 1f,
             )
         }
         val unaligned = outcome.report.refinements.count { it.contains("resta dov'era") }

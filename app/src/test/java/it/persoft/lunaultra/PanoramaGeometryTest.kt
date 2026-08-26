@@ -4,6 +4,7 @@ import it.persoft.lunaultra.stitch.FramePlacement
 import it.persoft.lunaultra.stitch.FrameProjector
 import it.persoft.lunaultra.stitch.LocalWarp
 import it.persoft.lunaultra.stitch.PanoramaCanvas
+import it.persoft.lunaultra.stitch.PanoramaView
 import it.persoft.lunaultra.stitch.PinholeLens
 import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.stitch.angularDistance
@@ -12,6 +13,7 @@ import it.persoft.lunaultra.stitch.featherWeight
 import it.persoft.lunaultra.stitch.frameToWorld
 import it.persoft.lunaultra.stitch.pixelsToDegrees
 import it.persoft.lunaultra.stitch.projectToFrame
+import it.persoft.lunaultra.stitch.seenFrom
 import it.persoft.lunaultra.stitch.sphericalCoverage
 import it.persoft.lunaultra.stitch.sampleSizeFor
 import org.junit.Assert.assertEquals
@@ -564,5 +566,72 @@ class PanoramaGeometryTest {
             val world = frameToWorld(column.toFloat(), row, placement, lens)
             assertEquals(0f, world[1], 0.01f)
         }
+    }
+
+    /**
+     * Spostare il punto di vista deve girare la panoramica, non deformarla.
+     *
+     * La prova e` questa: si prende un pixel qualsiasi di un fotogramma, si guarda dove finisce
+     * sulla sfera, e si applica a mano la rotazione inversa dello sguardo. Poi si rifa` la
+     * stessa domanda al fotogramma «visto da li`». Le due direzioni devono coincidere. Se
+     * qualcuno sommasse gli angoli invece di comporre le rotazioni, al centro tornerebbe e ai
+     * bordi no — ed e` esattamente dove questa prova guarda.
+     */
+    @Test
+    fun `il punto di vista gira la sfera senza deformarla`() {
+        val lens = PinholeLens(4000, 3000, 77.7f)
+        val placement = FramePlacement(
+            panDegrees = 37f,
+            tiltDegrees = 18f,
+            panCorrectionDegrees = 1.4f,
+            tiltCorrectionDegrees = -0.7f,
+            rollDegrees = 2.3f,
+        )
+        val view = PanoramaView(panDegrees = -25f, tiltDegrees = 31f, rollDegrees = 4f)
+        val turned = placement.seenFrom(view)
+
+        for (px in intArrayOf(20, 1000, 2000, 3980)) {
+            for (py in intArrayOf(15, 900, 1500, 2985)) {
+                val before = frameToWorld(px.toFloat(), py.toFloat(), placement, lens)
+                val after = frameToWorld(px.toFloat(), py.toFloat(), turned, lens)
+                val expected = lookedAtFrom(before[0], before[1], view)
+                assertEquals("longitudine di $px,$py", expected[0], after[0], 0.02f)
+                assertEquals("latitudine di $px,$py", expected[1], after[1], 0.02f)
+            }
+        }
+    }
+
+    /** Girare l'orizzonte e basta e` una sottrazione, e deve restare tale. */
+    @Test
+    fun `il solo pan sposta le longitudini di quanto gli si chiede`() {
+        val placement = FramePlacement(panDegrees = 12f, tiltDegrees = -20f, rollDegrees = 3f)
+        val turned = placement.seenFrom(PanoramaView(panDegrees = 40f))
+        assertEquals(-28f, turned.effectivePan, 0.01f)
+        assertEquals(-20f, turned.effectiveTilt, 0.01f)
+        assertEquals(3f, turned.rollDegrees, 0.01f)
+    }
+
+    /** Una direzione sulla sfera, guardata da un punto di vista girato: il conto fatto a mano. */
+    private fun lookedAtFrom(longitude: Float, latitude: Float, view: PanoramaView): FloatArray {
+        val lon = longitude * Math.PI.toFloat() / 180f
+        val lat = latitude * Math.PI.toFloat() / 180f
+        val v = floatArrayOf(
+            kotlin.math.cos(lat) * kotlin.math.sin(lon),
+            kotlin.math.sin(lat),
+            kotlin.math.cos(lat) * kotlin.math.cos(lon),
+        )
+        val eye = it.persoft.lunaultra.stitch.rotationYxz(
+            view.panDegrees, view.tiltDegrees, view.rollDegrees,
+        )
+        // L'inversa di una rotazione e` la sua trasposta: righe per colonne.
+        val out = FloatArray(3)
+        for (row in 0..2) {
+            var sum = 0f
+            for (k in 0..2) sum += eye[k * 3 + row] * v[k]
+            out[row] = sum
+        }
+        val outLat = kotlin.math.asin(out[1].coerceIn(-1f, 1f)) * 180f / Math.PI.toFloat()
+        val outLon = kotlin.math.atan2(out[0], out[2]) * 180f / Math.PI.toFloat()
+        return floatArrayOf(outLon, outLat)
     }
 }

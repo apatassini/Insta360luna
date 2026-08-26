@@ -804,3 +804,122 @@ fun angularDistance(
 fun Float.toRadians(): Float = (this * PI / 180.0).toFloat()
 
 fun Float.toDegrees(): Float = (this * 180.0 / PI).toFloat()
+
+/**
+ * Da che parte si guarda la panoramica: il punto che finisce al centro della tela.
+ *
+ * Una panoramica non ha un «diritto» e un «rovescio». I fotogrammi stanno su una sfera, e
+ * stenderla su un rettangolo deforma: quanto e dove dipende da quale punto della sfera si
+ * mette al centro. Lo stesso ramo in cima, che nell'equirettangolare centrata sull'orizzonte
+ * si allarga cinque volte, portato al centro non si allarga affatto — e a pagare diventa
+ * qualcos'altro, il mare, che al centro non c'è più.
+ *
+ * Chi cuce a mano questa scelta la fa a occhio, guardando: e` per questo che serve vederla.
+ *
+ * [panDegrees] gira l'orizzonte, [tiltDegrees] alza o abbassa il centro, [rollDegrees]
+ * inclina tutto. Zero su tutti e tre e` la panoramica come l'ha vista il gimbal.
+ */
+data class PanoramaView(
+    val panDegrees: Float = 0f,
+    val tiltDegrees: Float = 0f,
+    val rollDegrees: Float = 0f,
+    /** La proiezione voluta, o null per lasciar decidere alla copertura. */
+    val projection: StitchProjection? = null,
+    /** Fin dove sale la tela, in gradi dall'orizzonte. Zero = nessun limite. */
+    val verticalLimitDegrees: Float = 0f,
+) {
+    val turned: Boolean
+        get() = panDegrees != 0f || tiltDegrees != 0f || rollDegrees != 0f
+}
+
+/**
+ * Lo stesso fotogramma, visto da un altro punto di vista.
+ *
+ * Il pan da solo sarebbe una sottrazione: girare l'orizzonte sposta tutte le longitudini della
+ * stessa quantita`. L'inclinazione no. Pan, tilt e rollio non sono tre numeri indipendenti da
+ * sommare: sono tre rotazioni in fila — attorno alla verticale, poi all'asse orizzontale, poi
+ * all'asse ottico — e alzare il centro di venti gradi cambia anche il pan e il rollio apparenti
+ * di ogni fotogramma, tanto piu` quanto piu` sta lontano dal centro. Chi somma e basta ottiene
+ * una panoramica che al centro sembra giusta e ai bordi si apre a ventaglio.
+ *
+ * Quindi si fa il conto vero: si compone la rotazione del fotogramma con l'inversa di quella
+ * dello sguardo, e dalla matrice che ne esce si rileggono i tre angoli. Le correzioni
+ * dell'allineamento sono gia` dentro — [FramePlacement.effectivePan] e [effectiveTilt] — e nel
+ * risultato tornano come angoli nominali, perche` dopo una rotazione «nominale» e «corretto»
+ * non hanno piu` due strade separate.
+ */
+fun FramePlacement.seenFrom(view: PanoramaView): FramePlacement {
+    if (!view.turned) return this
+    val frame = rotationYxz(effectivePan, effectiveTilt, rollDegrees)
+    val eye = rotationYxz(view.panDegrees, view.tiltDegrees, view.rollDegrees)
+    val turned = multiply(transpose(eye), frame)
+    val angles = yxzAngles(turned)
+    return FramePlacement(
+        panDegrees = angles[0],
+        tiltDegrees = angles[1],
+        panCorrectionDegrees = 0f,
+        tiltCorrectionDegrees = 0f,
+        rollDegrees = angles[2],
+        focalScale = focalScale,
+    )
+}
+
+/**
+ * La rotazione `Ry(pan) · Rx(tilt) · Rz(rollio)`, per righe.
+ *
+ * E` la stessa catena che [frameToWorld] applica passo per passo: rollio attorno all'asse
+ * ottico, poi inclinazione, poi rotazione attorno alla verticale. Scritta come matrice serve
+ * solo a poterla comporre con un'altra.
+ */
+internal fun rotationYxz(panDegrees: Float, tiltDegrees: Float, rollDegrees: Float): FloatArray {
+    val a = panDegrees.toRadians()
+    val b = tiltDegrees.toRadians()
+    val c = rollDegrees.toRadians()
+    val ca = cos(a); val sa = sin(a)
+    val cb = cos(b); val sb = sin(b)
+    val cc = cos(c); val sc = sin(c)
+    return floatArrayOf(
+        ca * cc - sa * sb * sc, -ca * sc - sa * sb * cc, sa * cb,
+        cb * sc, cb * cc, sb,
+        -sa * cc - ca * sb * sc, sa * sc - ca * sb * cc, ca * cb,
+    )
+}
+
+/** I tre angoli — pan, inclinazione, rollio — che rifanno questa rotazione. */
+internal fun yxzAngles(m: FloatArray): FloatArray {
+    val sinTilt = m[5].coerceIn(-1f, 1f)
+    val tilt = asin(sinTilt)
+    val cosTilt = cos(tilt)
+    // Allo zenit e al nadir pan e rollio diventano la stessa rotazione e non si distinguono
+    // piu`: si tiene il rollio a zero e si mette tutto sul pan, che e` la scelta che non
+    // sposta niente di visibile.
+    if (abs(cosTilt) < GIMBAL_LOCK_COSINE) {
+        return floatArrayOf(atan2(-m[6], m[0]).toDegrees(), tilt.toDegrees(), 0f)
+    }
+    return floatArrayOf(
+        atan2(m[2], m[8]).toDegrees(),
+        tilt.toDegrees(),
+        atan2(m[3], m[4]).toDegrees(),
+    )
+}
+
+private fun transpose(m: FloatArray): FloatArray = floatArrayOf(
+    m[0], m[3], m[6],
+    m[1], m[4], m[7],
+    m[2], m[5], m[8],
+)
+
+private fun multiply(a: FloatArray, b: FloatArray): FloatArray {
+    val out = FloatArray(9)
+    for (row in 0..2) {
+        for (col in 0..2) {
+            var sum = 0f
+            for (k in 0..2) sum += a[row * 3 + k] * b[k * 3 + col]
+            out[row * 3 + col] = sum
+        }
+    }
+    return out
+}
+
+/** Sotto questo coseno dell'inclinazione, pan e rollio non si distinguono piu`. */
+private const val GIMBAL_LOCK_COSINE = 1e-4f

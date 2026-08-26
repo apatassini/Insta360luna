@@ -1297,6 +1297,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Oltre lo zenit non si va: la panoramica si rovescerebbe. */
     private val POINT_OF_VIEW_MAX_TILT = 89f
 
+    /**
+     * Quanto puo` girare un tocco solo. Oltre, si tocca di nuovo.
+     *
+     * «Portalo al centro» su un punto al bordo di una panoramica larga puo` valere sessanta
+     * gradi in un colpo, e sessanta gradi in un colpo non si seguono: l'immagine si ribalta e
+     * si perde il filo di dov'era. Cosi` invece il tocco fa un passo grosso ma seguibile, e chi
+     * vuole arrivare fino in fondo tocca due volte — che e` anche il modo in cui la mano
+     * naturalmente aggiusta.
+     */
+    private val TAP_MAX_PAN = 40f
+    private val TAP_MAX_TILT = 25f
+
     /** Stato dell'unione automatica, per il pannello della panoramica. */
     private val _stitchState = MutableStateFlow<StitchUiState>(StitchUiState.Idle)
     val stitchState: StateFlow<StitchUiState> = _stitchState
@@ -1442,8 +1454,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun placePointOfView(panDegrees: Float, tiltDegrees: Float) {
         val now = _pointOfView.value
         _pointOfView.value = now.copy(
-            panDegrees = now.panDegrees + panDegrees,
-            tiltDegrees = (now.tiltDegrees + tiltDegrees).coerceIn(-POINT_OF_VIEW_MAX_TILT, POINT_OF_VIEW_MAX_TILT),
+            panDegrees = now.panDegrees + panDegrees.coerceIn(-TAP_MAX_PAN, TAP_MAX_PAN),
+            tiltDegrees = (now.tiltDegrees + tiltDegrees.coerceIn(-TAP_MAX_TILT, TAP_MAX_TILT))
+                .coerceIn(-POINT_OF_VIEW_MAX_TILT, POINT_OF_VIEW_MAX_TILT),
         )
         repaintPointOfView(immediate = true)
     }

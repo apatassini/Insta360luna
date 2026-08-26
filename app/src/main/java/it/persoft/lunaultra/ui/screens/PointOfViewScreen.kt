@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Button
@@ -37,9 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.ui.MainViewModel
-import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.theme.Luna
-import it.persoft.lunaultra.ui.theme.LunaIcons
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -74,7 +73,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             .background(Color.Black)
             .safeDrawingPadding()
             .padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         // ---- La foto, con tutto lo spazio che avanza ----
         Box(
@@ -100,9 +99,20 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                                 size.width.toFloat() / painted.bitmap.width,
                                 size.height.toFloat() / painted.bitmap.height,
                             )
-                            val perPixelX = painted.horizontalDegrees / (painted.bitmap.width * fit)
-                            val perPixelY = painted.verticalDegrees / (painted.bitmap.height * fit)
+                            val drawnWidth = painted.bitmap.width * fit
+                            val drawnHeight = painted.bitmap.height * fit
+                            val left = (size.width - drawnWidth) / 2f
+                            val top = (size.height - drawnHeight) / 2f
+                            val perPixelX = painted.horizontalDegrees / drawnWidth
+                            val perPixelY = painted.verticalDegrees / drawnHeight
                             detectTapGestures { where ->
+                                // Solo dentro l'immagine. Una panoramica alta e stretta lascia
+                                // due fasce nere ai lati, e li` il conto dei gradi continuava
+                                // lo stesso: un dito appoggiato nel nero valeva ottanta gradi
+                                // di rotazione e la voltava per intero. Fuori dal disegnato non
+                                // c'e` niente da portare al centro.
+                                if (where.x < left || where.x > left + drawnWidth) return@detectTapGestures
+                                if (where.y < top || where.y > top + drawnHeight) return@detectTapGestures
                                 viewModel.placePointOfView(
                                     panDegrees = (where.x - size.width / 2f) * perPixelX,
                                     tiltDegrees = -(where.y - size.height / 2f) * perPixelY,
@@ -195,45 +205,43 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             )
         }
 
-        // ---- Proiezione: due righe da due, così ci stanno tutte e quattro ----
-        Text("Proiezione", style = MaterialTheme.typography.labelLarge, color = Luna.OnSurfaceDim)
+        // ---- Proiezione e ritaglio: una riga per uno, senza titoli sopra ----
+        //
+        // I titoli mangiavano due righe per dire quello che i pulsanti dicono da soli, e ogni
+        // riga tolta e` spazio che va alla foto — che e` la sola cosa che qui serve guardare.
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            ProjectionChip(null, view.projection, "Automatica", Modifier.weight(1f), viewModel)
+            ProjectionChip(null, view.projection, "Auto", Modifier.weight(1f), viewModel)
             ProjectionChip(
                 StitchProjection.EQUIRECTANGULAR, view.projection,
-                "Sferica", Modifier.weight(1f), viewModel,
+                "Sferica", Modifier.weight(1.2f), viewModel,
             )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
             ProjectionChip(
                 StitchProjection.CYLINDRICAL, view.projection,
-                "Cilindrica", Modifier.weight(1f), viewModel,
+                "Cilindrica", Modifier.weight(1.5f), viewModel,
             )
             ProjectionChip(
                 StitchProjection.MERCATOR, view.projection,
-                "Mercatore", Modifier.weight(1f), viewModel,
+                "Mercatore", Modifier.weight(1.5f), viewModel,
             )
         }
-
-        // ---- Fin dove sale la tela ----
-        Text("Fin dove sale la tela", style = MaterialTheme.typography.labelLarge, color = Luna.OnSurfaceDim)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            Text("Tela", style = MaterialTheme.typography.labelMedium, color = Luna.OnSurfaceDim)
             for (limit in intArrayOf(0, 55, 65, 75)) {
                 FilterChip(
                     selected = view.verticalLimitDegrees.roundToInt() == limit,
                     onClick = { viewModel.setPointOfViewLimit(limit.toFloat()) },
                     label = {
                         Text(
-                            if (limit == 0) "Tutto" else "$limit°",
+                            if (limit == 0) "Tutta" else "$limit°",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Center,
                         )
@@ -245,43 +253,52 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
 
         // ---- I numeri: si leggono, non si toccano, e stanno sotto i comandi ----
         Text(
-            "Tocca un punto per portarlo al centro, o trascina · pan %+.0f° · alto/basso %+.0f°"
-                .format(view.panDegrees, view.tiltDegrees),
-            style = MaterialTheme.typography.labelMedium,
+            buildString {
+                append("Tocca per centrare · pan %+.0f° · su/giù %+.0f°".format(view.panDegrees, view.tiltDegrees))
+                shape?.let {
+                    append(" · %s fino a %.0f° · cima ×%.1f↔ ×%.1f↕".format(
+                        shortName(it.projection), it.reachDegrees, it.horizontalStretch, it.verticalStretch,
+                    ))
+                }
+            },
+            style = MaterialTheme.typography.labelSmall,
             color = Luna.OnSurfaceDim,
         )
-        shape?.let {
-            Text(
-                "%s · tela fino a %.0f° · deformazione in cima ×%.1f in orizzontale, ×%.1f in verticale"
-                    .format(shortName(it.projection), it.reachDegrees, it.horizontalStretch, it.verticalStretch),
-                style = MaterialTheme.typography.labelMedium,
-                color = Luna.OnSurfaceDim,
-            )
-        }
 
-        // ---- Le decisioni ----
+        // ---- Le decisioni, su una riga sola: la seconda era spazio tolto alla foto ----
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            OutlinedButton(onClick = viewModel::resetPointOfView, modifier = Modifier.weight(1f)) {
-                ButtonLabel(LunaIcons.Refresh, "Com'era")
+            OutlinedButton(
+                onClick = viewModel::resetPointOfView,
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Com'era", style = MaterialTheme.typography.labelMedium, maxLines = 1)
             }
-            OutlinedButton(onClick = viewModel::skipPointOfView, modifier = Modifier.weight(1f)) {
-                ButtonLabel(LunaIcons.Panorama, "Decidi tu")
+            OutlinedButton(
+                onClick = viewModel::skipPointOfView,
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Decidi tu", style = MaterialTheme.typography.labelMedium, maxLines = 1)
             }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
             if (forJob != null) {
-                Button(onClick = viewModel::savePointOfView, modifier = Modifier.weight(1f)) {
-                    ButtonLabel(LunaIcons.Download, "Salva e chiudi")
+                Button(
+                    onClick = viewModel::savePointOfView,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Salva", style = MaterialTheme.typography.labelMedium, maxLines = 1)
                 }
             }
-            OutlinedButton(onClick = viewModel::confirmPointOfView, modifier = Modifier.weight(1f)) {
-                ButtonLabel(LunaIcons.Panorama, "Cuci così")
+            OutlinedButton(
+                onClick = viewModel::confirmPointOfView,
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Cuci", style = MaterialTheme.typography.labelMedium, maxLines = 1)
             }
         }
     }
@@ -299,7 +316,13 @@ private fun ProjectionChip(
         selected = chosen == projection,
         onClick = { viewModel.setPointOfViewProjection(projection) },
         label = {
-            Text(label, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
         },
         modifier = modifier,
     )

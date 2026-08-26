@@ -3848,20 +3848,24 @@ class PanoramaStitcher(
         // Manopola multibanda spenta: correzioni a zero, il montaggio resta a taglio netto —
         // è la ricetta diagnostica che mostra dove cadono le giunzioni.
         val pyramidStartedAt = System.currentTimeMillis()
-        for ((channel, shift) in intArrayOf(16, 8, 0).withIndex()) {
-            if (!tuning.multiband) break
-            val baseChannel = FloatArray(gcount) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
-            val overChannel = FloatArray(gcount) { ((newColor[it] shr shift) and 0xFF).toFloat() }
-            val blended = MultibandBlender.blend(
-                baseChannels = arrayOf(baseChannel),
-                overlayChannels = arrayOf(overChannel),
-                mask = mask,
-                width = gw,
-                height = gh,
-            )[0]
-            for (g in 0 until gcount) {
-                corrOver[channel][g] = blended[g] - overChannel[g]
-                corrBase[channel][g] = blended[g] - baseChannel[g]
+        if (tuning.multiband) {
+            // La maschera è la stessa per i tre canali — chi possiede un pixel non dipende dal
+            // rosso o dal blu — e prima ogni canale se la ricostruiva per conto suo: un terzo
+            // del lavoro buttato. Peggio, i tre andavano in fila indiana su un filo solo,
+            // quando non si parlano affatto. Preparata una volta, si spartiscono fra i core.
+            val reduced = MultibandBlender.prepare(mask, gw, gh)
+            coroutineScope {
+                intArrayOf(16, 8, 0).forEachIndexed { channel, shift ->
+                    launch(Dispatchers.Default) {
+                        val baseChannel = FloatArray(gcount) { ((baseColor[it] shr shift) and 0xFF).toFloat() }
+                        val overChannel = FloatArray(gcount) { ((newColor[it] shr shift) and 0xFF).toFloat() }
+                        val blended = MultibandBlender.blendOne(reduced, baseChannel, overChannel)
+                        for (g in 0 until gcount) {
+                            corrOver[channel][g] = blended[g] - overChannel[g]
+                            corrBase[channel][g] = blended[g] - baseChannel[g]
+                        }
+                    }
+                }
             }
         }
         blendPyramidMillis += System.currentTimeMillis() - pyramidStartedAt
@@ -3884,12 +3888,26 @@ class PanoramaStitcher(
         // vecchio, quindi il confronto fra i due è alla pari; a parità esatta la decisione
         // può cadere dall'altra parte rispetto alla CPU, ma succede dove i due fotogrammi
         // pesano identico — cioè dove si assomigliano di più e la scelta non si vede.
+
+        // La riga si legge e si riscrive per la sola fetta che serve.
+        //
+        // La sotto-finestra è larga sei-settemila pixel su una tela che ne ha quattordicimila:
+        // leggere e riscrivere la riga intera vuol dire spostare più del doppio dei byte
+        // necessari, e a trentamila righe per panoramica sono gigabyte di puro andirivieni fra
+        // la bitmap e il buffer. Quando la fetta non scavalca la giuntura della tela — cioè
+        // sempre, tranne per il fotogramma a cavallo del meridiano — le sue colonne sono
+        // consecutive e il buffer si indicizza direttamente con `bx`.
+        val spanStart = columns[sx0]
+        val narrow = spanStart + sbw <= canvas.width
+        val spanFrom = if (narrow) spanStart else 0
+        val spanWidth = if (narrow) sbw else canvas.width
+
         fun blendRow(by: Int, rowPixels: IntArray, band: IntArray?, bandBase: Int) {
             val row = subRow0 + by
             val projector = FrameProjector(placement, lens, warp)
             val source = if (band == null) full?.let { SourceBlock(it) } else null
             if (band == null) projector.row(canvas.latitudeAt(row))
-            output.getPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
+            output.getPixels(rowPixels, 0, spanWidth, spanFrom, row, spanWidth, 1)
             var touched = false
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
             // La correzione multibanda svanisce ai bordi della sotto-finestra.
@@ -3909,8 +3927,11 @@ class PanoramaStitcher(
                 val oldWeight = oldWeightAt(bx, by)
                 if (!present && oldWeight <= 0f) continue
 
+                // Dove sta questo pixel dentro il buffer di riga: se la fetta è stretta il
+                // buffer parte dalla sua prima colonna, altrimenti è la riga intera.
+                val at = if (narrow) bx else col
                 val gxf = (bx.toFloat() / s) - 0.5f + 0.5f / s
-                var hard = rowPixels[col] and 0xFFFFFF
+                var hard = rowPixels[at] and 0xFFFFFF
                 var newWeight = 0f
                 var useNew = false
                 if (present) {
@@ -3964,7 +3985,7 @@ class PanoramaStitcher(
                 val red = correctedChannel(hard, 16, grids[0], gw, gh, gxf, gyf, fade)
                 val green = correctedChannel(hard, 8, grids[1], gw, gh, gxf, gyf, fade)
                 val blue = correctedChannel(hard, 0, grids[2], gw, gh, gxf, gyf, fade)
-                rowPixels[col] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
+                rowPixels[at] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
                 touched = true
 
                 val quantized = (newWeight * 255f).roundToInt().coerceIn(0, 255)
@@ -3974,7 +3995,7 @@ class PanoramaStitcher(
                 }
             }
             if (touched) {
-                output.setPixels(rowPixels, 0, canvas.width, 0, row, canvas.width, 1)
+                output.setPixels(rowPixels, 0, spanWidth, spanFrom, row, spanWidth, 1)
             }
         }
 
@@ -3988,7 +4009,7 @@ class PanoramaStitcher(
             blendedOnGpu = gpuBands(
                 gpu, gpuPlan, c0 + sx0, subRow0, sbw, sbh, weightOnly = false,
             ) { band, bandRow, rows ->
-                parallelRows(subRow0 + bandRow, rows, canvas.width) { r, rowPixels ->
+                parallelRows(subRow0 + bandRow, rows, spanWidth) { r, rowPixels ->
                     blendRow(bandRow + r, rowPixels, band, r * sbw)
                 }
                 doneRows = bandRow + rows
@@ -4000,7 +4021,7 @@ class PanoramaStitcher(
         // metà strada — lo fa la CPU. Si riparte dalla riga dopo l'ultima fascia riuscita:
         // rifare una riga già fusa non sarebbe innocuo come rifare una riga già dipinta,
         // perché la correzione si applicherebbe due volte sullo stesso pixel.
-        if (!blendedOnGpu) parallelRows(subRow0 + doneRows, sbh - doneRows, canvas.width) { r, rowPixels ->
+        if (!blendedOnGpu) parallelRows(subRow0 + doneRows, sbh - doneRows, spanWidth) { r, rowPixels ->
             blendRow(doneRows + r, rowPixels, null, 0)
         }
         blendApplyMillis += System.currentTimeMillis() - applyStartedAt

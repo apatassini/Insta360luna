@@ -39,21 +39,56 @@ internal object MultibandBlender {
         height: Int,
         maxLevels: Int = SPLINE_LEVELS,
     ): Array<FloatArray> {
-        val levels = levelsFor(width, height, maxLevels)
-        if (levels <= 1) {
-            // Ritaglio troppo piccolo per una piramide: la fusione diretta è indistinguibile.
-            return Array(baseChannels.size) { c ->
-                FloatArray(width * height) { i ->
-                    baseChannels[c][i] * (1f - mask[i]) + overlayChannels[c][i] * mask[i]
-                }
-            }
-        }
-
-        val maskPyr = gaussianPyramid(mask, width, height, levels)
+        val reduced = prepare(mask, width, height, maxLevels)
         return Array(baseChannels.size) { c ->
-            blendChannel(baseChannels[c], overlayChannels[c], maskPyr, width, height, levels)
+            blendOne(reduced, baseChannels[c], overlayChannels[c])
         }
     }
+
+    /**
+     * La maschera ridotta in piramide una volta sola, pronta a servire tutti i canali.
+     *
+     * I tre canali di un colore condividono la stessa maschera — chi possiede ogni pixel non
+     * dipende dal rosso o dal blu — e prima ognuno se la ricostruiva per conto suo: un terzo
+     * del lavoro buttato, e per giunta in fila indiana, quando i tre canali non si parlano e
+     * potrebbero andare insieme. Separando la preparazione dal canale, la piramide della
+     * maschera si fa una volta e i canali si possono spartire fra i core.
+     */
+    fun prepare(
+        mask: FloatArray,
+        width: Int,
+        height: Int,
+        maxLevels: Int = SPLINE_LEVELS,
+    ): Mask {
+        val levels = levelsFor(width, height, maxLevels)
+        return Mask(
+            // Ritaglio troppo piccolo per una piramide: niente piramide, e la fusione
+            // diretta è indistinguibile.
+            pyramid = if (levels <= 1) null else gaussianPyramid(mask, width, height, levels),
+            flat = mask,
+            width = width,
+            height = height,
+            levels = levels,
+        )
+    }
+
+    /** Un canale fuso sulla maschera già preparata. */
+    fun blendOne(mask: Mask, base: FloatArray, overlay: FloatArray): FloatArray {
+        val pyramid = mask.pyramid
+            ?: return FloatArray(mask.width * mask.height) { i ->
+                base[i] * (1f - mask.flat[i]) + overlay[i] * mask.flat[i]
+            }
+        return blendChannel(base, overlay, pyramid, mask.width, mask.height, mask.levels)
+    }
+
+    /** La maschera pronta: la sua piramide, o niente piramide se il ritaglio è minuscolo. */
+    class Mask internal constructor(
+        internal val pyramid: Pyramid?,
+        internal val flat: FloatArray,
+        internal val width: Int,
+        internal val height: Int,
+        internal val levels: Int,
+    )
 
     /** Quanti livelli reggono queste dimensioni: ogni livello dimezza, e sotto i 4 px non ha senso. */
     fun levelsFor(width: Int, height: Int, maxLevels: Int = SPLINE_LEVELS): Int {
@@ -66,7 +101,11 @@ internal object MultibandBlender {
         return levels
     }
 
-    private class Pyramid(val data: List<FloatArray>, val widths: IntArray, val heights: IntArray)
+    class Pyramid internal constructor(
+        internal val data: List<FloatArray>,
+        internal val widths: IntArray,
+        internal val heights: IntArray,
+    )
 
     private fun gaussianPyramid(src: FloatArray, width: Int, height: Int, levels: Int): Pyramid {
         val data = ArrayList<FloatArray>(levels)

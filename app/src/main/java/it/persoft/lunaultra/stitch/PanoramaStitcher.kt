@@ -228,6 +228,7 @@ class PanoramaStitcher(
                                 tiltDegrees = centreTilt + (it.tiltDegrees - centreTilt) * scale.tilt,
                             )
                         }
+                        scaleNotes += tabellaDelleGiunzioni(scale)
                         scaleNotes += ("Gimbal fuori taratura: si muove ×%.2f in verticale e ×%.2f in " +
                             "orizzontale rispetto a quanto gli si chiede%s — angoli corretti qui, e la " +
                             "misura va anche nel profilo del gimbal, così i prossimi scatti si " +
@@ -2197,6 +2198,18 @@ class PanoramaStitcher(
         return Offset(sumPan / inliers, sumTilt / inliers, ratio.coerceIn(0f, 1f), inliers)
     }
 
+    /** Una giunzione misurata: quanto era stato chiesto, quanto è stato fatto, con che appoggio. */
+    private class ScaleSample(
+        val vertical: Boolean,
+        val fromLabel: String,
+        val toLabel: String,
+        val asked: Float,
+        val done: Float,
+        val inliers: Int,
+    ) {
+        val ratio: Float get() = done / asked
+    }
+
     /** Di quanto il gimbal si muove davvero, rispetto a quanto gli si è chiesto. */
     private class GimbalScale(
         val pan: Float,
@@ -2205,6 +2218,16 @@ class PanoramaStitcher(
         val tiltPairs: Int,
         /** Un asse non si è potuto misurare e ha preso in prestito il fattore dell'altro. */
         val borrowed: Boolean,
+        /**
+         * Le singole giunzioni misurate, per poterle mettere in tabella.
+         *
+         * Un fattore solo dice *quanto* si sbaglia; la tabella dice se si sbaglia **sempre allo
+         * stesso modo**. È la differenza fra una scala storta — che si corregge con un numero — e
+         * un movimento che risponde male, che non si correggerebbe affatto. Su un errore di
+         * scala i rapporti delle varie giunzioni si somigliano tutti; se ballano, il modello del
+         * movimento è sbagliato e moltiplicare non basta.
+         */
+        val samples: List<ScaleSample>,
     )
 
     /**
@@ -2282,12 +2305,19 @@ class PanoramaStitcher(
                 val done = asked + (if (vertical) offset.tiltDegrees else offset.panDegrees)
                 val ratio = done / asked
                 if (ratio < SCALE_MIN_FACTOR || ratio > SCALE_MAX_FACTOR) return@async null
-                Triple(vertical, ratio, offset.inliers.toFloat())
+                ScaleSample(
+                    vertical = vertical,
+                    fromLabel = frames[i].label,
+                    toLabel = frames[j].label,
+                    asked = asked,
+                    done = done,
+                    inliers = offset.inliers,
+                )
             }
         }.awaitAll().filterNotNull()
 
-        val vertical = measured.filter { it.first }.map { it.second to it.third }
-        val horizontal = measured.filter { !it.first }.map { it.second to it.third }
+        val vertical = measured.filter { it.vertical }.map { it.ratio to it.inliers.toFloat() }
+        val horizontal = measured.filter { !it.vertical }.map { it.ratio to it.inliers.toFloat() }
         if (vertical.isEmpty() && horizontal.isEmpty()) return@coroutineScope null
 
         // Quando fidarsi di un asse.
@@ -2316,7 +2346,50 @@ class PanoramaStitcher(
             panPairs = horizontal.size,
             tiltPairs = vertical.size,
             borrowed = borrowed,
+            samples = measured,
         )
+    }
+
+    /**
+     * Le giunzioni misurate, una per riga: chiesto contro fatto.
+     *
+     * È il confronto che chiude la questione, ed è meglio di un fattore solo. Un fattore dice
+     * *quanto* il gimbal sbaglia; la tabella dice se sbaglia **sempre allo stesso modo**. Se i
+     * rapporti si somigliano tutti, l'errore è di scala e un numero lo corregge. Se ballano, il
+     * movimento risponde male e moltiplicare non servirebbe a niente: bisognerebbe cambiare il
+     * modello, non tararlo.
+     *
+     * Sono anche le foto di controllo «a tutte le angolazioni» senza doverne scattare altre: gli
+     * scatti di una panoramica *sono* foto a angoli comandati noti, e ogni coppia di vicini è
+     * una misura indipendente dello stesso errore.
+     */
+    private fun tabellaDelleGiunzioni(scale: GimbalScale): String {
+        val righe = scale.samples
+            .sortedWith(compareBy({ !it.vertical }, { it.fromLabel }))
+            .joinToString("\n") { s ->
+                "  %-10s %-9s → %-9s chiesti %+6.2f°, fatti %+6.2f° · ×%.3f · %d dettagli".format(
+                    if (s.vertical) "verticale" else "orizzont.",
+                    s.fromLabel,
+                    s.toLabel,
+                    s.asked,
+                    s.done,
+                    s.ratio,
+                    s.inliers,
+                )
+            }
+        val ratios = scale.samples.map { it.ratio }
+        val spread = if (ratios.size >= 2) ratios.max() - ratios.min() else 0f
+        val giudizio = when {
+            ratios.size < 2 -> "Una misura sola: non si può dire se l'errore è costante."
+            spread <= 0.10f ->
+                "I rapporti stanno in %.3f l'uno dall'altro: è un errore di scala costante, e un " +
+                    "numero lo corregge."
+            else ->
+                "I rapporti ballano di %.3f: non è solo scala storta, il movimento risponde in " +
+                    "modo diverso a seconda di dove si trova."
+        }
+        return "Giunzioni misurate, chiesto contro fatto:\n" + righe + "\n" +
+            (if (ratios.size < 2) giudizio else giudizio.format(spread))
     }
 
     /** La mediana pesata: il valore che divide a metà non il numero di voci ma il loro peso. */

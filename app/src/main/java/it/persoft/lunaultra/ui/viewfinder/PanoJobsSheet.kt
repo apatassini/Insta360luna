@@ -6,6 +6,21 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -44,6 +59,8 @@ fun PanoJobsSheet(
     /** Allinea e fa scegliere il punto di vista, senza cucire. */
     onPrepare: (PanoJob) -> Unit,
     onRunAll: () -> Unit,
+    /** Con che faccia si presenta un lavoro: il percorso di un'immagine, se c'è. */
+    face: (PanoJob) -> String?,
     onCancel: (PanoJob) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -88,12 +105,24 @@ fun PanoJobsSheet(
             )
         }
 
+        // I lavori scorrono: possono essere parecchi, e un elenco che deborda dallo schermo
+        // nasconde proprio quelli piu` vecchi, che sono quelli che ci si dimentica di unire.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 420.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
         jobs.forEach { job ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                // La faccia del lavoro. Un elenco di righe tutte uguali — «9 scatti · 82° di
+                // campo» — non dice quale sia quale; la scena si`, e a colpo d'occhio.
+                JobFace(path = face(job))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = buildString {
@@ -139,6 +168,7 @@ fun PanoJobsSheet(
                     activeColor = Luna.Rec,
                 )
             }
+        }
         }
 
         // Tutti insieme: e` il modo in cui questi lavori vogliono essere fatti davvero. Si
@@ -187,3 +217,52 @@ private fun jobDateLabel(timeMs: Long): String =
     SimpleDateFormat("EEEE d MMMM · HH:mm", Locale.getDefault())
         .format(Date(timeMs))
         .replaceFirstChar { it.uppercase(Locale.getDefault()) }
+
+/**
+ * La miniatura di un lavoro, decodificata piccola e ricordata finche` la riga vive.
+ *
+ * Piccola davvero: `inSampleSize` fa saltare il decodificatore a passi di due, quindi da uno
+ * scatto da trentasette megapixel si arriva a un francobollo senza mai tenere in memoria
+ * l'originale. Un elenco di miniature deve costare quanto un elenco.
+ */
+@Composable
+private fun JobFace(path: String?, modifier: Modifier = Modifier) {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path) {
+        value = if (path == null) {
+            null
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(path, bounds)
+                    val longest = maxOf(bounds.outWidth, bounds.outHeight)
+                    var sample = 1
+                    while (longest / sample > FACE_PIXELS * 2) sample *= 2
+                    BitmapFactory.decodeFile(
+                        path,
+                        BitmapFactory.Options().apply { inSampleSize = sample },
+                    )
+                }.getOrNull()
+            }
+        }
+    }
+    Box(
+        modifier = modifier
+            .size(FACE_SIZE)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Luna.Surface),
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap?.let {
+            Image(
+                bitmap = it.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+private val FACE_SIZE = 68.dp
+private const val FACE_PIXELS = 200

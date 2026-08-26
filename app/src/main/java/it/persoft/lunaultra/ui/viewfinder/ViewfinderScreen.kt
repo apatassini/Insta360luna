@@ -335,11 +335,14 @@ fun ViewfinderScreen(
                         jobsSheetOpen = false
                         viewModel.runAllPanoJobs()
                     },
+                    face = viewModel::jobFace,
                     onCancel = viewModel::cancelPanoJob,
                     onClose = { jobsSheetOpen = false },
+                    // A tutta larghezza e appoggiato in fondo: i lavori sono parecchi e l'elenco
+                    // vuole spazio, non un riquadro stretto in mezzo allo schermo.
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                        .padding(bottom = 4.dp),
                 )
             }
 

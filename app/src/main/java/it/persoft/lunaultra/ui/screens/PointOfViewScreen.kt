@@ -26,6 +26,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,6 +73,21 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
     // Dove sta il dito adesso, in pixel dello schermo: serve solo a disegnarci sopra il segno.
     var finger by remember { mutableStateOf<Offset?>(null) }
 
+    /**
+     * L'ultima anteprima disegnata, letta **dentro** il gesto invece che dall'esterno.
+     *
+     * Era questo il trascinamento a scatti, e non aveva niente a che fare col gesto. Il
+     * rilevatore era legato all'immagine: ogni volta che ne arrivava una nuova — cioe` a ogni
+     * ridisegno, cioe` due o tre volte al secondo mentre il dito si muove — Compose lo smontava
+     * e lo rimontava, e il gesto in corso moriva li`. Tre scatti e stop, con il dito ancora giu`
+     * e nessuno piu` ad ascoltarlo.
+     *
+     * Legato a niente, il rilevatore vive quanto la schermata; l'immagine se la va a prendere
+     * lui quando serve. Le misure che gli servono — quanti pixel e quanti gradi — cambiano solo
+     * cambiando proiezione o ritaglio, mai a meta` di un trascinamento.
+     */
+    val latest = rememberUpdatedState(image)
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -106,20 +122,21 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                         // resta giu`, e al suo alzarsi si guarda quanta strada ha fatto. Poca:
                         // era un tocco, e il punto va al centro. Tanta: era un trascinamento, e
                         // il centro l'ha gia` seguito passo per passo.
-                        .pointerInput(painted) {
-                            val fit = min(
-                                size.width.toFloat() / painted.bitmap.width,
-                                size.height.toFloat() / painted.bitmap.height,
-                            )
-                            val drawnWidth = painted.bitmap.width * fit
-                            val drawnHeight = painted.bitmap.height * fit
-                            val left = (size.width - drawnWidth) / 2f
-                            val top = (size.height - drawnHeight) / 2f
-                            val perPixelX = painted.horizontalDegrees / drawnWidth
-                            val perPixelY = painted.verticalDegrees / drawnHeight
+                        .pointerInput(Unit) {
                             val slop = viewConfiguration.touchSlop
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
+                                val shot = latest.value ?: return@awaitEachGesture
+                                val fit = min(
+                                    size.width.toFloat() / shot.bitmap.width,
+                                    size.height.toFloat() / shot.bitmap.height,
+                                )
+                                val drawnWidth = shot.bitmap.width * fit
+                                val drawnHeight = shot.bitmap.height * fit
+                                val left = (size.width - drawnWidth) / 2f
+                                val top = (size.height - drawnHeight) / 2f
+                                val perPixelX = shot.horizontalDegrees / drawnWidth
+                                val perPixelY = shot.verticalDegrees / drawnHeight
                                 finger = down.position
                                 viewModel.beginPointOfViewDrag()
                                 var last = down.position

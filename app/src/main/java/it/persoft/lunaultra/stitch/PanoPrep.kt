@@ -61,6 +61,15 @@ object PanoPrepStore {
 
     fun directory(root: File, jobId: String): File = File(File(root, FOLDER), jobId)
 
+    /**
+     * L'immagine con cui il lavoro si presenta nell'elenco.
+     *
+     * Un elenco di lavori tutti uguali — «9 scatti · 82° di campo» — non dice quale sia quale.
+     * Il nome del file non aiuta: chi ha scattato non lo ha mai visto. Quello che si riconosce
+     * e` la scena, e la scena e` gia` li`, disegnata: e` l'anteprima appena scelta.
+     */
+    fun previewFile(root: File, jobId: String): File = File(directory(root, jobId), "anteprima.jpg")
+
     fun exists(root: File, jobId: String): Boolean =
         File(directory(root, jobId), PLAN).isFile
 

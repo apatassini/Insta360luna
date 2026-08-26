@@ -1511,7 +1511,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * quello che i job servono a evitare.
      */
     fun savePointOfView() {
+        // L'immagine che si sta guardando diventa la faccia del lavoro nell'elenco: e` gia`
+        // disegnata, costa un salvataggio, e risolve il problema di riconoscere quale lavoro
+        // sia quale meglio di qualunque nome.
+        val jobId = _pointOfViewForJob.value
+        val shot = _pointOfViewImage.value
+        if (jobId != null && shot != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching {
+                    val target = PanoPrepStore.previewFile(prepRoot, jobId)
+                    target.parentFile?.mkdirs()
+                    java.io.FileOutputStream(target).use { out ->
+                        shot.bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                    }
+                }
+            }
+        }
         pointOfViewAnswer?.complete(AfterPreview.StopHere(_pointOfView.value))
+    }
+
+    /**
+     * Con che faccia si presenta un lavoro nell'elenco.
+     *
+     * L'anteprima scelta se c'e`, altrimenti lo scatto di mezzo — che di una panoramica e` il
+     * centro della scena, ed e` quello che si ricorda.
+     */
+    fun jobFace(job: PanoJob): String? {
+        val chosen = PanoPrepStore.previewFile(prepRoot, job.id)
+        if (chosen.isFile) return chosen.absolutePath
+        return job.files.getOrNull(job.files.size / 2)?.takeIf { java.io.File(it).isFile }
     }
 
     /** Vero quando la scelta si sta facendo dentro un job, e quindi si può salvare e basta. */

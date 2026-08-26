@@ -49,8 +49,12 @@ jobs:
       # Gli artefatti delle Actions si scaricano solo da browser desktop e da
       # utenti autenticati: dal telefono non compaiono. La release invece dà un
       # link diretto, che è come si installa un APK in pratica.
+      # Anche dall'avvio manuale, non solo dai push. Un run partito da un push puo'
+      # incastrarsi prima ancora di ottenere una macchina — succede, e quando succede
+      # l'unico modo di ripubblicare l'APK era fare un commit finto. Con l'avvio manuale
+      # abilitato si ripubblica lo stesso commit senza sporcare la storia.
       - name: Pubblica l'APK come release scaricabile
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.ref_name }}

@@ -3643,6 +3643,21 @@ class PanoramaStitcher(
     }
 
     /**
+     * Il blocco di appunti di un lavoratore della fusione: le griglie ridotte tagliate su una
+     * riga.
+     *
+     * Sette vettori, qualche decina di chilobyte in tutto: l'istantanea dei possessori e le
+     * sei correzioni — tre canali per la sorgente nuova, tre per quella vecchia. Si riempiono
+     * a ogni riga e si consumano nella stessa riga; appartengono a un filo solo, quindi non
+     * serve nessun lucchetto.
+     */
+    private class BlendRowNotes(snapWidth: Int, gridWidth: Int) {
+        val owner = FloatArray(snapWidth)
+        val over = Array(3) { FloatArray(gridWidth) }
+        val base = Array(3) { FloatArray(gridWidth) }
+    }
+
+    /**
      * La fusione multibanda, ristretta alla sotto-finestra dove vecchio e nuovo si toccano —
      * e calcolata su una versione ridotta quando la finestra è grande.
      *
@@ -3902,7 +3917,7 @@ class PanoramaStitcher(
         val spanFrom = if (narrow) spanStart else 0
         val spanWidth = if (narrow) sbw else canvas.width
 
-        fun blendRow(by: Int, rowPixels: IntArray, band: IntArray?, bandBase: Int) {
+        fun blendRow(by: Int, rowPixels: IntArray, notes: BlendRowNotes, band: IntArray?, bandBase: Int) {
             val row = subRow0 + by
             val projector = FrameProjector(placement, lens, warp)
             val source = if (band == null) full?.let { SourceBlock(it) } else null
@@ -3910,6 +3925,14 @@ class PanoramaStitcher(
             output.getPixels(rowPixels, 0, spanWidth, spanFrom, row, spanWidth, 1)
             var touched = false
             val gyf = (by.toFloat() / s) - 0.5f + 0.5f / s
+            // Le sette griglie ridotte, tagliate in verticale su questa riga: da qui in avanti
+            // ogni pixel legge da vettori che stanno nella cache, non da quaranta megabyte
+            // sparsi. È la stessa interpolazione di prima, fatta nell'ordine giusto.
+            rowSlice(ownerSnap, snapW, snapH, by.toFloat() / OWNER_SCALE, notes.owner)
+            for (c in 0..2) {
+                rowSlice(corrOver[c], gw, gh, gyf, notes.over[c])
+                rowSlice(corrBase[c], gw, gh, gyf, notes.base[c])
+            }
             // La correzione multibanda svanisce ai bordi della sotto-finestra.
             //
             // La fusione corregge solo dentro il rettangolo che contiene la sovrapposizione;
@@ -3924,7 +3947,7 @@ class PanoramaStitcher(
             for (bx in 0 until sbw) {
                 val col = columns[sx0 + bx]
                 val present = windowNewW[(sy0 + by) * bw + (sx0 + bx)].toInt() != 0
-                val oldWeight = oldWeightAt(bx, by)
+                val oldWeight = lineAt(notes.owner, snapW, bx.toFloat() / OWNER_SCALE)
                 if (!present && oldWeight <= 0f) continue
 
                 // Dove sta questo pixel dentro il buffer di riga: se la fetta è stretta il
@@ -3980,11 +4003,11 @@ class PanoramaStitcher(
                 // allocava, per **ogni pixel**, l'array dei canali più un oggetto indice per
                 // giro. Su una fusione da decine di milioni di pixel sono centinaia di
                 // milioni di oggetti, e il netturbino che li raccoglie ferma tutti i fili.
-                val grids = if (useNew) corrOver else corrBase
+                val slices = if (useNew) notes.over else notes.base
                 val fade = rowFade * edgeFade(bx, sbw)
-                val red = correctedChannel(hard, 16, grids[0], gw, gh, gxf, gyf, fade)
-                val green = correctedChannel(hard, 8, grids[1], gw, gh, gxf, gyf, fade)
-                val blue = correctedChannel(hard, 0, grids[2], gw, gh, gxf, gyf, fade)
+                val red = correctedChannel(hard, 16, slices[0], gw, gxf, fade)
+                val green = correctedChannel(hard, 8, slices[1], gw, gxf, fade)
+                val blue = correctedChannel(hard, 0, slices[2], gw, gxf, fade)
                 rowPixels[at] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
                 touched = true
 
@@ -4009,8 +4032,11 @@ class PanoramaStitcher(
             blendedOnGpu = gpuBands(
                 gpu, gpuPlan, c0 + sx0, subRow0, sbw, sbh, weightOnly = false,
             ) { band, bandRow, rows ->
-                parallelRows(subRow0 + bandRow, rows, spanWidth) { r, rowPixels ->
-                    blendRow(bandRow + r, rowPixels, band, r * sbw)
+                parallelRows(
+                    subRow0 + bandRow, rows, spanWidth,
+                    scratch = { BlendRowNotes(snapW, gw) },
+                ) { r, rowPixels, notes ->
+                    blendRow(bandRow + r, rowPixels, notes, band, r * sbw)
                 }
                 doneRows = bandRow + rows
                 true
@@ -4021,8 +4047,11 @@ class PanoramaStitcher(
         // metà strada — lo fa la CPU. Si riparte dalla riga dopo l'ultima fascia riuscita:
         // rifare una riga già fusa non sarebbe innocuo come rifare una riga già dipinta,
         // perché la correzione si applicherebbe due volte sullo stesso pixel.
-        if (!blendedOnGpu) parallelRows(subRow0 + doneRows, sbh - doneRows, spanWidth) { r, rowPixels ->
-            blendRow(doneRows + r, rowPixels, null, 0)
+        if (!blendedOnGpu) parallelRows(
+            subRow0 + doneRows, sbh - doneRows, spanWidth,
+            scratch = { BlendRowNotes(snapW, gw) },
+        ) { r, rowPixels, notes ->
+            blendRow(doneRows + r, rowPixels, notes, null, 0)
         }
         blendApplyMillis += System.currentTimeMillis() - applyStartedAt
         // La scala della fusione nel log, e chi l'ha materialmente fatta: quando un
@@ -4056,12 +4085,31 @@ class PanoramaStitcher(
         rowCount: Int,
         bufferSize: Int,
         body: (Int, IntArray) -> Unit,
+    ) = parallelRows(firstAbsoluteRow, rowCount, bufferSize, scratch = { }) { r, buffer, _ ->
+        body(r, buffer)
+    }
+
+    /**
+     * Come sopra, ma a ogni lavoratore tocca anche un blocco di appunti tutto suo.
+     *
+     * Serve a chi, riga per riga, ha bisogno di qualche vettore d'appoggio: allocarlo dentro
+     * il corpo vorrebbe dire crearne uno per riga — decine di migliaia per panoramica — e il
+     * netturbino che li raccoglie ferma tutti i fili. Creato una volta per lavoratore, non ha
+     * bisogno di lucchetti perché nessun altro lo vede.
+     */
+    private suspend fun <S> parallelRows(
+        firstAbsoluteRow: Int,
+        rowCount: Int,
+        bufferSize: Int,
+        scratch: () -> S,
+        body: (Int, IntArray, S) -> Unit,
     ) = coroutineScope {
         if (rowCount <= 0) return@coroutineScope
         val workers = min(Runtime.getRuntime().availableProcessors(), MAX_STITCH_WORKERS)
         if (workers <= 1 || rowCount < 8) {
             val buffer = IntArray(bufferSize)
-            for (r in 0 until rowCount) body(r, buffer)
+            val notes = scratch()
+            for (r in 0 until rowCount) body(r, buffer, notes)
             return@coroutineScope
         }
         val firstPair = firstAbsoluteRow / OWNER_SCALE
@@ -4070,12 +4118,13 @@ class PanoramaStitcher(
         repeat(workers) {
             launch(Dispatchers.Default) {
                 val buffer = IntArray(bufferSize)
+                val notes = scratch()
                 while (true) {
                     val pair = next.getAndIncrement()
                     if (pair > lastPair) break
                     val from = max(pair * OWNER_SCALE, firstAbsoluteRow)
                     val to = min(pair * OWNER_SCALE + OWNER_SCALE - 1, firstAbsoluteRow + rowCount - 1)
-                    for (row in from..to) body(row - firstAbsoluteRow, buffer)
+                    for (row in from..to) body(row - firstAbsoluteRow, buffer, notes)
                 }
             }
         }
@@ -4242,14 +4291,13 @@ class PanoramaStitcher(
     private fun correctedChannel(
         hard: Int,
         shift: Int,
-        grid: FloatArray,
+        /** La correzione di questo canale, già tagliata sulla riga da [rowSlice]. */
+        slice: FloatArray,
         gridWidth: Int,
-        gridHeight: Int,
         gx: Float,
-        gy: Float,
         /** Quanto vale la correzione qui: uno dentro, zero sul bordo della sotto-finestra. */
         weight: Float,
-    ): Int = (((hard shr shift) and 0xFF) + weight * bilinearGrid(grid, gridWidth, gridHeight, gx, gy))
+    ): Int = (((hard shr shift) and 0xFF) + weight * lineAt(slice, gridWidth, gx))
         .roundToInt()
         .coerceIn(0, 255)
 
@@ -4269,6 +4317,39 @@ class PanoramaStitcher(
         if (distance >= margin) return 1f
         val t = (distance + 0.5f) / margin
         return 0.5f - 0.5f * cos(t * PI_FLOAT)
+    }
+
+    /**
+     * Una griglia ridotta interpolata *in verticale* su una riga sola.
+     *
+     * L'interpolazione bilineare è separabile: prima in verticale, poi in orizzontale, dà
+     * esattamente lo stesso numero. Ma la riga a piena risoluzione tiene fissa la coordinata
+     * verticale per tutti i suoi pixel, quindi metà del conto è la stessa per seimila pixel
+     * di fila — e soprattutto le letture cambiano natura. Fatta a ogni pixel, la bilineare
+     * pesca quattro valori sparsi in griglie che insieme fanno quaranta megabyte: a quel
+     * punto non conta l'aritmetica, contano le cache che mancano il bersaglio. Tagliata
+     * prima la riga, resta un'interpolazione lineare su qualche migliaio di float che stanno
+     * tutti nella cache più vicina.
+     */
+    private fun rowSlice(grid: FloatArray, gridWidth: Int, gridHeight: Int, y: Float, into: FloatArray) {
+        val cy = y.coerceIn(0f, (gridHeight - 1).toFloat())
+        val y0 = cy.toInt()
+        val y1 = min(y0 + 1, gridHeight - 1)
+        val ty = cy - y0
+        val from0 = y0 * gridWidth
+        val from1 = y1 * gridWidth
+        for (x in 0 until gridWidth) {
+            into[x] = grid[from0 + x] * (1f - ty) + grid[from1 + x] * ty
+        }
+    }
+
+    /** Il valore di una riga tagliata da [rowSlice], alla coordinata orizzontale voluta. */
+    private fun lineAt(slice: FloatArray, width: Int, x: Float): Float {
+        val cx = x.coerceIn(0f, (width - 1).toFloat())
+        val x0 = cx.toInt()
+        val x1 = min(x0 + 1, width - 1)
+        val tx = cx - x0
+        return slice[x0] * (1f - tx) + slice[x1] * tx
     }
 
     /** Interpolazione bilineare su una griglia ridotta, ai bordi si ferma. */

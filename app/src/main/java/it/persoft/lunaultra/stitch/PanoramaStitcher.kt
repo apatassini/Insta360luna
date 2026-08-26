@@ -276,14 +276,16 @@ class PanoramaStitcher(
             var measuredTiltScale: Float? = null
             if (!wideSearch && tuning.calibrateGimbal && shots.size >= 3) {
                 onProgress(0.06f, "Verifico gli angoli del gimbal")
-                val scale = measureGimbalScale(frames, placements, lens)
+                val scale = measureGimbalScale(frames, placements, lens, tiltIsKnown = haveAttitude)
                 if (scale == null) {
                     scaleNotes += "Gimbal: non sono riuscito a verificare gli angoli, li prendo per buoni"
                 } else {
                     val idle = abs(scale.pan - 1f) < SCALE_DEADBAND && abs(scale.tilt - 1f) < SCALE_DEADBAND
+                    scaleNotes += tabellaDelleGiunzioni(scale)
                     if (idle) {
-                        scaleNotes += ("Gimbal: angoli verificati su %d giunzioni, si è mosso di quello che " +
-                            "gli era stato chiesto").format(scale.panPairs + scale.tiltPairs)
+                        scaleNotes += ("Gimbal: angoli verificati su %d giunzioni verticali e %d " +
+                            "orizzontali, si è mosso di quello che gli era stato chiesto")
+                            .format(scale.tiltPairs, scale.panPairs)
                     } else {
                         // La misura esce di qui: chi ha chiamato la userà per correggere la
                         // taratura del gimbal, che è l'unico posto dove serve davvero. Correggerla
@@ -302,7 +304,6 @@ class PanoramaStitcher(
                                 tiltDegrees = centreTilt + (it.tiltDegrees - centreTilt) * scale.tilt,
                             )
                         }
-                        scaleNotes += tabellaDelleGiunzioni(scale)
                         scaleNotes += ("Gimbal fuori taratura: si muove ×%.2f in verticale e ×%.2f in " +
                             "orizzontale rispetto a quanto gli si chiede%s — angoli corretti qui, e la " +
                             "misura va anche nel profilo del gimbal, così i prossimi scatti si " +
@@ -525,6 +526,7 @@ class PanoramaStitcher(
                 lens = lens,
                 canvas = provisional,
                 wideSearch = wideSearch,
+                attitudeKnown = haveAttitude,
             )
             val refineSeconds = (System.currentTimeMillis() - refineStartedAt) / 1000f
             placements = refinement.placements
@@ -1264,6 +1266,8 @@ class PanoramaStitcher(
         lens: PinholeLens,
         canvas: PanoramaCanvas,
         wideSearch: Boolean,
+        /** L'inclinazione viene dalla gravità: la ricerca si apre sul pan e si chiude sul tilt. */
+        attitudeKnown: Boolean,
     ): Refinement {
         val placements = initial.toMutableList()
         val notes = mutableListOf<String>()
@@ -1347,6 +1351,7 @@ class PanoramaStitcher(
                     fixedPlacement = placements[anchor],
                     lens = lens,
                     wideSearch = wideSearch,
+                    attitudeKnown = attitudeKnown,
                 )
             }
             if (results.isEmpty() && postpone(
@@ -2405,6 +2410,21 @@ class PanoramaStitcher(
         frames: List<Frame>,
         placements: List<FramePlacement>,
         lens: PinholeLens,
+        /**
+         * Vero quando l'inclinazione arriva dalla gravità, e allora il prestito fra assi va
+         * spento.
+         *
+         * Il prestito serviva a coprire l'asse che le immagini non riescono a misurare, ed era
+         * ragionevole finché i due assi si misuravano allo stesso modo. Con l'inclinazione presa
+         * dalla gravità non lo è più: le pose *sono già* quelle vere in verticale, quindi la
+         * misura verticale sulle immagini vale uno per costruzione — non perché il gimbal sia
+         * tarato, ma perché gli si è già detto dove stava. Prestarla al pan significa dichiarare
+         * tarato un asse che non si è nemmeno guardato.
+         *
+         * È successo davvero: verticale corretto da 1,314 a 1,235, e orizzontale lasciato a
+         * 1,314 con la motivazione «si è mosso di quello che gli era stato chiesto».
+         */
+        tiltIsKnown: Boolean,
     ): GimbalScale? = coroutineScope {
         val rowPairs = mutableListOf<Pair<Int, Int>>()
         val columnPairs = mutableListOf<Pair<Int, Int>>()
@@ -2482,8 +2502,10 @@ class PanoramaStitcher(
         val tilt = if (trustworthy(vertical)) weightedMedian(vertical) else null
         val pan = if (trustworthy(horizontal)) weightedMedian(horizontal) else null
         if (tilt == null && pan == null) return@coroutineScope null
-        val borrowed = tilt == null || pan == null
-        val fallback = tilt ?: pan!!
+        // Il prestito vale solo fra misure paragonabili: se il verticale è uno per costruzione,
+        // prestarlo all'orizzontale non è una stima prudente, è un'affermazione falsa.
+        val borrowed = (tilt == null || pan == null) && !tiltIsKnown
+        val fallback = if (tiltIsKnown) 1f else (tilt ?: pan!!)
         GimbalScale(
             pan = pan ?: fallback,
             tilt = tilt ?: fallback,
@@ -2654,6 +2676,8 @@ class PanoramaStitcher(
         fixedPlacement: FramePlacement,
         lens: PinholeLens,
         wideSearch: Boolean,
+        /** L'inclinazione è quella vera, letta dalla gravità: in verticale non c'è da cercare. */
+        attitudeKnown: Boolean,
     ): Offset? = coroutineScope {
         // Con la ricerca larga il vero combaciamento può stare ovunque: si tengono tutti i
         // punti del fermo, e sarà ogni candidato a dire quali cadono nel mobile. Con gli
@@ -2698,10 +2722,29 @@ class PanoramaStitcher(
         // Non serviva un altro controllo: serviva non offrire quella possibilità. A mano
         // libera invece la finestra resta larga, perché lì il passo fra le foto non lo sa
         // nessuno e una risposta grossa può essere giusta.
-        val coarsePan = if (wideSearch) min(60f, lens.horizontalFovDegrees * 0.75f) else MAX_SEARCH_DEGREES
-        val coarseTilt = if (wideSearch) 20f else MAX_SEARCH_DEGREES
-        val maxPan = if (wideSearch) coarsePan + 2f else MAX_SEARCH_DEGREES + 1f
-        val maxTilt = if (wideSearch) coarseTilt + 2f else MAX_SEARCH_DEGREES + 1f
+        // La finestra si apre dove non sappiamo e si chiude dove sappiamo.
+        //
+        // Finché i due angoli erano entrambi ipotesi, quattro gradi per parte erano il
+        // compromesso. Con l'inclinazione presa dalla gravità i due assi non sono più alla pari:
+        // in verticale la posa è quella vera a tre centesimi di grado, e lasciare quattro gradi
+        // di libertà lì serve solo a farci entrare un errore. In orizzontale invece resta tutto
+        // da scoprire — il pan la gravità non lo può dare — e quattro gradi possono non bastare:
+        // su una fila a cinquanta gradi di passo, una taratura sbagliata del dieci per cento fa
+        // cinque gradi, e la ricerca andrebbe a sbattere contro il muro della finestra invece
+        // di trovare la risposta.
+        val tiltFromGravity = !wideSearch && attitudeKnown
+        val coarsePan = when {
+            wideSearch -> min(60f, lens.horizontalFovDegrees * 0.75f)
+            tiltFromGravity -> PAN_SEARCH_DEGREES
+            else -> MAX_SEARCH_DEGREES
+        }
+        val coarseTilt = when {
+            wideSearch -> 20f
+            tiltFromGravity -> TILT_SEARCH_WHEN_KNOWN
+            else -> MAX_SEARCH_DEGREES
+        }
+        val maxPan = if (wideSearch) coarsePan + 2f else coarsePan + 1f
+        val maxTilt = if (wideSearch) coarseTilt + 2f else coarseTilt + 1f
         val schedule = listOf(
             floatArrayOf(3f, coarsePan, coarseTilt, if (wideSearch) 1.2f else 0.8f),
             floatArrayOf(2f, 1.2f, 1.2f, 0.3f),
@@ -4614,6 +4657,21 @@ class PanoramaStitcher(
          * naviga a stima, e qualche grado di deriva è la norma, non l'eccezione.
          */
         const val MAX_SEARCH_DEGREES = 4f
+
+        /**
+         * Quanto si cerca in orizzontale quando l'inclinazione la dà la gravità.
+         *
+         * Dodici gradi. La gravità chiude la questione in verticale ma sul pan non dice niente,
+         * e il pan è l'asse dove la taratura del gimbal resta un'incognita: se sbaglia del dieci
+         * per cento, a cinquanta gradi di passo sono cinque gradi da recuperare. Con la finestra
+         * da quattro le correzioni finivano schiacciate contro il muro — misurate 3,72° su un
+         * limite di 4 — e quello che avanzava lo assorbiva la deformazione locale, che non è il
+         * suo mestiere.
+         */
+        const val PAN_SEARCH_DEGREES = 12f
+
+        /** E in verticale si stringe: lì la posa è già quella vera, il resto è solo rumore. */
+        const val TILT_SEARCH_WHEN_KNOWN = 1.5f
 
         /** Sotto questo passo la correzione è più fine di un pixel: cercare oltre è rumore. */
         // ---- Registrazione a piramide (l'allineamento) ----

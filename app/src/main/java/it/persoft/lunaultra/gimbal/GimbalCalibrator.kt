@@ -3,6 +3,7 @@ package it.persoft.lunaultra.gimbal
 import android.graphics.BitmapFactory
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
 import it.persoft.lunaultra.data.GimbalAxisLimits
+import it.persoft.lunaultra.protocol.ProtoField
 import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.data.GimbalCalibrationSample
 import it.persoft.lunaultra.data.JsonFileStore
@@ -1081,6 +1082,66 @@ class GimbalCalibrator(
 
 
     /** Trova i due estremi: aggancio rapido, arretramento e riaggancio lento di precisione. */
+    /**
+     * Fotografa i nove campi della notifica 8302 nel momento in cui sappiamo dove siamo.
+     *
+     * Di questa notifica conosciamo due campi: i flag di finecorsa. Gli altri sette nessuno li
+     * ha mai letti, e la domanda che contano è se lì dentro c'è la posizione. Se c'è, tutta la
+     * navigazione a stima — con il suo errore di scala che si porta dietro il numero di
+     * catalogo — diventa inutile: basta leggere.
+     *
+     * Il finecorsa è l'unico istante in cui la posizione è nota senza doverla calcolare. Quindi
+     * si scrive nel log com'era il payload lì, e da due estremi noti si ricava sia quale campo
+     * è l'angolo sia in che unità lo esprime.
+     */
+    private fun logPtzSnapshot(where: String, fields: List<ProtoField.VarInt>) {
+        if (fields.isEmpty()) {
+            log.info("CALIBRAZIONE · PTZ AL ${where.uppercase()}", "Nessuna notifica 8302 ricevuta qui")
+            return
+        }
+        log.info(
+            "CALIBRAZIONE · PTZ AL ${where.uppercase()}",
+            fields.joinToString("\n") { field ->
+                // Il valore grezzo e la sua lettura con segno: un angolo negativo in protobuf si
+                // scrive quasi sempre a zig-zag, e senza scioglierlo sembra un numero enorme.
+                "campo %d = %d (con segno %d)".format(field.number, field.value, field.asSInt)
+            },
+        )
+    }
+
+    /**
+     * Quanto è cambiato ogni campo attraversando l'asse per intero.
+     *
+     * È la riga che decide. Se un campo è l'angolo, la sua differenza fra i due estremi è la
+     * corsa vera espressa nella sua unità: un numero tondo — 3600 se sono decimi di grado su un
+     * giro, 36000 se sono centesimi — e a quel punto non serve più indovinare niente.
+     */
+    private fun logPtzTravel(
+        axis: String,
+        atMinimum: List<ProtoField.VarInt>,
+        atMaximum: List<ProtoField.VarInt>,
+    ) {
+        if (atMinimum.isEmpty() || atMaximum.isEmpty()) return
+        val first = atMinimum.associateBy { it.number }
+        val last = atMaximum.associateBy { it.number }
+        val righe = (first.keys + last.keys).sorted().mapNotNull { number ->
+            val a = first[number] ?: return@mapNotNull null
+            val b = last[number] ?: return@mapNotNull null
+            val raw = b.value - a.value
+            val signed = b.asSInt - a.asSInt
+            if (raw == 0L && signed == 0) return@mapNotNull "campo %d: fermo".format(number)
+            "campo %d: %+d grezzo, %+d con segno · se fossero decimi di grado sarebbero %.1f°"
+                .format(number, raw, signed, abs(signed) / 10.0)
+        }
+        log.info(
+            "CALIBRAZIONE · CORSA ${axisLabel(axis).uppercase()} SECONDO LA CAMERA",
+            (righe + listOf(
+                "Un campo che cambia di un numero tondo attraversando tutta la corsa è la posizione.",
+            )).joinToString("\n"),
+        )
+    }
+
+
     private suspend fun calibrateAxisLimits(
         axis: String,
         minimumDeg: Float,
@@ -1097,11 +1158,13 @@ class GimbalCalibrator(
             requireTravel = false,
         )
         anchorFrame(axis, minimumDeg)
+        val atMinimum = limitMonitor.lastPtzFields
         log.info(
             "CALIBRAZIONE · FINE CORSA ${directionLabel(axis, -1f).uppercase()}",
             "Rilevato dopo ${negative.totalPulses} impulsi · coordinate fissate a %.1f°".format(minimumDeg),
             imageJpeg = negative.annotatedJpeg,
         )
+        logPtzSnapshot("fine corsa ${directionLabel(axis, -1f)}", atMinimum)
 
         val positive = findPreciseEndStop(
             axis = axis,
@@ -1112,6 +1175,9 @@ class GimbalCalibrator(
             requireTravel = true,
         )
         anchorFrame(axis, maximumDeg)
+        val atMaximum = limitMonitor.lastPtzFields
+        logPtzSnapshot("fine corsa ${directionLabel(axis, 1f)}", atMaximum)
+        logPtzTravel(axis, atMinimum, atMaximum)
         val limits = GimbalAxisLimits(
             minimumDeg = minimumDeg,
             maximumDeg = maximumDeg,

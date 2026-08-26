@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.atan
+import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
@@ -173,6 +174,54 @@ class PanoramaStitcher(
 
             var placements = shots.map { FramePlacement(it.panDegrees, it.tiltDegrees) }
 
+            // La taratura del gimbal, prima di tutto il resto.
+            //
+            // Per mesi ho dato per buoni gli angoli scritti nei tag: li ha decisi l'app, li ha
+            // eseguiti il gimbal, che vuoi che sbaglino. Misurandoli sulle nove foto della
+            // spiaggia è saltato fuori che il passo verticale chiesto era 32,02° e quello
+            // fatto ne misurava 42. Il 31% in più. Sempre lo stesso su tutte e tre le colonne,
+            // quindi non rumore: un errore di scala, di quelli che nascono da una calibrazione
+            // dei fine corsa che non torna.
+            //
+            // Va fatto per primo perché tutto il resto ne dipende: la livella cerca
+            // l'orizzonte dove l'inclinazione dice che dovrebbe stare, e la rifinitura ha una
+            // finestra di quattro gradi, che con dieci gradi di errore non serve a niente.
+            val scaleNotes = mutableListOf<String>()
+            if (!wideSearch && tuning.calibrateGimbal && shots.size >= 3) {
+                onProgress(0.06f, "Verifico gli angoli del gimbal")
+                val scale = measureGimbalScale(frames, placements, lens)
+                if (scale == null) {
+                    scaleNotes += "Gimbal: non sono riuscito a verificare gli angoli, li prendo per buoni"
+                } else {
+                    val idle = abs(scale.pan - 1f) < SCALE_DEADBAND && abs(scale.tilt - 1f) < SCALE_DEADBAND
+                    if (idle) {
+                        scaleNotes += ("Gimbal: angoli verificati su %d giunzioni, si è mosso di quello che " +
+                            "gli era stato chiesto").format(scale.panPairs + scale.tiltPairs)
+                    } else {
+                        // Si scala attorno al centro della panoramica, non attorno allo zero del
+                        // gimbal: quello che si misura è quanto **si è mosso**, e il punto da cui
+                        // si è mosso è dove è cominciata la panoramica.
+                        val centrePan = placements.map { it.panDegrees }.average().toFloat()
+                        val centreTilt = placements.map { it.tiltDegrees }.average().toFloat()
+                        placements = placements.map {
+                            it.copy(
+                                panDegrees = centrePan + (it.panDegrees - centrePan) * scale.pan,
+                                tiltDegrees = centreTilt + (it.tiltDegrees - centreTilt) * scale.tilt,
+                            )
+                        }
+                        scaleNotes += ("Gimbal fuori taratura: si muove ×%.2f in verticale e ×%.2f in " +
+                            "orizzontale rispetto a quanto gli si chiede%s — angoli corretti " +
+                            "(misurato su %d giunzioni verticali e %d orizzontali)").format(
+                            scale.tilt,
+                            scale.pan,
+                            if (scale.borrowed) ", uno dei due assi preso in prestito dall'altro" else "",
+                            scale.tiltPairs,
+                            scale.panPairs,
+                        )
+                    }
+                }
+            }
+
             // La livella: raddrizzare la panoramica, non i singoli fotogrammi.
             //
             // L'orizzonte è un cerchio massimo, e in tutte e tre le proiezioni un cerchio
@@ -205,75 +254,135 @@ class PanoramaStitcher(
             run {
                 val forced = tuning.cameraPitchDegrees
                 if (abs(forced) > 0.05f) {
-                    // A mano vale come misura assoluta, come è sempre stato: la camera
-                    // guardava in su di tanto, e la tela si raddrizza di conseguenza.
+                    // A mano vale come misura assoluta: la camera guardava in su di tanto.
                     placements = placements.map { it.copy(tiltDegrees = it.tiltDegrees + forced) }
                     levelNotes += "Orizzonte: camera a %+.1f° (impostata a mano)".format(forced)
                     return@run
                 }
                 if (!tuning.levelHorizon) return@run
 
-                // Un fotogramma per core: la misura dell'orizzonte è indipendente per
-                // ognuno, e in fila costava quanto tutte messe insieme.
-                val pitches = frames.map { frame ->
-                    async(Dispatchers.Default) { estimateCameraPitch(frame, lens) }
+                // Un fotogramma per core: la misura dell'orizzonte è indipendente per ognuno.
+                // Chi ha l'orizzonte fuori inquadratura si scarta subito, senza cercarlo.
+                val lines = frames.mapIndexed { index, frame ->
+                    val expected = horizonRowFor(placements[index].tiltDegrees, lens, frame.height)
+                    async(Dispatchers.Default) { estimateHorizon(frame, lens, expected) }
                 }.awaitAll()
-                val offsets = placements.indices.mapNotNull { i ->
-                    pitches[i]?.let { placements[i].tiltDegrees - it }
-                }
-                // Quante misure bastano: due, non metà delle foto.
-                //
-                // Su una panoramica a più file l'orizzonte lo vede **solo la fila di mezzo** —
-                // quella di sopra guarda il cielo e quella di sotto i sassi, e giustamente non
-                // trovano niente. Chiedere metà delle nove foto voleva dire cinque misure
-                // quando al massimo se ne possono avere tre: la livella non sarebbe partita
-                // mai, che è esattamente il motivo per cui il mare della panoramica a nove
-                // resta stondato mentre quello della fila singola no.
-                if (offsets.size < HORIZON_MIN_FRAMES) {
+                val seen = lines.indices.filter { lines[it] != null }
+                if (seen.size < HORIZON_MIN_FRAMES) {
                     levelNotes += "Orizzonte trovato in %d foto su %d: troppo poche, la tela resta com'è"
-                        .format(offsets.size, frames.size)
+                        .format(seen.size, frames.size)
                     return@run
                 }
-                // Mediana vera anche quando le misure sono in numero pari: con due misure
-                // prendere quella «di mezzo» vuol dire prenderne una a caso, e fra +11,6° e
-                // +7,8° la differenza è quasi quattro gradi di panoramica storta.
-                val sorted = offsets.sorted()
-                val middle = sorted.size / 2
-                val tilt = if (sorted.size % 2 == 1) {
-                    sorted[middle]
-                } else {
-                    (sorted[middle - 1] + sorted[middle]) / 2f
-                }
-                val spread = (offsets.maxOrNull() ?: 0f) - (offsets.minOrNull() ?: 0f)
-                // Misure che litigano fra loro non sono misure: se una foto dice che
-                // l'orizzonte sta dieci gradi più su di quel che dice l'altra, almeno una
-                // delle due ha trovato una nuvola. Meglio una panoramica storta come è
-                // nata che una raddrizzata a caso.
-                if (spread > HORIZON_MAX_DISAGREEMENT) {
-                    levelNotes += ("Orizzonte: le %d misure non si accordano (scarto %.1f°, " +
-                        "misure %s) — la tela resta com'è").format(
-                        offsets.size,
-                        spread,
-                        pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
+
+                // Quante incognite ci si può permettere.
+                //
+                // La panoramica storta ne ha tre: il beccheggio, e l'inclinazione dell'asse in
+                // ampiezza e verso. Ma le ultime due si leggono solo confrontando foto che
+                // guardano da parti diverse: se l'orizzonte si vede in due foto vicine, la
+                // sinusoide che ci si adatta sopra è un'invenzione, non una misura. Misurato
+                // sulle nove foto della spiaggia, dove l'orizzonte si vede in due: con l'asse
+                // l'escursione dell'orizzonte finito è 0,50°, con il solo beccheggio 0,38°.
+                // Meno incognite, risultato migliore.
+                //
+                // Quindi l'asse si stima solo se ci sono almeno tre foto e almeno novanta gradi
+                // di azimut fra la prima e l'ultima; se no, il beccheggio da solo, preso con la
+                // mediana perché una foto sbagliata non tiri il risultato.
+                val spread = seen.maxOf { placements[it].panDegrees } -
+                    seen.minOf { placements[it].panDegrees }
+                val axisMeasurable = seen.size >= HORIZON_AXIS_MIN_FRAMES && spread >= HORIZON_AXIS_MIN_SPREAD
+                if (!axisMeasurable) {
+                    val offsets = seen.map { placements[it].tiltDegrees - lines[it]!!.pitchDegrees }.sorted()
+                    val pitchOnly = if (offsets.size % 2 == 1) {
+                        offsets[offsets.size / 2]
+                    } else {
+                        (offsets[offsets.size / 2 - 1] + offsets[offsets.size / 2]) / 2f
+                    }
+                    if (abs(pitchOnly) > MAX_CAMERA_PITCH_DEGREES) {
+                        levelNotes += ("Orizzonte: la misura dice beccheggio %+.1f°, troppo per essere " +
+                            "vera — la tela resta com'è").format(pitchOnly)
+                        return@run
+                    }
+                    if (abs(pitchOnly) < HORIZON_LEVEL_DEADBAND) {
+                        levelNotes += "Orizzonte già in bolla: niente da raddrizzare"
+                        return@run
+                    }
+                    placements = placements.map { it.copy(tiltDegrees = it.tiltDegrees - pitchOnly) }
+                    levelNotes += ("Panoramica raddrizzata: la camera guardava in su di %.2f° " +
+                        "(orizzonte visto in %d foto su %d, %.0f%% di colonne d'accordo; troppo " +
+                        "vicine fra loro per misurare anche l'asse)").format(
+                        -pitchOnly,
+                        seen.size,
+                        frames.size,
+                        100f * seen.maxOf { lines[it]!!.agreement },
                     )
                     return@run
                 }
-                if (abs(tilt) < HORIZON_LEVEL_DEADBAND) {
-                    levelNotes += "Orizzonte già in bolla (scarto %+.1f°): niente da raddrizzare".format(tilt)
+
+                // Le tre incognite della panoramica storta.
+                //
+                // Ogni foto in cui si vede l'orizzonte ne dà **due** di equazioni, non una:
+                // dove passa la retta (il beccheggio) e quanto pende (il rollio).
+                val normal = DoubleArray(9)
+                val target = DoubleArray(3)
+                val row = DoubleArray(3)
+                fun accumulate(y: Double) {
+                    for (i in 0 until 3) {
+                        target[i] += row[i] * y
+                        for (j in 0 until 3) normal[i * 3 + j] += row[i] * row[j]
+                    }
+                }
+                for (i in seen) {
+                    val line = lines[i]!!
+                    val pan = placements[i].panDegrees.toRadians()
+                    // Dove passa: H(pan) = inclinazione nominale − beccheggio misurato.
+                    row[0] = 1.0
+                    row[1] = sin(pan).toDouble()
+                    row[2] = cos(pan).toDouble()
+                    accumulate((placements[i].tiltDegrees - line.pitchDegrees).toDouble())
+                    // Quanto pende: il rollio visto nell'immagine è l'opposto della derivata.
+                    row[0] = 0.0
+                    row[1] = -cos(pan).toDouble()
+                    row[2] = sin(pan).toDouble()
+                    accumulate(line.rollDegrees.toDouble())
+                }
+                val solution = solveLinearSystem(3, normal, target)
+                if (solution == null) {
+                    levelNotes += "Orizzonte: le misure non bastano a determinare l'inclinazione"
                     return@run
                 }
-                if (abs(tilt) > MAX_CAMERA_PITCH_DEGREES) {
-                    levelNotes += ("Orizzonte: la misura dice %+.1f°, troppo per essere vera — " +
-                        "la tela resta com'è").format(tilt)
+                val pitch = solution[0].toFloat()
+                val sinPart = solution[1].toFloat()
+                val cosPart = solution[2].toFloat()
+                val axis = sqrt(sinPart * sinPart + cosPart * cosPart)
+                if (abs(pitch) > MAX_CAMERA_PITCH_DEGREES || axis > MAX_RIG_TILT_DEGREES) {
+                    levelNotes += ("Orizzonte: la misura dice beccheggio %+.1f° e asse %.1f°, " +
+                        "troppo per essere vera — la tela resta com'è").format(pitch, axis)
                     return@run
                 }
-                placements = placements.map { it.copy(tiltDegrees = it.tiltDegrees - tilt) }
-                levelNotes += ("Panoramica raddrizzata di %+.1f° (misure %s, scarto fra le misure " +
-                    "%.1f° su %d foto su %d)").format(
-                    -tilt,
-                    pitches.joinToString(" · ") { it?.let { p -> "%+.1f°".format(p) } ?: "—" },
-                    spread,
-                    offsets.size,
+                if (abs(pitch) < HORIZON_LEVEL_DEADBAND && axis < HORIZON_LEVEL_DEADBAND) {
+                    levelNotes += "Orizzonte già in bolla: niente da raddrizzare"
+                    return@run
+                }
+
+                placements = placements.map { placement ->
+                    val pan = placement.panDegrees.toRadians()
+                    val horizon = pitch + sinPart * sin(pan) + cosPart * cos(pan)
+                    val slope = sinPart * cos(pan) - cosPart * sin(pan)
+                    // Il segno del rollio non l'ho dedotto, l'ho misurato: sul mondo di prova,
+                    // con l'asse inclinato di 2,5°, l'escursione dell'orizzonte passa da 6,55°
+                    // a 4,45° con il meno e peggiora a 7,10° con il più. Il 4,45 è il fondo:
+                    // è quello che si misura anche su una base perfettamente in bolla.
+                    placement.copy(
+                        tiltDegrees = placement.tiltDegrees - horizon,
+                        rollDegrees = placement.rollDegrees - slope,
+                    )
+                }
+                levelNotes += ("Panoramica raddrizzata: beccheggio %+.2f°, asse inclinato %.2f° " +
+                    "verso %.0f° (orizzonte visto in %d foto su %d)").format(
+                    -pitch,
+                    axis,
+                    (atan2(sinPart, cosPart).toDegrees() + 360f) % 360f,
+                    seen.size,
                     frames.size,
                 )
             }
@@ -425,6 +534,7 @@ class PanoramaStitcher(
             // dirlo, perché non è un difetto del programma ma di come sono state scattate.
             val verdict = refinement.verdict.toMutableList()
             verdict.addAll(0, levelNotes)
+            verdict.addAll(0, scaleNotes)
             if (placements.size >= 2) {
                 var tightest = Float.MAX_VALUE
                 for (k in 1 until placements.size) {
@@ -1231,7 +1341,9 @@ class PanoramaStitcher(
             placements[index] = placements[index].copy(
                 panCorrectionDegrees = finalPan,
                 tiltCorrectionDegrees = finalTilt,
-                rollDegrees = rollDegrees,
+                // Il rollio dei punti si **somma** a quello della livella, non lo sostituisce:
+                // il primo raddrizza la panoramica intera, il secondo corregge questa foto.
+                rollDegrees = placements[index].rollDegrees + rollDegrees,
                 focalScale = focalScale,
             )
             if (focalScale != 1f) focalEstimates += focalScale
@@ -1908,7 +2020,13 @@ class PanoramaStitcher(
         return if (slice.isEmpty()) sorted[sorted.size / 2] else slice.average().toFloat()
     }
 
-    private class Offset(val panDegrees: Float, val tiltDegrees: Float, val confidence: Float)
+    private class Offset(
+        val panDegrees: Float,
+        val tiltDegrees: Float,
+        val confidence: Float,
+        /** Quanti dettagli hanno votato la misura: è il peso con cui vale, più della frazione. */
+        val inliers: Int = 0,
+    )
 
     /**
      * L'allineamento grossolano fatto riconoscendo dettagli, non correlando pixel.
@@ -1931,6 +2049,26 @@ class PanoramaStitcher(
         movingPlacement: FramePlacement,
         fixedPlacement: FramePlacement,
         lens: PinholeLens,
+        /**
+         * Quanto lontano si accetta che un dettaglio sia finito rispetto a dove lo si aspettava.
+         *
+         * In rifinitura è stretta: gli angoli sono già stati tarati e resta la deriva. In
+         * taratura è larghissima, perché è proprio l'errore grosso che si sta cercando.
+         */
+        maxDegrees: Float = FEATURE_MAX_DEGREES,
+        searchFraction: Float = FEATURE_SEARCH_FRACTION,
+        /**
+         * Quanto fitta è la griglia dei dettagli.
+         *
+         * In rifinitura basta larga: la correzione è piccola e i punti di controllo fanno il
+         * grosso. In taratura serve fitta, e non è un'opinione: sulle nove foto della spiaggia,
+         * con la cella da 64 px la giunzione fra la fila centrale e quella alta metteva
+         * d'accordo quattro dettagli, con quella da 24 ne mette d'accordo ventinove. Sotto i sei
+         * la misura si butta, e con quattro si sarebbe buttata anche quella giusta.
+         */
+        cell: Int = FEATURE_CELL,
+        minInliers: Int = FEATURE_MIN_INLIERS,
+        minRatio: Float = FEATURE_MIN_RATIO,
     ): Offset? {
         // Dove si sovrappongono, nei pixel dell'uno e in quelli dell'altro.
         var fx0 = Int.MAX_VALUE
@@ -1968,18 +2106,18 @@ class PanoramaStitcher(
         // Nel fotogramma mobile si cerca più largo della sovrapposizione prevista: è lì che
         // sta tutto il senso di questo metodo, cioè poter trovare un dettaglio anche dove la
         // geometria non se lo aspettava.
-        val slack = (max(moving.width, moving.height) * FEATURE_SEARCH_FRACTION).toInt()
+        val slack = (max(moving.width, moving.height) * searchFraction).toInt()
         val fixedPoints = FeatureMatcher.detect(
-            fixed.gray, fixed.width, fixed.height, fx0, fy0, fx1, fy1, FEATURE_CELL,
+            fixed.gray, fixed.width, fixed.height, fx0, fy0, fx1, fy1, cell,
         )
         val movingPoints = FeatureMatcher.detect(
             moving.gray, moving.width, moving.height,
-            mx0 - slack, my0 - slack, mx1 + slack, my1 + slack, FEATURE_CELL,
+            mx0 - slack, my0 - slack, mx1 + slack, my1 + slack, cell,
         )
         if (fixedPoints.size < FEATURE_MIN_POINTS || movingPoints.size < FEATURE_MIN_POINTS) return null
 
         val matches = FeatureMatcher.match(fixedPoints, movingPoints)
-        if (matches.size < FEATURE_MIN_INLIERS) return null
+        if (matches.size < minInliers) return null
 
         // Da ogni abbinamento, di quanto il fotogramma mobile dovrebbe spostarsi perché quel
         // dettaglio finisca dove il fotogramma fermo dice che sta.
@@ -2000,7 +2138,7 @@ class PanoramaStitcher(
         var bestPan = 0f
         var bestTilt = 0f
         for (i in matches.indices) {
-            if (abs(panShift[i]) > FEATURE_MAX_DEGREES || abs(tiltShift[i]) > FEATURE_MAX_DEGREES) continue
+            if (abs(panShift[i]) > maxDegrees || abs(tiltShift[i]) > maxDegrees) continue
             var count = 0
             for (j in matches.indices) {
                 if (abs(panShift[j] - panShift[i]) <= FEATURE_VOTE_DEGREES &&
@@ -2015,7 +2153,7 @@ class PanoramaStitcher(
                 bestTilt = tiltShift[i]
             }
         }
-        if (bestCount < FEATURE_MIN_INLIERS) return null
+        if (bestCount < minInliers) return null
 
         var sumPan = 0f
         var sumTilt = 0f
@@ -2029,13 +2167,138 @@ class PanoramaStitcher(
                 inliers++
             }
         }
-        if (inliers < FEATURE_MIN_INLIERS) return null
+        if (inliers < minInliers) return null
         val ratio = inliers.toFloat() / matches.size
-        if (ratio < FEATURE_MIN_RATIO) return null
+        if (ratio < minRatio) return null
 
-        return Offset(sumPan / inliers, sumTilt / inliers, ratio.coerceIn(0f, 1f))
+        return Offset(sumPan / inliers, sumTilt / inliers, ratio.coerceIn(0f, 1f), inliers)
     }
 
+    /** Di quanto il gimbal si muove davvero, rispetto a quanto gli si è chiesto. */
+    private class GimbalScale(
+        val pan: Float,
+        val tilt: Float,
+        val panPairs: Int,
+        val tiltPairs: Int,
+        /** Un asse non si è potuto misurare e ha preso in prestito il fattore dell'altro. */
+        val borrowed: Boolean,
+    )
+
+    /**
+     * La taratura del gimbal, misurata sulle foto.
+     *
+     * Questo pezzo nasce da nove foto vere e da un conto che non tornava. Il piano diceva tre
+     * file a 32,02° di distanza; misurando le foto una per una, la distanza fra una fila e
+     * l'altra era di 42°. Non un'imprecisione: il 31% in più, sempre lo stesso, su tutte e tre
+     * le colonne. E la prova senza appello era nella fila bassa, dove non si vede un filo di
+     * cielo: con 32° di passo il bordo alto di quelle foto sarebbe stato dieci gradi sopra
+     * l'orizzonte, e il cielo si sarebbe dovuto vedere per forza.
+     *
+     * Da lì viene tutto il resto. L'albero spezzato in due che si vedeva a sinistra era il
+     * bordo fra la fila alta e quella centrale, spostato di dieci gradi. E l'allineamento non
+     * poteva rimediare perché gli era stato proibito: la finestra di ricerca era di quattro
+     * gradi, «tanto il gimbal gli angoli li sa». Non li sa.
+     *
+     * Quindi si misura. Per ogni coppia di foto della stessa fila, e per ogni coppia della
+     * stessa colonna, si guarda di quanto si sono spostate **davvero** e lo si confronta con
+     * quanto era stato chiesto. Il rapporto è uno solo per tutta la panoramica — è un errore di
+     * scala, non un capriccio — e si prende la mediana pesata, così una coppia che ha abbinato
+     * quattro dettagli su una nuvola non conta come una che ne ha abbinati duecento sui coralli.
+     *
+     * Se un asse non si riesce a misurare — succede: fra una foto e l'altra della fila
+     * centrale c'è solo cielo e mare aperto, che si muovono e non si abbinano — si presta il
+     * fattore dell'altro asse. È lo stesso meccanismo che sbaglia, ed è meglio del niente:
+     * misurato sulle nove foto, prestare il fattore verticale a quello orizzontale porta il
+     * disaccordo fra fotogrammi da 34,0 a 29,7, contro il 28,6 della misura vera su due assi.
+     */
+    private suspend fun measureGimbalScale(
+        frames: List<Frame>,
+        placements: List<FramePlacement>,
+        lens: PinholeLens,
+    ): GimbalScale? = coroutineScope {
+        val rowPairs = mutableListOf<Pair<Int, Int>>()
+        val columnPairs = mutableListOf<Pair<Int, Int>>()
+        for (i in placements.indices) {
+            for (j in i + 1 until placements.size) {
+                val dPan = abs(wrapDegrees(placements[j].panDegrees - placements[i].panDegrees))
+                val dTilt = abs(placements[j].tiltDegrees - placements[i].tiltDegrees)
+                val sameRow = dTilt <= SCALE_ALIGNED_DEGREES &&
+                    dPan >= SCALE_MIN_STEP_DEGREES && dPan <= lens.horizontalFovDegrees
+                val sameColumn = dPan <= SCALE_ALIGNED_DEGREES &&
+                    dTilt >= SCALE_MIN_STEP_DEGREES && dTilt <= lens.verticalFovDegrees
+                if (sameRow) rowPairs += i to j
+                if (sameColumn) columnPairs += i to j
+            }
+        }
+        if (rowPairs.isEmpty() && columnPairs.isEmpty()) return@coroutineScope null
+
+        // Un rapporto per coppia, e il peso con cui vale: quanti dettagli si sono messi
+        // d'accordo. Le coppie si misurano tutte in parallelo, sono indipendenti fra loro.
+        val work = columnPairs.map { it to true } + rowPairs.map { it to false }
+        val measured = work.map { (pair, vertical) ->
+            async(Dispatchers.Default) {
+                val (i, j) = pair
+                val offset = registerByFeatures(
+                    moving = frames[j],
+                    fixed = frames[i],
+                    movingPlacement = placements[j],
+                    fixedPlacement = placements[i],
+                    lens = lens,
+                    maxDegrees = SCALE_SEARCH_DEGREES,
+                    searchFraction = SCALE_SEARCH_FRACTION,
+                    cell = SCALE_CELL,
+                    minInliers = SCALE_MIN_INLIERS,
+                    minRatio = SCALE_MIN_RATIO,
+                ) ?: return@async null
+                val asked = if (vertical) {
+                    placements[j].tiltDegrees - placements[i].tiltDegrees
+                } else {
+                    wrapDegrees(placements[j].panDegrees - placements[i].panDegrees)
+                }
+                if (abs(asked) < SCALE_MIN_STEP_DEGREES) return@async null
+                val done = asked + (if (vertical) offset.tiltDegrees else offset.panDegrees)
+                val ratio = done / asked
+                if (ratio < SCALE_MIN_FACTOR || ratio > SCALE_MAX_FACTOR) return@async null
+                Triple(vertical, ratio, offset.inliers.toFloat())
+            }
+        }.awaitAll().filterNotNull()
+
+        val vertical = measured.filter { it.first }.map { it.second to it.third }
+        val horizontal = measured.filter { !it.first }.map { it.second to it.third }
+        if (vertical.isEmpty() && horizontal.isEmpty()) return@coroutineScope null
+
+        // Una misura sola non fa una taratura: due che si somigliano sì, e una schiacciante
+        // pure. Sotto quella soglia si preferisce non toccare niente che sbagliare in blocco.
+        fun trustworthy(values: List<Pair<Float, Float>>): Boolean =
+            values.size >= 2 || values.any { it.second >= SCALE_STRONG_INLIERS }
+
+        val tilt = if (trustworthy(vertical)) weightedMedian(vertical) else null
+        val pan = if (trustworthy(horizontal)) weightedMedian(horizontal) else null
+        if (tilt == null && pan == null) return@coroutineScope null
+        val borrowed = tilt == null || pan == null
+        val fallback = tilt ?: pan!!
+        GimbalScale(
+            pan = pan ?: fallback,
+            tilt = tilt ?: fallback,
+            panPairs = horizontal.size,
+            tiltPairs = vertical.size,
+            borrowed = borrowed,
+        )
+    }
+
+    /** La mediana pesata: il valore che divide a metà non il numero di voci ma il loro peso. */
+    private fun weightedMedian(values: List<Pair<Float, Float>>): Float? {
+        if (values.isEmpty()) return null
+        val sorted = values.sortedBy { it.first }
+        val total = sorted.sumOf { it.second.toDouble() }
+        if (total <= 0.0) return sorted[sorted.size / 2].first
+        var running = 0.0
+        for ((value, weight) in sorted) {
+            running += weight
+            if (running >= total / 2.0) return value
+        }
+        return sorted.last().first
+    }
 
     /**
      * Lo spostamento che fa combaciare [moving] con [fixed], dalla nebbia al dettaglio.
@@ -3850,85 +4113,144 @@ class PanoramaStitcher(
         )
     }
 
+    /** L'orizzonte visto in un fotogramma: dove passa al centro, e quanto pende. */
+    private class HorizonLine(val pitchDegrees: Float, val rollDegrees: Float, val agreement: Float)
+
+    /** La riga in cui il gimbal dice che dovrebbe passare l'orizzonte, per questa inclinazione. */
+    private fun horizonRowFor(tiltDegrees: Float, lens: PinholeLens, height: Int): Float =
+        height / 2f + lens.focalPixels * tan(tiltDegrees.coerceIn(-80f, 80f).toRadians())
+
     /**
-     * L'inclinazione della camera, letta dall'orizzonte che si vede nella foto.
+     * L'orizzonte del mare, cercato dove il gimbal dice che dovrebbe stare.
      *
-     * È il parametro che mancava, e il difetto che produce è inconfondibile: il mare diventa
-     * una conca e il marciapiede vicino resta dritto, cioè l'esatto contrario di quello che
-     * deve succedere. In una panoramica equirettangolare l'orizzonte — che è un cerchio
-     * massimo — è una **riga dritta**, e una linea dritta vicina alla camera, come il bordo
-     * di un molo, è quella che si incurva. Se si dà per scontato che la camera fosse in
-     * bolla mentre guardava in su di dodici gradi, i due ruoli si scambiano: la riga
-     * orizzontale della foto, piazzata come se fosse all'altezza dell'occhio, diventa un
-     * arco con il colmo al centro del fotogramma, e ogni foto ne aggiunge uno.
+     * Questo pezzo decide se il mare esce dritto, ed è stato riscritto tre volte. Le due
+     * scelte che lo fanno funzionare sono tutte e due contro l'istinto, e le ho trovate solo
+     * misurando: sulle nove foto della spiaggia la versione precedente trovava l'orizzonte in
+     * **una** foto su nove, e questa lo trova dove c'è, con il 100% delle colonne d'accordo.
      *
-     * Misurarlo è possibile perché l'orizzonte, dove c'è, è il gradiente orizzontale più
-     * forte e più esteso della foto: cielo chiaro sopra, terra o acqua scura sotto, per
-     * quasi tutte le colonne alla stessa altezza. Si cerca in ogni colonna il salto verso
-     * il buio più netto, si prende la mediana delle colonne convincenti, e la si converte
-     * in gradi attraverso la focale. Se le colonne convincenti sono poche o non si mettono
-     * d'accordo — un interno, un muro, una foto senza orizzonte — non si inventa niente e
-     * si torna a zero.
+     * La prima: non si guarda in tutta la foto, ma in una fascia stretta attorno alla riga
+     * prevista. Dove sta l'orizzonte lo sappiamo già — l'inclinazione ce l'ha detta il gimbal
+     * — e quello che manca è solo il piccolo scarto. Frugando ovunque si finiva sempre sulla
+     * riva: sassi scuri sotto la schiuma bianca, che come stacco è molto più forte del mare.
      *
-     * Sulle tre foto del molo misura +11,9°, +13,7° e +15,1°: la camera guardava in su, di
-     * un po' di più a ogni scatto.
+     * La seconda: dentro la fascia non si prende lo stacco più forte, ma il **primo**
+     * scendendo dal cielo. Sopra l'orizzonte non c'è altro che nuvole, e una nuvola non fa un
+     * salto di cinquanta livelli su dodici righe; sotto invece c'è la risacca, che lo fa e lo
+     * vince ogni volta. Il primo che passa la soglia è l'orizzonte; il più forte è l'onda.
+     *
+     * Il resto è una retta a maggioranza: due colonne sorteggiate — e lontane fra loro, se no
+     * la pendenza è un'opinione — la definiscono, e vince quella che ne accontenta di più. Le
+     * colonne prese su un ramo cadono ognuna per conto suo e non fanno maggioranza. Poi i
+     * minimi quadrati sulle sole concordi, che è la retta buona.
+     *
+     * Escono due numeri invece di uno: dove passa al centro, cioè il beccheggio, e quanto
+     * pende, cioè il rollio. Chiedere un'altezza sola, com'era prima, non poteva funzionare:
+     * se la base non è in bolla l'orizzonte nella foto è *inclinato*, e le colonne non possono
+     * essere d'accordo su un'altezza. Sono d'accordo su una retta.
      */
-    private fun estimateCameraPitch(frame: Frame, lens: PinholeLens): Float? {
+    private fun estimateHorizon(frame: Frame, lens: PinholeLens, expectedRow: Float): HorizonLine? {
         val gray = frame.gray
         val width = frame.width
         val height = frame.height
         if (width < 32 || height < 32) return null
+        val half = (lens.focalPixels * tan(HORIZON_WINDOW_DEGREES.toRadians())).toInt()
+        val centre = expectedRow.roundToInt()
+        val top = max(HORIZON_SPAN, centre - half)
+        val bottom = min(height - HORIZON_SPAN - 1, centre + half)
+        if (bottom - top < 16) return null
 
-        // L'orizzonte non sta mai agli estremi: cercarlo lì significa trovare il bordo della
-        // foto o una nuvola bassa.
-        val top = (height * HORIZON_BAND_TOP).toInt()
-        val bottom = (height * HORIZON_BAND_BOTTOM).toInt()
-        if (bottom - top < 8) return null
-
-        val rows = mutableListOf<Float>()
+        val xs = ArrayList<Float>()
+        val ys = ArrayList<Float>()
+        var sampled = 0
+        val span = HORIZON_SPAN.toFloat()
         var column = 0
         while (column < width) {
-            var bestDrop = 0f
-            var bestRow = -1
-            for (row in top until bottom) {
-                // Il salto verso il buio fra due bande di qualche riga: più stabile del
-                // gradiente fra righe adiacenti, che sull'acqua increspata è tutto rumore.
-                val above = gray.luminance((row - HORIZON_SPAN) * width + column)
-                val below = gray.luminance((row + HORIZON_SPAN) * width + column)
-                val drop = above - below
-                if (drop > bestDrop) {
-                    bestDrop = drop
-                    bestRow = row
-                }
+            sampled++
+            // Le due finestre — qualche riga sopra e qualche riga sotto — scorrono insieme
+            // alla riga esaminata: una somma tenuta viva costa due letture per riga invece di
+            // dodici, e la fascia è alta centinaia di righe.
+            var above = 0f
+            var below = 0f
+            for (k in 1..HORIZON_SPAN) {
+                above += gray.luminance((top - k) * width + column)
+                below += gray.luminance((top + k) * width + column)
             }
-            if (bestDrop >= HORIZON_MIN_CONTRAST && bestRow >= 0) rows += bestRow.toFloat()
+            var row = top
+            while (row < bottom) {
+                if ((above - below) / span >= HORIZON_MIN_CONTRAST) {
+                    xs += column.toFloat()
+                    ys += row.toFloat()
+                    break
+                }
+                above += gray.luminance(row * width + column) -
+                    gray.luminance((row - HORIZON_SPAN) * width + column)
+                below += gray.luminance((row + 1 + HORIZON_SPAN) * width + column) -
+                    gray.luminance((row + 1) * width + column)
+                row++
+            }
             column += HORIZON_COLUMN_STEP
         }
+        if (xs.size < sampled * HORIZON_MIN_FOUND || xs.size < HORIZON_MIN_COLUMNS) return null
 
-        // Le colonne che non vedono l'orizzonte si scartano, non fanno fallire la misura.
-        //
-        // Chiedere che più di metà delle colonne trovassero il salto era un requisito che in
-        // una foto vera non si avvera quasi mai: basta un albero in primo piano — e qui c'è
-        // — e metà delle colonne guardano rami, non mare. Il rilevatore falliva su otto foto
-        // su nove, e senza misure la panoramica non veniva raddrizzata: il mare restava
-        // curvo, che è il difetto da cui siamo partiti.
-        //
-        // Un orizzonte vero però ha una proprietà che i rami non hanno: le colonne che lo
-        // vedono sono **d'accordo fra loro**, tutte alla stessa altezza. Quindi non si chiede
-        // che siano tante: si prende la mediana, si tengono solo quelle che le stanno
-        // vicino, e si guarda quante ne restano. Le colonne dell'albero cadono ovunque e si
-        // eliminano da sole; quelle del mare si stringono attorno alla riga giusta.
-        val sampled = width / HORIZON_COLUMN_STEP
-        if (rows.size < sampled * HORIZON_MIN_FOUND) return null
-        val roughMedian = rows.sorted()[rows.size / 2]
-        val band = height * HORIZON_MAX_SPREAD
-        val agreeing = rows.filter { abs(it - roughMedian) <= band }
-        if (agreeing.size < rows.size * HORIZON_MIN_AGREEMENT) return null
-        if (agreeing.size < sampled * HORIZON_MIN_COVERAGE) return null
+        // Il sorteggio ha un seme fisso: la stessa panoramica unita due volte deve dare lo
+        // stesso risultato, altrimenti non si può nemmeno confrontare una versione con l'altra.
+        val random = java.util.Random(HORIZON_SEED)
+        val tolerance = height * HORIZON_INLIER_FRACTION
+        val minSpread = width * HORIZON_MIN_SPREAD
+        var bestCount = 0
+        var bestSlope = 0f
+        var bestIntercept = 0f
+        repeat(HORIZON_ROUNDS) {
+            val i = random.nextInt(xs.size)
+            val j = random.nextInt(xs.size)
+            if (abs(xs[i] - xs[j]) < minSpread) return@repeat
+            val slope = (ys[j] - ys[i]) / (xs[j] - xs[i])
+            val intercept = ys[i] - slope * xs[i]
+            var count = 0
+            for (k in xs.indices) {
+                if (abs(ys[k] - (slope * xs[k] + intercept)) <= tolerance) count++
+            }
+            if (count > bestCount) {
+                bestCount = count
+                bestSlope = slope
+                bestIntercept = intercept
+            }
+        }
+        if (bestCount < xs.size * HORIZON_MIN_AGREEMENT) return null
 
-        val median = agreeing.sorted()[agreeing.size / 2]
-        val pitch = atan((median - height / 2f) / lens.focalPixels).toDegrees()
-        return if (abs(pitch) > MAX_CAMERA_PITCH_DEGREES) null else pitch
+        var slope = bestSlope
+        var intercept = bestIntercept
+        var kept = 0
+        repeat(3) {
+            var sumX = 0.0
+            var sumY = 0.0
+            var sumXX = 0.0
+            var sumXY = 0.0
+            var inside = 0
+            for (k in xs.indices) {
+                if (abs(ys[k] - (slope * xs[k] + intercept)) > tolerance) continue
+                val x = xs[k].toDouble()
+                val y = ys[k].toDouble()
+                sumX += x
+                sumY += y
+                sumXX += x * x
+                sumXY += x * y
+                inside++
+            }
+            if (inside < HORIZON_MIN_COLUMNS) return@repeat
+            val denominator = inside * sumXX - sumX * sumX
+            if (abs(denominator) < 1e-6) return@repeat
+            slope = ((inside * sumXY - sumX * sumY) / denominator).toFloat()
+            intercept = ((sumY - slope * sumX) / inside).toFloat()
+            kept = inside
+        }
+        if (kept < HORIZON_MIN_COLUMNS) return null
+
+        val centreRow = slope * (width / 2f) + intercept
+        val pitch = atan((centreRow - height / 2f) / lens.focalPixels).toDegrees()
+        val roll = atan(slope).toDegrees()
+        if (abs(pitch) > MAX_CAMERA_PITCH_DEGREES || abs(roll) > MAX_HORIZON_ROLL_DEGREES) return null
+        return HorizonLine(pitch, roll, kept.toFloat() / xs.size)
     }
 
 
@@ -4116,16 +4438,21 @@ class PanoramaStitcher(
 
         // ---- La livella: l'orizzonte cercato nella foto per sapere come era messa la camera ----
 
-        /** La fascia in cui può stare un orizzonte: non ai bordi, dove c'è altro. */
-        const val HORIZON_BAND_TOP = 0.15f
-        const val HORIZON_BAND_BOTTOM = 0.90f
+        /**
+         * Quanto largo si guarda attorno alla riga prevista dal gimbal.
+         *
+         * Dodici gradi: abbastanza per contenere lo scarto più brutto mai misurato (8,5° sulle
+         * nove foto della spiaggia), abbastanza stretto da lasciare fuori la riva. Allargarla
+         * non aiuta e riporta il difetto di prima, che era cercare l'orizzonte dappertutto.
+         */
+        const val HORIZON_WINDOW_DEGREES = 12f
 
         /** Il salto si misura fra due bande distanti così: sull'acqua increspata il gradiente
          * fra righe adiacenti è solo rumore. */
-        const val HORIZON_SPAN = 3
+        const val HORIZON_SPAN = 6
 
         /** Sotto questo salto di luminanza non è un orizzonte, è una sfumatura. */
-        const val HORIZON_MIN_CONTRAST = 18f
+        const val HORIZON_MIN_CONTRAST = 45f
 
         /** Una colonna ogni tot: l'orizzonte è largo, non serve guardarle tutte. */
         const val HORIZON_COLUMN_STEP = 4
@@ -4140,12 +4467,84 @@ class PanoramaStitcher(
          * domande: qualcosa si è trovato? quello che si è trovato si accorda? ne resta
          * abbastanza? Un albero fa fallire la seconda su quelle colonne, non su tutte.
          */
-        const val HORIZON_MIN_FOUND = 0.25f
+        const val HORIZON_MIN_FOUND = 0.30f
         const val HORIZON_MIN_AGREEMENT = 0.45f
-        const val HORIZON_MIN_COVERAGE = 0.18f
+
+        /** Sotto queste colonne concordi la retta è tirata da troppo pochi. */
+        const val HORIZON_MIN_COLUMNS = 8
+
+        /** Quanto può stare lontana dalla retta una colonna per contare ancora, in frazione dell'altezza. */
+        const val HORIZON_INLIER_FRACTION = 0.005f
+
+        /** Sorteggi della retta più votata, e il seme: la stessa unione deve dare lo stesso esito. */
+        const val HORIZON_ROUNDS = 400
+        const val HORIZON_SEED = 20260826L
+
+        /**
+         * Due colonne sorteggiate troppo vicine danno una pendenza che è solo rumore: se ne
+         * chiede almeno un quinto della larghezza di distanza.
+         */
+        const val HORIZON_MIN_SPREAD = 0.20f
+
+        /** Sotto tre foto, o sotto novanta gradi di azimut, l'asse non è misurabile: solo beccheggio. */
+        const val HORIZON_AXIS_MIN_FRAMES = 3
+        const val HORIZON_AXIS_MIN_SPREAD = 90f
+
+        /**
+         * La taratura del gimbal.
+         *
+         * La finestra è larghissima — venticinque gradi — perché è proprio l'errore grosso che
+         * si sta cercando: sulle nove foto della spiaggia il passo verticale sbagliava di dieci
+         * gradi, e con la finestra da quattro della rifinitura non si poteva nemmeno vedere. E
+         * il fattore accettabile sta fra 0,6 e 1,8: fuori di lì non è una taratura storta, è un
+         * abbinamento sbagliato, e si butta.
+         */
+        const val SCALE_SEARCH_DEGREES = 25f
+        const val SCALE_SEARCH_FRACTION = 0.35f
+        const val SCALE_MIN_FACTOR = 0.6f
+        const val SCALE_MAX_FACTOR = 1.8f
+
+        /**
+         * La griglia dei dettagli, in taratura, è fitta il triplo che in rifinitura.
+         *
+         * Misurato sulle nove foto: con la cella da 64 px la giunzione fra la fila centrale e
+         * quella alta metteva d'accordo quattro dettagli, sotto ogni soglia sensata; con quella
+         * da 24 ne mette d'accordo ventinove, e su cinque giunzioni verticali su sei il fattore
+         * misurato sta fra 1,31 e 1,37. Con la cella grossa la taratura non si sarebbe vista.
+         */
+        const val SCALE_CELL = 24
+
+        /**
+         * Quanti dettagli devono votare la stessa misura perché valga.
+         *
+         * Sei. Sulle nove foto separa netto: le giunzioni buone ne mettono d'accordo da 6 a 79,
+         * quelle su cielo e mare aperto — dove non c'è niente di fermo da abbinare — uno o due,
+         * e danno fattori senza senso (0,26 · 0,58 · 1,04). La frazione sul totale invece non
+         * separa niente, e infatti la soglia è quasi zero: quello che conta è quanti sono
+         * d'accordo, non su quanti.
+         */
+        const val SCALE_MIN_INLIERS = 6
+        const val SCALE_MIN_RATIO = 0.05f
+
+        /** Una misura sola vale per due, se a votarla sono stati in tanti. */
+        const val SCALE_STRONG_INLIERS = 20f
+
+        /** Sotto questo scarto il gimbal è tarato: non si tocca niente. */
+        const val SCALE_DEADBAND = 0.02f
+
+        /** Due foto stanno sulla stessa fila (o colonna) se sull'altro asse sono a questa distanza. */
+        const val SCALE_ALIGNED_DEGREES = 3f
+
+        /** Sotto questo passo il rapporto fra mosso e chiesto è una divisione per quasi zero. */
+        const val SCALE_MIN_STEP_DEGREES = 5f
+
+        /** Un orizzonte più pendente di così, dentro una foto, non è un orizzonte. */
+        const val MAX_HORIZON_ROLL_DEGREES = 25f
+
+        /** E un asse di rotazione più storto di così non è una base appoggiata male, è un errore. */
+        const val MAX_RIG_TILT_DEGREES = 15f
 
         /** Quanto possono essere in disaccordo le colonne, in frazione dell'altezza. */
-        const val HORIZON_MAX_SPREAD = 0.06f
 
         /** Oltre questa inclinazione non è più una camera che guarda un paesaggio. */
         const val MAX_CAMERA_PITCH_DEGREES = 40f

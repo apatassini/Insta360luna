@@ -19,6 +19,15 @@ data class StitchTuning(
      */
     val sampleFromOriginals: Boolean = true,
 
+    /**
+     * Verificare sulle foto quanto il gimbal si è mosso davvero, prima di allineare.
+     *
+     * Acceso è la regola: sulle nove foto della spiaggia il gimbal si muoveva del 31% in più
+     * di quanto gli si chiedeva, e senza questa verifica non c'era allineamento che potesse
+     * rimediare. Si spegne solo per confrontare le due strade sulla stessa terna di foto.
+     */
+    val calibrateGimbal: Boolean = true,
+
     /** La soglia di qualità dei punti di controllo: sotto, un punto è un'opinione. */
     val keepNcc: Float = 0.80f,
 

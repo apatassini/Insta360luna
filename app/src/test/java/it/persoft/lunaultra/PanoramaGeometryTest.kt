@@ -9,6 +9,7 @@ import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.stitch.angularDistance
 import it.persoft.lunaultra.stitch.exposureGain
 import it.persoft.lunaultra.stitch.featherWeight
+import it.persoft.lunaultra.stitch.frameToWorld
 import it.persoft.lunaultra.stitch.pixelsToDegrees
 import it.persoft.lunaultra.stitch.projectToFrame
 import it.persoft.lunaultra.stitch.sphericalCoverage
@@ -18,8 +19,11 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.asin
 import kotlin.math.atan
+import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.sin
 
 /**
  * La geometria dell'unione, che è la parte che deve essere giusta.
@@ -504,6 +508,61 @@ class PanoramaGeometryTest {
                 assertEquals(warp.shiftX(x, y), flat[node * 2], 1e-3f)
                 assertEquals(warp.shiftY(x, y), flat[node * 2 + 1], 1e-3f)
             }
+        }
+    }
+
+    /**
+     * Il mare a onde, ridotto a un numero.
+     *
+     * Se la camera guarda in su di `p` gradi mentre l'inclinazione dichiarata è zero,
+     * l'orizzonte — che è una retta nella foto — non finisce su una latitudine sola: finisce
+     * su `-asin(cos Δ · sin p)`, dove Δ è la distanza dal centro dell'inquadratura. Al centro
+     * vale `p`, ai bordi meno, e la differenza è la gobba che si vedeva su ogni fotogramma.
+     *
+     * Con 8,5° di scarto — quello vero, misurato sulle nove foto della spiaggia — la gobba
+     * dentro un fotogramma solo vale due gradi abbondanti: a 72 pixel per grado sono
+     * centocinquanta pixel di mare che sale e scende, una volta per foto.
+     */
+    @Test
+    fun `un beccheggio non dichiarato incurva l'orizzonte dentro ogni fotogramma`() {
+        val pitch = 8.5f
+        val placement = FramePlacement(panDegrees = 0f, tiltDegrees = 0f)
+        // La riga in cui cade l'orizzonte quando la camera guarda in su di `pitch`.
+        val row = lens.imageHeight / 2f + lens.focalPixels * kotlin.math.tan(Math.toRadians(pitch.toDouble())).toFloat()
+
+        var lowest = Float.MAX_VALUE
+        var highest = -Float.MAX_VALUE
+        for (column in 0 until lens.imageWidth step 16) {
+            val world = frameToWorld(column.toFloat(), row, placement, lens)
+            lowest = minOf(lowest, world[1])
+            highest = maxOf(highest, world[1])
+            // La formula chiusa: la latitudine dipende dalla distanza dal centro.
+            val delta = Math.toRadians(world[0].toDouble())
+            val expected = -Math.toDegrees(asin(cos(delta) * sin(Math.toRadians(pitch.toDouble()))))
+            // La formula usa la longitudine finale invece di quella prima della rotazione:
+            // sono la stessa cosa al centro e divergono di tre centesimi di grado al bordo.
+            assertEquals(expected.toFloat(), world[1], 0.05f)
+        }
+        // Al centro l'orizzonte sta a -8,5°, ai bordi risale: la gobba è più di due gradi.
+        assertEquals(-pitch, lowest, 0.02f)
+        // Misurata: 2,05°. A 72 pixel per grado sono centoquarantotto pixel.
+        assertTrue("la gobba dentro un fotogramma vale " + (highest - lowest), highest - lowest > 1.9f)
+    }
+
+    /**
+     * E la cura: dichiarare l'inclinazione vera. L'orizzonte torna piatto a zero, dappertutto.
+     *
+     * Non è una correzione approssimata che lascia un residuo: è l'annullamento esatto della
+     * rotazione sbagliata, e quello che resta è sotto il centesimo di grado.
+     */
+    @Test
+    fun `dichiarare il beccheggio vero rimette l'orizzonte piatto`() {
+        val pitch = 8.5f
+        val placement = FramePlacement(panDegrees = 0f, tiltDegrees = pitch)
+        val row = lens.imageHeight / 2f + lens.focalPixels * kotlin.math.tan(Math.toRadians(pitch.toDouble())).toFloat()
+        for (column in 0 until lens.imageWidth step 16) {
+            val world = frameToWorld(column.toFloat(), row, placement, lens)
+            assertEquals(0f, world[1], 0.01f)
         }
     }
 }

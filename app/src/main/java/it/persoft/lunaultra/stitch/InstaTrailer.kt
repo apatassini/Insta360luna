@@ -50,6 +50,31 @@ object InstaTrailer {
 
     private val MAGIC = "8db42d694ccc418790edff439fe026bf".toByteArray(Charsets.US_ASCII)
 
+    /**
+     * La coda è una catena di blocchi, letta all'indietro.
+     *
+     * A settantotto byte dalla fine c'è il primo piede: due byte di identificativo e quattro di
+     * dimensione. I dati di quel blocco stanno `dimensione` byte più indietro, e sei byte prima
+     * ancora comincia il piede del blocco precedente. Si va così fino a esaurire la catena.
+     *
+     * Su una foto vera della Luna i blocchi sono cinque:
+     *
+     *     0x0101    2839 byte   metadati (comincia col numero di serie della camera)
+     *     0x0200 1179688 byte   anteprima compressa
+     *     0x0300    8000 byte   la traccia inerziale: 400 campioni da venti byte
+     *     0x0900     240 byte   esposizione: cinque voci da 48, con marca in millisecondi
+     *     0x2a01      63 byte   parametri di scatto
+     *
+     * Cercare la traccia a tentoni funzionava, ma leggere la struttura è meglio per due ragioni:
+     * si va dritti al blocco giusto invece di frugare, e soprattutto non si può sbagliare blocco
+     * — dentro l'anteprima compressa, prima o poi, otto byte che sembrano una marca temporale
+     * che avanza di un millesimo si trovano.
+     */
+    private const val CHAIN_START = 78
+    private const val ID_IMU = 0x0300
+    private const val ID_FOOTER = 6
+    private const val MAX_BLOCKS = 16
+
     /** Coda: [dati][dimensione totale u32][versione u32][firma 32 byte]. */
     private const val FOOTER = 40
     private const val SAMPLE = 20
@@ -64,22 +89,56 @@ object InstaTrailer {
     fun readAttitude(file: File): ShotAttitude? = runCatching {
         RandomAccessFile(file, "r").use { raf ->
             val length = raf.length()
-            if (length < FOOTER + SAMPLE) return null
-            val footer = ByteArray(FOOTER)
-            raf.seek(length - FOOTER)
-            raf.readFully(footer)
-            if (!footer.copyOfRange(FOOTER - MAGIC.size, FOOTER).contentEquals(MAGIC)) return null
-            val total = u32(footer, 0)
-            if (total <= FOOTER || total > length) return null
-            val start = length - total
-            val want = minOf(total.toLong() - FOOTER, SEARCH_BYTES.toLong()).toInt()
-            if (want < SAMPLE * MIN_SAMPLES) return null
-            val trailer = ByteArray(want)
-            raf.seek(start)
-            raf.readFully(trailer)
-            attitudeOf(trailer)
+            if (length < CHAIN_START + SAMPLE) return null
+            val magic = ByteArray(MAGIC.size)
+            raf.seek(length - MAGIC.size)
+            raf.readFully(magic)
+            if (!magic.contentEquals(MAGIC)) return null
+            imuBlock(raf, length)?.let { return@use attitudeOf(it) }
+            // Ripiego: se la catena non si legge — formato diverso, file troncato — si torna a
+            // riconoscere la traccia da come si comporta.
+            fallbackScan(raf, length)?.let { attitudeOf(it) }
         }
     }.getOrNull()
+
+    /** Percorre la catena all'indietro e restituisce i dati del blocco inerziale. */
+    private fun imuBlock(raf: RandomAccessFile, length: Long): ByteArray? {
+        var footerAt = length - CHAIN_START
+        val head = ByteArray(ID_FOOTER)
+        repeat(MAX_BLOCKS) {
+            if (footerAt < ID_FOOTER) return null
+            raf.seek(footerAt)
+            raf.readFully(head)
+            val id = (head[0].toInt() and 0xFF) or ((head[1].toInt() and 0xFF) shl 8)
+            val size = u32(head, 2).toLong() and 0xFFFFFFFFL
+            if (size <= 0L || size > footerAt) return null
+            val start = footerAt - size
+            if (id == ID_IMU) {
+                if (size < SAMPLE * MIN_SAMPLES) return null
+                val want = minOf(size, SEARCH_BYTES.toLong()).toInt()
+                val data = ByteArray(want)
+                raf.seek(start)
+                raf.readFully(data)
+                return data
+            }
+            footerAt = start - ID_FOOTER
+        }
+        return null
+    }
+
+    private fun fallbackScan(raf: RandomAccessFile, length: Long): ByteArray? {
+        val footer = ByteArray(FOOTER)
+        raf.seek(length - FOOTER)
+        raf.readFully(footer)
+        val total = u32(footer, 0)
+        if (total <= FOOTER || total > length) return null
+        val want = minOf(total.toLong() - FOOTER, SEARCH_BYTES.toLong()).toInt()
+        if (want < SAMPLE * MIN_SAMPLES) return null
+        val trailer = ByteArray(want)
+        raf.seek(length - total)
+        raf.readFully(trailer)
+        return trailer
+    }
 
     /** Separata dal file perché si possa provare su una coda costruita a mano. */
     internal fun attitudeOf(trailer: ByteArray): ShotAttitude? {

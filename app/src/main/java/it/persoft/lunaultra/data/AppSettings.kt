@@ -162,6 +162,9 @@ data class StitchSettings(
      */
     val projectionCode: Int = 1,
 
+    /** Fin dove sale e scende la tela, in gradi dall'orizzonte. Zero: fin dove si è visto. */
+    val verticalLimitDegrees: Float = 0f,
+
     /**
      * Livellare l'orizzonte cercandolo nelle foto, per le unioni senza angoli veri.
      * Senza, si dà per scontato che la camera fosse in bolla — e se non lo era, il mare

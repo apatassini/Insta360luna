@@ -1831,6 +1831,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 2 -> StitchProjection.MERCATOR
                 else -> StitchProjection.CYLINDRICAL
             },
+            verticalLimitDegrees = stitch.verticalLimitDegrees,
             levelHorizon = stitch.levelHorizon,
             cameraPitchDegrees = stitch.cameraPitchDegrees,
             gpuRecognise = stitch.gpuRecognise,

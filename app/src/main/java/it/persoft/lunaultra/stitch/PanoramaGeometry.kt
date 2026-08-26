@@ -218,6 +218,17 @@ class PanoramaCanvas(
             requestedPixelsPerDegree: Float,
             maximumLongSide: Int,
             projection: StitchProjection = StitchProjection.EQUIRECTANGULAR,
+            /**
+             * Fin dove salire e scendere, in gradi dall'orizzonte. Zero: fin dove arrivano le foto.
+             *
+             * È il ritaglio che in Autopano si fa trascinando il bordo, ed è quasi sempre la cosa
+             * giusta da fare. Vicino allo zenit ogni proiezione piatta deforma — non è un difetto
+             * dello stitcher, è che una sfera non sta su un foglio — e gli ultimi dieci gradi di
+             * cielo costano tantissimi pixel per mostrare rami stirati. Tagliandoli si guadagna
+             * due volte: sparisce la deformazione peggiore, e la larghezza cresce, perché la
+             * densità della tela la decide l'area totale.
+             */
+            verticalLimitDegrees: Float = 0f,
         ): PanoramaCanvas {
             require(placements.isNotEmpty()) { "Nessun fotogramma da unire" }
             val halfH = lens.horizontalFovDegrees / 2f
@@ -232,7 +243,11 @@ class PanoramaCanvas(
             val spanH = (maxPan - minPan).coerceIn(1f, FULL_TURN_DEGREES)
             // Oltre il limite della proiezione non c'è niente da disegnare: una latitudine di
             // 153° non esiste, e per la cilindrica anche molto prima la scala esplode.
-            val limit = projection.limitDegrees
+            val limit = if (verticalLimitDegrees > 0f) {
+                min(projection.limitDegrees, verticalLimitDegrees)
+            } else {
+                projection.limitDegrees
+            }
             val topTilt = min(maxTilt, limit)
             val bottomTilt = max(minTilt, -limit)
             val spanV = (topTilt - bottomTilt).coerceAtLeast(1f)

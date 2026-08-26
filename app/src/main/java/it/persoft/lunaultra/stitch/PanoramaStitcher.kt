@@ -514,6 +514,7 @@ class PanoramaStitcher(
                 requestedPixelsPerDegree = chooseDensity(placements, lens, heapMb, requestedDensity),
                 maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
                 projection = projectionFor(placements, lens, fillNadir),
+                verticalLimitDegrees = tuning.verticalLimitDegrees,
             )
 
             onProgress(0.10f, "Allineo i fotogrammi")
@@ -544,18 +545,23 @@ class PanoramaStitcher(
                 requestedPixelsPerDegree = chooseDensity(placements, lens, heapMb, requestedDensity),
                 maximumLongSide = CANVAS_HARD_CAP_LONG_SIDE,
                 projection = projection,
+                verticalLimitDegrees = tuning.verticalLimitDegrees,
             )
-            if (projection != tuning.projection && !fillNadir) {
+            if (!fillNadir) {
                 val reach = verticalReach(placements, lens)
-                levelNotes += ("Proiezione: %s invece di %s — la panoramica arriva a %.0f° dall'orizzonte, " +
-                    "dove la %s allargherebbe i pixel di %.1f volte in verticale: pixel che nelle " +
-                    "foto non ci sono e che la tela dovrebbe inventarsi.").format(
-                    projection.label,
-                    tuning.projection.label,
-                    reach,
-                    tuning.projection.label.lowercase(),
-                    verticalStretch(tuning.projection, reach),
-                )
+                if (projection != tuning.projection) {
+                    levelNotes += ("Proiezione: %s invece di %s — la panoramica arriva a %.0f° " +
+                        "dall'orizzonte, dove la %s allungherebbe i pixel di %.1f volte in " +
+                        "verticale: pixel che nelle foto non ci sono e che la tela dovrebbe " +
+                        "inventarsi.").format(
+                        projection.label,
+                        tuning.projection.label,
+                        reach,
+                        tuning.projection.label.lowercase(),
+                        verticalStretch(tuning.projection, reach),
+                    )
+                }
+                levelNotes += deformationNote(projection, reach)
             }
 
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
@@ -698,7 +704,13 @@ class PanoramaStitcher(
         val half = lens.verticalFovDegrees / 2f
         val top = placements.maxOf { it.effectiveTilt } + half
         val bottom = placements.minOf { it.effectiveTilt } - half
-        return max(abs(top), abs(bottom))
+        val seen = max(abs(top), abs(bottom))
+        // Se la tela si ferma prima, la proiezione va giudicata dove si ferma: è tutto il senso
+        // del limite verticale. Chiedere la cilindrica su una panoramica che arriva allo zenit
+        // non ha senso; chiederla su quella stessa panoramica tagliata a sessanta gradi sì, ed è
+        // esattamente quello che si fa in Autopano scegliendo la cilindrica e ritagliando.
+        val limit = tuning.verticalLimitDegrees
+        return if (limit > 0f) min(seen, limit) else seen
     }
 
     /**
@@ -732,6 +744,53 @@ class PanoramaStitcher(
             StitchProjection.EQUIRECTANGULAR -> 1f
             StitchProjection.CYLINDRICAL -> secant * secant
             StitchProjection.MERCATOR -> secant
+        }
+    }
+
+    /**
+     * Quanto deforma il cielo alto, e che cosa costerebbe tagliarlo.
+     *
+     * È la riga che mancava, ed è quella che risponde a «i rami in alto sono tiratissimi». Non è
+     * un difetto della cucitura: una sfera non sta su un foglio, e vicino allo zenit qualcosa
+     * deve cedere per forza. Cambia solo **che cosa** cede. L'equirettangolare tiene le altezze e
+     * allarga le larghezze; la cilindrica fa l'opposto e in più diventa altissima; la Mercatore è
+     * l'unica che non deforma le **forme** — allunga tutto uguale — al prezzo di un'immagine
+     * più alta.
+     *
+     * E siccome la densità della tela la decide l'area totale, tagliare il cielo più alto
+     * restituisce larghezza: sono gli stessi pixel spesi meglio.
+     */
+    private fun deformationNote(projection: StitchProjection, reach: Float): String {
+        val secant = 1f / cos(min(reach, 88f).toRadians())
+        val cosa = when (projection) {
+            StitchProjection.EQUIRECTANGULAR ->
+                "allarga i pixel di %.1f volte in orizzontale".format(secant)
+            StitchProjection.CYLINDRICAL ->
+                "li allunga di %.1f volte in verticale".format(secant * secant)
+            StitchProjection.MERCATOR ->
+                "li ingrandisce di %.1f volte, ma uguale nei due sensi: le forme restano".format(secant)
+        }
+        return buildString {
+            append("Deformazione in cima: a %.0f° dall'orizzonte la %s %s. ".format(
+                reach, projection.label.lowercase(), cosa,
+            ))
+            if (tuning.verticalLimitDegrees > 0f) {
+                append("La tela è già limitata a %.0f°.".format(tuning.verticalLimitDegrees))
+            } else {
+                val suggested = SUGGESTED_VERTICAL_LIMIT
+                if (reach > suggested + 3f) {
+                    val ridotta = 1f / cos(suggested.toRadians())
+                    append(
+                        ("Limitando la tela a %.0f° la deformazione scenderebbe a %.1f volte e la " +
+                            "panoramica verrebbe più larga di circa il %.0f%%, perché gli stessi " +
+                            "pixel coprirebbero meno cielo.").format(
+                            suggested,
+                            if (projection == StitchProjection.CYLINDRICAL) ridotta * ridotta else ridotta,
+                            100f * (sqrt(reach / suggested) - 1f),
+                        ),
+                    )
+                }
+            }
         }
     }
 
@@ -4985,6 +5044,15 @@ class PanoramaStitcher(
          * file arrivano a sessantacinque gradi, dove la cilindrica stira 5,6×.
          */
         const val MAX_VERTICAL_STRETCH = 2.5f
+
+        /**
+         * Il taglio che si consiglia quando la panoramica punta troppo in alto.
+         *
+         * Sessantacinque gradi: oltre di lì ogni proiezione piatta comincia a costare più di
+         * quanto renda, e sono i gradi che in Autopano si buttano via trascinando il bordo. Non
+         * viene applicato da solo — buttare pixel senza chiedere non si fa — ma viene detto.
+         */
+        const val SUGGESTED_VERTICAL_LIMIT = 65f
 
         /** La mappa dei possessori vive a un pixel ogni [OWNER_SCALE] per dimensione. */
         const val OWNER_SCALE = 2

@@ -95,6 +95,21 @@ data class StitchTuning(
     val projection: StitchProjection = StitchProjection.CYLINDRICAL,
 
     /**
+     * Fin dove far salire e scendere la tela, in gradi dall'orizzonte. Zero: fin dove si è visto.
+     *
+     * Serve alle panoramiche che puntano molto in alto, ed è il motivo per cui in Autopano si
+     * sceglie quasi sempre la cilindrica **e si ritaglia**. A ottantaquattro gradi dall'orizzonte
+     * l'equirettangolare allarga i pixel di dieci volte in orizzontale — sono i rami stirati in
+     * cima — e la cilindrica li allunga di novanta in verticale. Non è un difetto della
+     * proiezione: è che una sfera non sta su un foglio, e vicino al polo qualcosa deve cedere.
+     *
+     * Tagliare gli ultimi gradi di cielo guadagna due volte: sparisce la deformazione peggiore, e
+     * la panoramica viene **più larga**, perché la densità della tela la decide l'area totale e
+     * un'area più bassa lascia più pixel per grado.
+     */
+    val verticalLimitDegrees: Float = 0f,
+
+    /**
      * Cercare l'orizzonte nelle foto per sapere come era inclinata la camera.
      *
      * Serve solo quando gli angoli veri non ci sono — le foto scelte a mano — perché lì si

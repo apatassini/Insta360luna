@@ -301,6 +301,31 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "360° sa leggere: le panoramiche sferiche la usano sempre, qualunque " +
                         "cosa sia scelta qui.",
                 )
+                Text("Fin dove sale e scende la tela")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf(0f to "Tutto", 75f to "75°", 65f to "65°", 55f to "55°").forEach { (limit, label) ->
+                        FilterChip(
+                            selected = kotlin.math.abs(settings.stitch.verticalLimitDegrees - limit) < 0.5f,
+                            onClick = { viewModel.updateStitch { it.copy(verticalLimitDegrees = limit) } },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "È il ritaglio che negli stitcher da tavolo si fa trascinando il bordo, ed " +
+                        "è il motivo per cui lì si sceglie la cilindrica e si taglia. Vicino " +
+                        "allo zenit ogni proiezione piatta deforma — una sfera non sta su un " +
+                        "foglio — e gli ultimi gradi di cielo costano moltissimi pixel per " +
+                        "mostrare rami stirati. Tagliandoli si guadagna due volte: sparisce la " +
+                        "deformazione peggiore, e la panoramica viene più larga, perché la " +
+                        "densità della tela la decide l'area totale. Con un limite la " +
+                        "proiezione scelta viene rispettata invece di essere sostituita.",
+                )
                 ToggleRow(
                     title = "Livella l'orizzonte",
                     subtitle = "Spento, la tela resta centrata sul centro esatto delle foto. " +

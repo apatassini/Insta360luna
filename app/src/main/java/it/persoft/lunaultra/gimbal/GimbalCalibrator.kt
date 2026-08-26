@@ -1083,6 +1083,54 @@ class GimbalCalibrator(
 
     /** Trova i due estremi: aggancio rapido, arretramento e riaggancio lento di precisione. */
     /**
+     * Quanto è lunga davvero la corsa orizzontale, misurata chiudendo il giro.
+     *
+     * Il conto della calibrazione è `gradi ÷ impulsi`, e gli impulsi si contano: sono veri. È il
+     * numeratore che nessuno ha mai misurato — la corsa in gradi è un numero di catalogo scritto
+     * a mano nel sorgente. Il gimbal, arrivato al fine corsa, dice «sono arrivato», non «ho fatto
+     * trecentosessanta».
+     *
+     * Ma l'asse orizzontale gira quasi tutto intero, e questo lo si può sfruttare: se la corsa
+     * vale T gradi, la vista al fine corsa d'arrivo è girata di **360 − T** rispetto a quella di
+     * partenza. E finché T supera i 278° — cioè un giro meno il campo visivo — le due viste si
+     * sovrappongono ancora, quindi quel resto si può misurare abbinando i dettagli.
+     *
+     * Il bello è che si misura una cosa **piccola**. Se la corsa fosse davvero un giro intero, il
+     * resto varrebbe pochi gradi, e anche sbagliando del dieci per cento il campo visivo
+     * dell'anteprima si sbaglierebbe di un decimo di quei pochi gradi — non di un decimo di
+     * trecentosessanta. La stessa incertezza che sul numeratore intero sarebbe rovinosa, qui è
+     * trascurabile. E fra le due ipotesi in ballo non c'è modo di confondersi: 292° darebbe un
+     * resto di 68 gradi, 357° un resto di 3.
+     */
+    private fun logPanTravelByLoopClosure(atMinimum: ByteArray?, atMaximum: ByteArray?) {
+        val fov = LunaOptics.fieldOfView(1, PhotoFrameAspect.FOUR_THREE)
+        val check = WaypointImageVerifier.verify(atMinimum, atMaximum)
+        if (check == null || check.inlierMatches < LOOP_MIN_INLIERS) {
+            log.info(
+                "CALIBRAZIONE · CHIUSURA DEL GIRO",
+                "Le viste ai due fine corsa non si abbinano" +
+                    (check?.let { " (%d dettagli in comune)".format(it.inlierMatches) } ?: "") +
+                    ": o l'asse gira molto meno di un giro, o davanti all'obiettivo non c'è " +
+                    "niente di riconoscibile.",
+            )
+            return
+        }
+        val perPixel = degreesPerPixel(atMinimum, fov, panAxis = true)
+        if (perPixel <= 0f) return
+        val residual = abs(check.shiftX) * perPixel
+        val travel = FULL_TURN_DEGREES - residual
+        log.info(
+            "CALIBRAZIONE · CHIUSURA DEL GIRO",
+            "Le due viste sono girate di %.1f° l'una rispetto all'altra (%.0f px · %d dettagli).\n"
+                .format(residual, abs(check.shiftX), check.inlierMatches) +
+                "Quindi la corsa orizzontale vera è 360 − %.1f = %.0f°, contro i %.0f° che l'app dà per buoni.\n"
+                    .format(residual, travel, OFFICIAL_PAN_MAX_DEG - OFFICIAL_PAN_MIN_DEG) +
+                "Il righello qui è il campo visivo dell'anteprima: sbagliarlo del 10%% sposta " +
+                "questa misura di %.1f°, non di trentasei.".format(residual * 0.1f),
+        )
+    }
+
+    /**
      * Fotografa i nove campi della notifica 8302 nel momento in cui sappiamo dove siamo.
      *
      * Di questa notifica conosciamo due campi: i flag di finecorsa. Gli altri sette nessuno li
@@ -1159,6 +1207,12 @@ class GimbalCalibrator(
         )
         anchorFrame(axis, minimumDeg)
         val atMinimum = limitMonitor.lastPtzFields
+        // Una miniatura pulita al primo fine corsa: serve alla chiusura del giro, sotto.
+        val viewAtMinimum = if (axis == GimbalCalibrationSample.AXIS_PAN) {
+            preview.captureThumbnailJpeg()
+        } else {
+            null
+        }
         log.info(
             "CALIBRAZIONE · FINE CORSA ${directionLabel(axis, -1f).uppercase()}",
             "Rilevato dopo ${negative.totalPulses} impulsi · coordinate fissate a %.1f°".format(minimumDeg),
@@ -1178,6 +1232,9 @@ class GimbalCalibrator(
         val atMaximum = limitMonitor.lastPtzFields
         logPtzSnapshot("fine corsa ${directionLabel(axis, 1f)}", atMaximum)
         logPtzTravel(axis, atMinimum, atMaximum)
+        if (axis == GimbalCalibrationSample.AXIS_PAN) {
+            logPanTravelByLoopClosure(viewAtMinimum, preview.captureThumbnailJpeg())
+        }
         val limits = GimbalAxisLimits(
             minimumDeg = minimumDeg,
             maximumDeg = maximumDeg,
@@ -1772,7 +1829,17 @@ class GimbalCalibrator(
         const val ENDSTOP_STILL_RADIUS_PX = 2.4f
         const val BETWEEN_ENDSTOP_PULSES_MS = 120L
         const val ENDSTOP_SETTLE_MS = 180L
+        /** Quanti dettagli in comune servono perché la chiusura del giro sia una misura. */
+        const val LOOP_MIN_INLIERS = 12
+
+        const val FULL_TURN_DEGREES = 360f
+
         // Intervalli controllabili ufficiali (non i limiti meccanici più ampi).
+        //
+        // Questi due numeri non sono misure: sono di catalogo, e sono il numeratore del conto
+        // «gradi ÷ impulsi» da cui nasce tutta la scala del gimbal. Gli impulsi si contano e
+        // sono veri; questi non li ha mai controllati nessuno, e sull'esemplare in prova
+        // l'orizzontale sbagliava di una sessantina di gradi.
         const val OFFICIAL_PAN_MIN_DEG = -57f
         const val OFFICIAL_PAN_MAX_DEG = 235f
         const val OFFICIAL_TILT_MIN_DEG = -57f

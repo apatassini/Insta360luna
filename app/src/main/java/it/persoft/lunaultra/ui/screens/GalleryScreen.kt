@@ -88,6 +88,7 @@ private enum class GalleryFilter(val label: String) {
 @Composable
 fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
     val stitch by viewModel.stitchState.collectAsState()
+    val vitals by viewModel.stitchVitals.collectAsState()
     val gallery by viewModel.gallery.collectAsState()
     val viewer by viewModel.viewer.collectAsState()
     val favorites by viewModel.favorites.collectAsState()
@@ -204,6 +205,9 @@ fun GalleryScreen(viewModel: MainViewModel, onClose: () -> Unit) {
                 state = stitch,
                 onDismiss = viewModel::clearStitchState,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                // Anche qui i misuratori: la carta era la stessa, ma il polso della macchina
+                // non glielo passava nessuno, e chi aspetta dalla galleria aspetta uguale.
+                vitals = vitals,
             )
 
 

@@ -228,6 +228,39 @@ come prima, senza dire niente a nessuno.
 
 Il log dice quanti ne ha aperti in anticipo: `apertura originali 1 s (8 aperti in anticipo)`.
 
+### 5.5 La resa dei core, che è la domanda giusta prima di parallelizzare
+
+Parallelizzare «ancora un po'» non si decide dai tempi: una fase che dura dieci secondi può
+tenere otto core occupati — e allora non c'è niente da spartire — oppure uno solo, e allora ce
+ne sono sette fermi. I due casi durano uguale e chiedono cose opposte.
+
+Il numero che li separa c'è, e costa niente: il **tempo di calcolo di tutti i fili** diviso il
+tempo passato. `Process.getElapsedCpuTime()` lo dà per l'intero processo; la differenza fra
+inizio e fine di una fase, divisa per la sua durata, è quanti core quella fase ha tenuto
+occupati in media. Il verdetto ora lo scrive:
+
+```
+Resa dei core (su 8): allineamento 5,2 · cucitura 3,1
+```
+
+Da lì la decisione è meccanica. Vicino al numero dei core: la fase usa già tutta la macchina, e
+l'unico modo di accorciarla è **fare meno lavoro**, non spartirlo meglio — è la strada che ha
+portato i punti di controllo da 27,4 s a 9,5. Molto sotto: c'è qualcuno che aspetta, e va
+trovato chi.
+
+### 5.6 Le due cose che aspettavano
+
+**La scheda e i core, nella pittura.** La scheda disegnava una fascia mentre gli otto core
+stavano a guardare; poi i core la riportavano sulla tela mentre la scheda stava a guardare. Nel
+log si leggeva in chiaro — «disegno 2,2 s · riporto 1,8 s» — quattro secondi per due lavori che
+non si toccano. Con due vettori di fascia invece di uno, il disegno della prossima si sovrappone
+al riporto della precedente e il tempo diventa il **maggiore** dei due invece della somma.
+Costa otto megabyte di heap e una regola: prima di disegnare sopra un vettore si aspetta che il
+suo riporto sia finito, così sulla tela non scrive mai più di uno alla volta.
+
+**Il decoder e tutto il resto**, già risolto in §5.3: il prossimo originale si apre mentre si
+dipinge questo.
+
 ### 5.4 I prossimi bersagli, in ordine
 
 1. **punti di controllo** — 9,5 s, ancora il pezzo più grosso dell'allineamento

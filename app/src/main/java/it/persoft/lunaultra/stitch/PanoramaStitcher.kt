@@ -137,6 +137,22 @@ class PanoramaStitcher(
      */
     private var decodeMillis = 0L
 
+    /**
+     * Il tempo di calcolo consumato da tutti i fili dell'app, in millesimi.
+     *
+     * Non è il tempo passato: è la somma di quanto ha lavorato ogni core. Diviso il tempo
+     * passato dà quanti core erano occupati in media — l'unico modo di sapere se una fase ha
+     * ancora margine da spartire o se sta già usando tutta la macchina.
+     */
+    private fun coreMillis(): Long = runCatching { android.os.Process.getElapsedCpuTime() }.getOrDefault(0L)
+
+    /** Quanti core ha tenuto occupati una fase, in media. Zero quando non si è potuto misurare. */
+    private fun coresUsed(cpuAtStart: Long, wallAtStart: Long): Float {
+        val wall = System.currentTimeMillis() - wallAtStart
+        val cpu = coreMillis() - cpuAtStart
+        return if (wall <= 0L || cpu <= 0L) 0f else cpu.toFloat() / wall
+    }
+
     /** Quanti originali sono stati aperti in anticipo, mentre si dipingeva quello prima. */
     private var prefetchedFrames = 0
 
@@ -587,6 +603,7 @@ class PanoramaStitcher(
 
             onProgress(0.10f, "Allineo i fotogrammi")
             val refineStartedAt = System.currentTimeMillis()
+            val refineCpuAt = coreMillis()
             val refinement = refine(
                 frames = frames,
                 initial = placements,
@@ -596,6 +613,7 @@ class PanoramaStitcher(
                 attitudeKnown = haveAttitude,
             )
             val refineSeconds = (System.currentTimeMillis() - refineStartedAt) / 1000f
+            val refineCores = coresUsed(refineCpuAt, refineStartedAt)
             placements = refinement.placements
 
             // La fase intermedia. Va qui e in nessun altro punto: i fotogrammi sono allineati —
@@ -680,11 +698,13 @@ class PanoramaStitcher(
             onProgress(0.35f, "Unisco e sfumo le giunzioni")
             val composeDetail = mutableListOf<String>()
             val composeStartedAt = System.currentTimeMillis()
+            val composeCpuAt = coreMillis()
             var bitmap = compose(
                 frames, placements, lens, canvas, refinement.aligned,
                 fullResSampling, refinement.photometric, refinement.warps, composeDetail,
             )
             val composeSeconds = (System.currentTimeMillis() - composeStartedAt) / 1000f
+            val composeCores = coresUsed(composeCpuAt, composeStartedAt)
             // Di quale misura ci si puo` fidare abbastanza da riscriverci sopra il profilo.
             //
             // Una panoramica di quattro scatti ha misurato una sola giunzione e ha riscritto un
@@ -781,7 +801,18 @@ class PanoramaStitcher(
             // pittura. Separarlo dice l'unica cosa che serve per la mossa successiva — se il
             // collo di bottiglia è ancora il disegno o si è spostato sul riporto.
             if (blendMillis > 0L) {
-                notes += ("Dentro la fusione: griglia ridotta %.1f s · piramidi %.1f s · " +
+                // Quanti core hanno davvero lavorato, in media, mentre la fase girava.
+            //
+            // È il numero che dice se conviene parallelizzare ancora, e non si può dedurre dai
+            // tempi: una fase che dura dieci secondi può tenere otto core occupati — e allora
+            // non c'è niente da spartire — oppure uno solo, e allora ce ne sono sette fermi.
+            // Il tempo di calcolo di tutti i fili diviso il tempo passato è esattamente questo.
+            notes += "Resa dei core (su %d): allineamento %.1f · cucitura %.1f".format(
+                Runtime.getRuntime().availableProcessors(),
+                refineCores,
+                composeCores,
+            )
+            notes += ("Dentro la fusione: griglia ridotta %.1f s · piramidi %.1f s · " +
                     "riporto a piena risoluzione %.1f s").format(
                     blendGridMillis / 1000f,
                     blendPyramidMillis / 1000f,
@@ -3731,31 +3762,54 @@ class PanoramaStitcher(
         val tileWidth = min(bw, gpu.renderer.maxTextureSize)
         val bandHeight = (GPU_BAND_PIXELS / tileWidth)
             .coerceIn(1, min(bh, gpu.renderer.maxTextureSize))
-        val band = IntArray(bw * bandHeight)
-        var by = 0
-        while (by < bh) {
-            currentCoroutineContext().ensureActive()
-            val rows = min(bandHeight, bh - by)
-            val startedAt = System.currentTimeMillis()
-            val drawn = withContext(gpu.dispatcher) {
-                var good = true
-                var bx = 0
-                while (bx < bw && good) {
-                    val width = min(tileWidth, bw - bx)
-                    good = gpu.renderer.renderTile(
-                        uniforms, c0 + bx, row0 + by, width, rows,
-                        weightOnly = weightOnly, into = band, intoOffset = bx, intoStride = bw,
-                    )
-                    bx += width
+
+        // Due fasce, non una: mentre la scheda disegna la prossima, i core riportano quella
+        // di prima.
+        //
+        // Erano due lavori che si aspettavano a vicenda. La scheda disegnava — e gli otto core
+        // stavano a guardare; poi i core copiavano — e la scheda stava a guardare. Nel log si
+        // leggeva chiaro: «disegno 2,2 s · riporto 1,8 s», quattro secondi per fare due cose
+        // che non si toccano. Sovrapposte, il tempo è il maggiore dei due invece della somma.
+        //
+        // Il prezzo è un secondo vettore di fascia — otto megabyte di heap, riusati per tutte
+        // le fasce del fotogramma — e la regola che tiene tutto in piedi: prima di disegnare
+        // sopra un vettore si aspetta che il suo riporto sia finito. Uno solo per volta, mai
+        // due riporti insieme sulla stessa tela.
+        val buffers = arrayOf(IntArray(bw * bandHeight), IntArray(bw * bandHeight))
+        var slot = 0
+        return coroutineScope {
+            var carried: kotlinx.coroutines.Deferred<Boolean>? = null
+            var by = 0
+            while (by < bh) {
+                currentCoroutineContext().ensureActive()
+                val rows = min(bandHeight, bh - by)
+                val band = buffers[slot]
+                val startedAt = System.currentTimeMillis()
+                val drawn = withContext(gpu.dispatcher) {
+                    var good = true
+                    var bx = 0
+                    while (bx < bw && good) {
+                        val width = min(tileWidth, bw - bx)
+                        good = gpu.renderer.renderTile(
+                            uniforms, c0 + bx, row0 + by, width, rows,
+                            weightOnly = weightOnly, into = band, intoOffset = bx, intoStride = bw,
+                        )
+                        bx += width
+                    }
+                    good
                 }
-                good
+                gpuDrawMillis += System.currentTimeMillis() - startedAt
+                // Il riporto di prima deve aver finito: con l'altro vettore, sì, ma anche con
+                // la tela, che è una sola e non si scrive in due.
+                val previous = carried?.await() ?: true
+                if (!drawn || !previous) return@coroutineScope false
+                val here = by
+                carried = async(Dispatchers.Default) { onBand(band, here, rows) }
+                slot = 1 - slot
+                by += rows
             }
-            gpuDrawMillis += System.currentTimeMillis() - startedAt
-            if (!drawn) return false
-            if (!onBand(band, by, rows)) return false
-            by += rows
+            carried?.await() ?: true
         }
-        return true
     }
 
     private suspend fun compose(

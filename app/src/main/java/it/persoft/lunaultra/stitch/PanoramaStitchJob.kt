@@ -7,6 +7,7 @@ import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.exifinterface.media.ExifInterface
 import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.media.GALLERY_FOLDER
 import it.persoft.lunaultra.media.GALLERY_RELATIVE_PATH
@@ -25,6 +26,14 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+/**
+ * Una foto scelta dal telefono: come si chiama e come se ne fa una copia.
+ *
+ * Il nome serve al log e all'ordine a parità di istante; la copia la sa fare solo chi ha in
+ * mano il `ContentResolver`, che sta nell'interfaccia. Qui dentro non entra nessun `Uri`.
+ */
+class PickedPhoto(val name: String, val copyInto: (File) -> Unit)
 
 /** Cosa sta facendo l'unione, per il pannello che la mostra. */
 sealed interface StitchUiState {
@@ -245,6 +254,84 @@ class PanoramaStitchJob(
             )
             files
         }.onFailure { log.warn("JOB DI PROVA NON CREATO", it.message) }
+    }
+
+    /**
+     * Un job dalle foto che stanno già sul telefono, messe **in ordine di scatto**.
+     *
+     * L'ordine non si chiede all'utente e non si prende dal selettore: il selettore di sistema
+     * restituisce quello che gli pare — l'ordine dei tocchi su alcuni gestori di file, quello
+     * alfabetico su altri — e sbagliarlo significa disporre le foto a ventaglio nel posto
+     * sbagliato, perché è la posizione nella fila a decidere il pan assunto.
+     *
+     * L'ordine vero ce l'hanno le foto addosso: l'istante dello scatto negli EXIF, al
+     * millesimo quando c'è il campo dei sottomultipli. Chi non ce l'ha ripiega sulla data del
+     * file, e a parità di tutto sul nome.
+     */
+    suspend fun collectPickedForJob(
+        sources: List<PickedPhoto>,
+        panoramaId: String,
+        onProgress: (Float, String) -> Unit,
+    ): Result<List<File>> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(sources.size >= 2) { "Servono almeno due foto per un job di unione" }
+            val workshop = File(context.cacheDir, "panopick").apply { mkdirs() }
+            workshop.listFiles()?.forEach { it.delete() }
+
+            // Prima si copiano — un URI non si rilegge due volte con la stessa tranquillità —
+            // e poi si guarda dentro per sapere quando sono state scattate.
+            val drafts = sources.mapIndexed { index, source ->
+                currentCoroutineContext().ensureActive()
+                onProgress(index / sources.size.toFloat(), "Copio la foto ${index + 1} di ${sources.size}")
+                val draft = File(workshop, "scelta-%03d.jpg".format(index))
+                source.copyInto(draft)
+                check(draft.length() > 0L) { "la foto ${index + 1} è arrivata vuota" }
+                draft to source.name
+            }
+
+            val ordered = drafts
+                .map { (draft, name) -> Triple(draft, name, captureInstant(draft)) }
+                .sortedWith(compareBy({ it.third }, { it.second }))
+
+            val dir = jobDirFor(panoramaId)
+            val files = ordered.mapIndexed { position, (draft, name, _) ->
+                // Il nome porta la posizione: la cartella del job si legge in ordine, e il
+                // nome originale resta lì accanto per ritrovare la foto di partenza.
+                val stored = storeInJobDirectory(draft, "%02d-%s".format(position + 1, name), dir, panoramaId)
+                draft.delete()
+                stored
+            }
+            MediaScannerConnection.scanFile(context, files.map { it.absolutePath }.toTypedArray(), null, null)
+            log.info(
+                "JOB DA FOTO DEL TELEFONO",
+                "${files.size} foto messe in ordine di scatto: " +
+                    ordered.joinToString(" · ") { (_, name, instant) ->
+                        "$name (${SimpleDateFormat("HH:mm:ss", Locale.ITALIAN).format(Date(instant))})"
+                    } + ". In ${dir.path}.",
+            )
+            files
+        }.onFailure { log.warn("JOB DA FOTO DEL TELEFONO NON CREATO", it.message) }
+    }
+
+    /**
+     * Quando è stata scattata una foto, al millesimo quando si può saperlo.
+     *
+     * L'EXIF porta la data dello scatto con la precisione del secondo, e su una panoramica
+     * scattata a mano due foto nello stesso secondo capitano: per quelle c'è
+     * `SubSecTimeOriginal`, i decimi e centesimi che l'apparecchio scrive a parte. Senza EXIF
+     * resta la data del file, che è quella della copia — buona solo a non cambiare l'ordine.
+     */
+    private fun captureInstant(file: File): Long {
+        val exif = runCatching { ExifInterface(file) }.getOrNull() ?: return file.lastModified()
+        val stamp = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+            ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+            ?: return file.lastModified()
+        val seconds = runCatching {
+            SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).parse(stamp)?.time
+        }.getOrNull() ?: return file.lastModified()
+        val subSec = exif.getAttribute(ExifInterface.TAG_SUBSEC_TIME_ORIGINAL)
+            ?.take(3)?.padEnd(3, '0')?.toLongOrNull() ?: 0L
+        return seconds + subSec.coerceIn(0L, 999L)
     }
 
     /**

@@ -418,9 +418,6 @@ fun ViewfinderScreen(
                     onHideChrome = { chromeVisible = false },
                     onOpenSettings = { onOpenPanel(Panel.SETTINGS) },
                     onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
-                    onOpenGallery = { onOpenPanel(Panel.GALLERY) },
-                    onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
-                    onRefreshStatus = viewModel::refreshStatus,
                     onPickPhotos = { photoPicker.launch(arrayOf("image/*")) },
                     onShareLog = { viewModel.shareLog(context) },
                 )

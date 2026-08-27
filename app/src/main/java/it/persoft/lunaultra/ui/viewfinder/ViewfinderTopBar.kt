@@ -62,11 +62,8 @@ fun ViewfinderTopBar(
     onHideChrome: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSequence: () -> Unit,
-    onOpenGallery: () -> Unit,
-    onOpenDiagnostics: () -> Unit,
     /** Unisci foto che stanno già sul telefono: il selettore di sistema, e via. */
     onPickPhotos: () -> Unit,
-    onRefreshStatus: () -> Unit,
     onShareLog: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -156,21 +153,13 @@ fun ViewfinderTopBar(
                         menuOpen = false
                         onHideChrome()
                     }
-                    MenuRow(label = "Galleria della camera", icon = LunaIcons.Gallery) {
-                        menuOpen = false
-                        onOpenGallery()
-                    }
+                    // Qui restano solo le cose che da nessun'altra parte si possono fare.
+                    // La galleria della camera ha la sua icona nella barra in basso;
+                    // «aggiorna stato» e la diagnostica vivono nelle impostazioni, dentro i
+                    // gruppi «Camera» e «Diagnostica». Ripeterle qui era solo rumore.
                     MenuRow(label = "Automazioni gimbal", icon = LunaIcons.Sequence) {
                         menuOpen = false
                         onOpenSequence()
-                    }
-                    MenuRow(label = "Aggiorna stato camera", icon = LunaIcons.Refresh) {
-                        menuOpen = false
-                        onRefreshStatus()
-                    }
-                    MenuRow(label = "Diagnostica", icon = LunaIcons.Diagnostics) {
-                        menuOpen = false
-                        onOpenDiagnostics()
                     }
                     MenuRow(label = "Condividi il log", icon = LunaIcons.Share) {
                         menuOpen = false

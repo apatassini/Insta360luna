@@ -21,6 +21,7 @@ import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.MediaItem
 import it.persoft.lunaultra.data.StitchSettings
 import it.persoft.lunaultra.stitch.PanoJob
+import it.persoft.lunaultra.stitch.PickedPhoto
 import it.persoft.lunaultra.stitch.AfterPreview
 import it.persoft.lunaultra.stitch.PanoPrepStore
 import it.persoft.lunaultra.stitch.PreparedPreview
@@ -1806,39 +1807,74 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Unisce foto scelte dalla galleria del telefono, nell'ordine in cui sono state toccate.
+     * Fa un job dalle foto che stanno già sul telefono, invece di unirle sul momento.
      *
-     * Il selettore di sistema restituisce le foto nell'ordine della scelta: toccarle una, due,
-     * tre come sono state scattate è il modo di dare l'ordine.
+     * Un job e non un'unione, perché è la stessa cosa a tutti gli effetti: le foto vanno
+     * copiate al sicuro comunque, e da lì valgono le stesse cose delle panoramiche della
+     * camera — miniatura nella scheda dei lavori, preparazione a bassa risoluzione una volta
+     * sola, scelta del punto di fuga, unione quando si vuole e anche tutte in fila.
+     *
+     * L'ordine non lo dà il selettore, che restituisce quello che gli pare: lo danno le foto,
+     * con l'istante dello scatto negli EXIF.
      */
     fun stitchPickedPhotos(context: android.content.Context, uris: List<android.net.Uri>) {
         if (uris.size < 2) {
-            showMessage("Scegli almeno due foto, nell'ordine in cui sono state scattate")
+            showMessage("Scegli almeno due foto della stessa panoramica")
             return
         }
         if (stitchJob?.isActive == true) {
             showMessage("Un'unione è già in corso")
             return
         }
+        val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, sequence.value.panoramaAspect)
         stitchJob = viewModelScope.launch {
             _stitchState.value = StitchUiState.Working(0f, "Leggo ${uris.size} foto dal telefono")
-            val files = withContext(Dispatchers.IO) {
-                runCatching {
-                    uris.mapIndexed { index, uri ->
-                        val target = java.io.File(context.cacheDir, "stitch-input-$index.jpg")
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            target.outputStream().use { output -> input.copyTo(output) }
-                        } ?: error("la foto ${index + 1} non si apre")
-                        target
-                    }
+            val panoramaId = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+            val sources = uris.mapIndexed { index, uri ->
+                PickedPhoto(
+                    name = displayNameOf(context, uri) ?: "foto-${index + 1}.jpg",
+                ) { target ->
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        target.outputStream().use { output -> input.copyTo(output) }
+                    } ?: error("la foto ${index + 1} non si apre")
                 }
-            }.getOrElse {
-                _stitchState.value = StitchUiState.Failed("Foto non leggibili: ${it.message}")
-                return@launch
             }
-            stitchFiles(files, downloadShare = 0.05f)
+            container.stitchJob.collectPickedForJob(
+                sources = sources,
+                panoramaId = panoramaId,
+                onProgress = { fraction, message ->
+                    _stitchState.value = StitchUiState.Working(fraction, message)
+                },
+            ).onSuccess { files ->
+                container.panoJobStore.update { list ->
+                    list.copy(
+                        jobs = list.jobs + PanoJob(
+                            id = panoramaId,
+                            createdAtMs = System.currentTimeMillis(),
+                            files = files.map { file -> file.absolutePath },
+                            fovDegrees = effectiveFov(fov.horizontalDegrees),
+                            spherical = false,
+                        ),
+                    )
+                }
+                _stitchState.value = StitchUiState.Queued(panoramaId, files.size)
+                showMessage("Job creato: ${files.size} foto in ordine di scatto, aprilo dai lavori")
+            }.onFailure {
+                _stitchState.value = StitchUiState.Failed(it.message ?: "job non creato")
+                showMessage("Job non creato: ${it.message}")
+            }
         }
     }
+
+    /** Il nome che il telefono dà a una foto scelta: serve al log e a rompere le parità. */
+    private fun displayNameOf(context: android.content.Context, uri: android.net.Uri): String? =
+        runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val column = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+            }
+        }.getOrNull()
 
     /** Il tratto comune: fila orizzontale nell'ordine dato, FOV dallo zoom, unione, esito. */
     private suspend fun stitchFiles(files: List<java.io.File>, downloadShare: Float) {

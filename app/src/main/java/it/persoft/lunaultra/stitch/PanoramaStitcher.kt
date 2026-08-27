@@ -4617,6 +4617,60 @@ class PanoramaStitcher(
         } else {
             null
         }
+        // Lo stesso confine calcolato **senza** il fuoco, solo per poterli contare diversi.
+        //
+        // Sapere che una foto è «più nitida del 19%» non dice se il confine si è mosso di un
+        // pelo o di mezza sovrapposizione, e quando dal vivo non si vede differenza sono due
+        // diagnosi opposte: o la misura non sposta niente, o sposta e le due foto sono
+        // davvero nitide uguale. Il conto delle celle che cambiano padrone risponde. Costa un
+        // secondo passaggio di programmazione dinamica sulla griglia ridotta — spiccioli
+        // rispetto a tutto il resto — e si paga solo a fuoco acceso.
+        val plainSeam = if (tuning.focusAwareSeam && seam != null) {
+            findSeam(difference, bothPresent, newWeightGrid, oldWeightGrid, gw, gh, null, null)
+        } else {
+            null
+        }
+        // Lo spostamento del confine, cella per cella, messo da parte per la piena risoluzione.
+        //
+        // Qui stava il buco vero. Il fuoco entrava nella maschera della griglia ridotta — che
+        // serve solo alla **correzione** multibanda — e poi il giro che scrive i pixel veri
+        // ridecideva il padrone con `newWeight > oldWeight`, senza fuoco. Sul taglio non si
+        // vedeva perche' il taglio se lo porta dentro; sul confine sul peso — cinque
+        // fotogrammi su nove, fra cui la Foto 9 e la Foto 6 — il confine calcolato col fuoco
+        // veniva buttato via un attimo dopo averlo scritto nel log come «spostato».
+        val focusShiftGrid = if (focusNew != null && focusOld != null && seam == null) {
+            FloatArray(gcount) { focusBias(focusNew, focusOld, it) }
+        } else {
+            null
+        }
+        // L'istantanea dei possessori come la vede chi scrive i pixel: già scontata del fuoco.
+        //
+        // Il confine sul peso è una sola disuguaglianza, `nuovo > vecchio`, e la legge in tre
+        // posti — la maschera della griglia ridotta, il giro che scrive le righe in CPU, lo
+        // shader che scrive le fasce sulla scheda. Sommare lo spostamento in tre posti vuol
+        // dire tenerli d'accordo per sempre; sottrarlo **una volta** dal vecchio è la stessa
+        // disuguaglianza e ne resta uno solo da guardare. La scheda riceve questa mappa e non
+        // sa nemmeno che esiste un fuoco.
+        //
+        // Il pavimento a zero serve perché la mappa che sale sulla scheda è a un byte per
+        // cella: un peso negativo diventerebbe comunque zero là sopra, e allora è meglio che
+        // sia zero anche qui, o le due strade scriverebbero pixel diversi sullo stesso posto.
+        val ownerForApply = if (focusShiftGrid == null) {
+            ownerSnap
+        } else {
+            FloatArray(snapW * snapH) { i ->
+                val bx = min((i % snapW) * OWNER_SCALE, sbw - 1)
+                val by = min((i / snapW) * OWNER_SCALE, sbh - 1)
+                val shift = bilinearGrid(
+                    focusShiftGrid, gw, gh,
+                    (bx.toFloat() / s) - 0.5f + 0.5f / s,
+                    (by.toFloat() / s) - 0.5f + 0.5f / s,
+                )
+                max(0f, ownerSnap[i] - shift)
+            }
+        }
+        var focusShared = 0
+        var focusMoved = 0
         for (gy in 0 until gh) {
             for (gx in 0 until gw) {
                 val g = gy * gw + gx
@@ -4644,6 +4698,15 @@ class PanoramaStitcher(
                     // comanda — è quello che tiene le giunzioni lontane dai bordi — e il fuoco
                     // sposta il confine solo dove la differenza è netta.
                     newWeightGrid[g] + focusBias(focusNew, focusOld, g) > oldWeightGrid[g]
+                }
+                if (tuning.focusAwareSeam && bothPresent[g]) {
+                    focusShared++
+                    val plain = if (seam != null) {
+                        plainSeam?.ownsNew(gx.toFloat(), gy.toFloat()) ?: ownsNew
+                    } else {
+                        newWeightGrid[g] > oldWeightGrid[g]
+                    }
+                    if (plain != ownsNew) focusMoved++
                 }
                 if (ownsNew) mask[g] = 1f
             }
@@ -4727,7 +4790,7 @@ class PanoramaStitcher(
             // Le sette griglie ridotte, tagliate in verticale su questa riga: da qui in avanti
             // ogni pixel legge da vettori che stanno nella cache, non da quaranta megabyte
             // sparsi. È la stessa interpolazione di prima, fatta nell'ordine giusto.
-            rowSlice(ownerSnap, snapW, snapH, by.toFloat() / OWNER_SCALE, notes.owner)
+            rowSlice(ownerForApply, snapW, snapH, by.toFloat() / OWNER_SCALE, notes.owner)
             for (c in 0..2) {
                 rowSlice(corrOver[c], gw, gh, gyf, notes.over[c])
                 rowSlice(corrBase[c], gw, gh, gyf, notes.base[c])
@@ -4771,6 +4834,10 @@ class PanoramaStitcher(
                         val ownsNew = if (seam != null) {
                             seam.ownsNew(gxf, gyf)
                         } else {
+                            // Il peso del vecchio arriva già scontato del fuoco: `ownerForApply`
+                            // non è l'istantanea dei possessori, è l'istantanea meno lo
+                            // spostamento. Così questa riga resta la stessa somma di prima e la
+                            // scheda grafica, che legge quella stessa mappa, decide identico.
                             newWeight > oldWeight
                         }
                         if (oldWeight <= 0f || ownsNew) {
@@ -4826,7 +4893,7 @@ class PanoramaStitcher(
         // vale un secondo percorso da mantenere.
         if (gpu != null && gpuPlan != null && narrow && sbw <= gpu.renderer.maxTextureSize) {
             val ownerBytes = ByteArray(snapW * snapH) {
-                (ownerSnap[it] * 255f).roundToInt().coerceIn(0, 255).toByte()
+                (ownerForApply[it] * 255f).roundToInt().coerceIn(0, 255).toByte()
             }
             val plan = GpuBlendUniforms(
                 subColumn = 0, subRow = 0, subWidth = sbw, subHeight = sbh,
@@ -4989,17 +5056,24 @@ class PanoramaStitcher(
         // Cosa ha visto il fuoco. È la riga che mancava: senza, non si sa se il confine non
         // si è spostato perché le due foto erano nitide uguale o perché la misura non vede
         // niente — e sono due difetti opposti, con due cure opposte.
+        val spostate = if (focusShared > 0) {
+            " · %.0f%% della sovrapposizione cambia padrone".format(100f * focusMoved / focusShared)
+        } else {
+            ""
+        }
         val fuoco = if (!tuning.focusAwareSeam) {
             ""
         } else if (abs(focusAdvantage) < FOCUS_CLEAR_ADVANTAGE) {
-            " · fuoco: nitide uguale (%+.0f%%, serve %.0f%%; contrasto %.3f contro %.3f)".format(
-                focusAdvantage * 100, FOCUS_CLEAR_ADVANTAGE * 100, meanNewFocus, meanOldFocus,
+            " · fuoco: nitide uguale (%+.0f%%, serve %.0f%%; contrasto %.3f contro %.3f)%s".format(
+                focusAdvantage * 100, FOCUS_CLEAR_ADVANTAGE * 100,
+                meanNewFocus, meanOldFocus, spostate,
             )
         } else {
-            " · fuoco: %s più nitida del %.0f%% (contrasto %.3f contro %.3f), confine spostato".format(
+            " · fuoco: %s più nitida del %.0f%% (contrasto %.3f contro %.3f)%s".format(
                 if (focusAdvantage > 0f) frame.label else "la tela",
                 abs(focusAdvantage) * 100,
                 meanNewFocus, meanOldFocus,
+                if (spostate.isEmpty()) ", confine spostato" else spostate,
             )
         }
         val onFocus = if (tuning.focusAwareSeam) " e sulla messa a fuoco" else ""

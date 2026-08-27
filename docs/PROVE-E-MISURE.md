@@ -417,6 +417,36 @@ solo con l'opzione accesa. Il log ora riporta anche i due contrasti medi
 (`contrasto 0,041 contro 0,033`), così la prossima volta si vede se il numero significa
 qualcosa prima di guardare la panoramica.
 
+### 5.12 E il confine calcolato col fuoco veniva buttato via
+
+Log `20260827-182030`, stesse nove foto, cursore del fuoco a ×2,9. Sul telefono: nessuna
+differenza. Il log però diceva `confine spostato` per sei fotogrammi su otto.
+
+Erano vere tutte e due. Il confine sul peso è una sola disuguaglianza, `nuovo > vecchio`, e la
+leggono **tre** pezzi di codice diversi:
+
+1. la maschera sulla griglia ridotta, che serve alla correzione multibanda;
+2. il giro in CPU che scrive le righe a piena risoluzione;
+3. lo shader che scrive le fasce sulla scheda grafica.
+
+Il fuoco era stato aggiunto solo al primo. Il secondo e il terzo ridecidevano il padrone con
+`newWeight > oldWeight`, senza fuoco — e sono loro che scrivono i pixel. Sul **taglio** non si
+notava, perché il taglio si porta il fuoco dentro il proprio percorso e i tre lo leggono uguale;
+sul **confine sul peso** — cinque fotogrammi su nove, fra cui la Foto 9 e la Foto 6 di cui si
+lamentava — lo spostamento veniva scritto nel log e buttato via un attimo dopo.
+
+La cura non è aggiungere la stessa somma in tre posti, che è un accordo da mantenere per
+sempre. È sottrarre lo spostamento **una volta sola** dal peso del vecchio: `nuovo > vecchio −
+spostamento` è la stessa disuguaglianza, e i tre pezzi continuano a leggere la disuguaglianza
+di prima. L'istantanea dei possessori che va alla CPU e alla scheda è quella scontata; lo
+shader non sa nemmeno che esista un fuoco.
+
+Aggiunto anche il conto che avrebbe fatto vedere il buco subito: `% della sovrapposizione
+cambia padrone`, calcolato confrontando il confine col fuoco e quello senza (per il taglio
+costa una seconda programmazione dinamica sulla griglia ridotta, spiccioli). Un `confine
+spostato` con lo 0% accanto è un buco; un 30% accanto e nessuna differenza dal vivo vuol dire
+che le due foto erano nitide uguale davvero.
+
 ## 6. Memoria
 
 | | prima | dopo |

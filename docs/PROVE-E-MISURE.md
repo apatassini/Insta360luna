@@ -228,6 +228,32 @@ come prima, senza dire niente a nessuno.
 
 Il log dice quanti ne ha aperti in anticipo: `apertura originali 1 s (8 aperti in anticipo)`.
 
+### 5.8 La prima misura della resa: due core su otto
+
+Il 27 agosto, nove foto, con il contatore acceso:
+
+```
+Tempi: allineamento 17 s · cucitura 19 s
+Resa dei core (su 8): allineamento 1,9 · cucitura 2,0
+Dentro la scheda: calcolo 0,3 s · rilettura e attesa 1,6 s · 2% del tempo di cucitura
+```
+
+**Due core su otto.** Avevo scritto qui sopra, ragionando, che «con `parallelRows` e i candidati
+spartiti la CPU è probabilmente già satura». Era falso, e la misura l'ha detto al primo colpo:
+tre quarti della macchina sta a guardare per tutta l'unione. È esattamente il motivo per cui il
+contatore esiste — l'intuizione su queste cose sbaglia, e sbaglia in grande.
+
+**E la scheda non è il collo di bottiglia**: calcola tre decimi di secondo su diciannove di
+cucitura. Il tempo che le si attribuiva — «disegno 2,6 s» — è quasi tutto attesa e travaso di
+pixel, non calcolo. Uno shader più furbo non servirebbe a niente; semmai servirebbe darle **più
+lavoro per volta**.
+
+Il primo sospettato per i due core è il modo in cui la tela viene letta e riscritta: due
+chiamate native per riga, larghe quanto tutta la tela — tredicimila pixel per prenderne
+cinquemila, quattromila volte per fotogramma, con otto lavoratori che si accalcano sullo stesso
+Bitmap. Ora quel passaggio legge e riscrive **a fasce**, sul solo pezzo di tela che il
+fotogramma tocca. Per sapere se era davvero quello, ogni sotto-fase ha il suo contatore di core.
+
 ### 5.5 La resa dei core, che è la domanda giusta prima di parallelizzare
 
 Parallelizzare «ancora un po'» non si decide dai tempi: una fase che dura dieci secondi può

@@ -146,6 +146,10 @@ class PanoramaStitcher(
      */
     private fun coreMillis(): Long = runCatching { android.os.Process.getElapsedCpuTime() }.getOrDefault(0L)
 
+    /** Quanti core ha tenuto occupati una fase, dai suoi due cronometri. */
+    private fun share(cpuMillis: Long, wallMillis: Long): Float =
+        if (wallMillis <= 0L || cpuMillis <= 0L) 0f else cpuMillis.toFloat() / wallMillis
+
     /** Quanti core ha tenuto occupati una fase, in media. Zero quando non si è potuto misurare. */
     private fun coresUsed(cpuAtStart: Long, wallAtStart: Long): Float {
         val wall = System.currentTimeMillis() - wallAtStart
@@ -164,6 +168,19 @@ class PanoramaStitcher(
      * Quanti processori abbia la scheda, e quanti ne stiamo occupando, **non si può sapere**:
      * nessuna versione di OpenGL ES lo espone, e i produttori non lo dicono.
      */
+    /**
+     * Gli stessi tempi, ma di calcolo invece che di parete.
+     *
+     * Divisi per il tempo passato danno quanti core ha tenuto occupati **ogni singola fase**.
+     * La resa complessiva dice che c'è margine; questi dicono dove.
+     */
+    private var featureCpuMillis = 0L
+    private var searchCpuMillis = 0L
+    private var pointCpuMillis = 0L
+    private var blendGridCpuMillis = 0L
+    private var blendPyramidCpuMillis = 0L
+    private var blendApplyCpuMillis = 0L
+
     private var gpuBusyMillis = 0L
     private var gpuReadMillis = 0L
     private var gpuTimerReady = false
@@ -827,11 +844,11 @@ class PanoramaStitcher(
                 refineCores,
                 composeCores,
             )
-            notes += ("Dentro la fusione: griglia ridotta %.1f s · piramidi %.1f s · " +
-                    "riporto a piena risoluzione %.1f s").format(
-                    blendGridMillis / 1000f,
-                    blendPyramidMillis / 1000f,
-                    blendApplyMillis / 1000f,
+            notes += ("Dentro la fusione: griglia ridotta %.1f s (%.1f core) · " +
+                    "piramidi %.1f s (%.1f core) · riporto a piena risoluzione %.1f s (%.1f core)").format(
+                    blendGridMillis / 1000f, share(blendGridCpuMillis, blendGridMillis),
+                    blendPyramidMillis / 1000f, share(blendPyramidCpuMillis, blendPyramidMillis),
+                    blendApplyMillis / 1000f, share(blendApplyCpuMillis, blendApplyMillis),
                 )
             }
             if (gpuDrawMillis + gpuMergeMillis + gpuUploadMillis > 0L) {
@@ -1844,6 +1861,7 @@ class PanoramaStitcher(
             var byFeatures = 0
             val results = anchors.mapNotNull { anchor ->
                 val featureStartedAt = System.currentTimeMillis()
+                val featureCpuAt = coreMillis()
                 val found = registerByFeatures(
                     moving = frames[index],
                     fixed = frames[anchor],
@@ -1852,11 +1870,13 @@ class PanoramaStitcher(
                     lens = lens,
                 )
                 featureMillis += System.currentTimeMillis() - featureStartedAt
+                featureCpuMillis += coreMillis() - featureCpuAt
                 if (found != null) {
                     byFeatures++
                     found
                 } else {
                     val searchStartedAt = System.currentTimeMillis()
+                    val searchCpuAt = coreMillis()
                     val fallback = registerPair(
                         moving = frames[index],
                         fixed = frames[anchor],
@@ -1867,6 +1887,7 @@ class PanoramaStitcher(
                         attitudeKnown = attitudeKnown,
                     )
                     searchMillis += System.currentTimeMillis() - searchStartedAt
+                    searchCpuMillis += coreMillis() - searchCpuAt
                     fallback
                 }
             }
@@ -1954,6 +1975,7 @@ class PanoramaStitcher(
                 val all = mutableListOf<FloatArray>()
                 anchors.forEach { anchor ->
                     val pointsStartedAt = System.currentTimeMillis()
+                    val pointCpuAt = coreMillis()
                     val tally = controlPoints(
                         moving = frames[index],
                         fixed = frames[anchor],
@@ -1962,6 +1984,7 @@ class PanoramaStitcher(
                         lens = lens,
                     )
                     pointMillis += System.currentTimeMillis() - pointsStartedAt
+                    pointCpuMillis += coreMillis() - pointCpuAt
                     found += tally.candidates
                     // Ogni punto si porta dietro da quale vicino viene: la fotometria ha
                     // bisogno di sapere quale coppia di foto sta confrontando.
@@ -4152,31 +4175,44 @@ class PanoramaStitcher(
             // riporto, che è una copia condizionata — nessuna trigonometria, nessun
             // campionamento. Le stesse righe, gli stessi lavoratori, la stessa parità della
             // mappa dei possessori: dal punto di vista della tela non cambia niente.
+            // Il riporto legge la tela **a fasce**, non a righe, e solo dove il fotogramma la
+            // tocca.
+            //
+            // Prima erano due chiamate native per riga — una lettura e una scrittura — larghe
+            // quanto tutta la tela: tredicimila pixel per prenderne cinquemila, quattromila
+            // volte per fotogramma. Otto lavoratori che si accalcano su un Bitmap solo per
+            // fare copie da cinquantaduemila byte: la misura ha detto due core occupati su
+            // otto, ed erano quelli.
+            //
+            // Adesso la fascia si legge in una volta sola, sul pezzo di tela che serve; i
+            // lavoratori si spartiscono un vettore normale, dove non c'è niente da
+            // contendersi; e alla fine la fascia torna indietro con un'altra chiamata sola.
+            val spanStart = columns[0]
+            val narrow = !wraps && spanStart + bw <= canvas.width
+            val spanFrom = if (narrow) spanStart else 0
+            val spanWidth = if (narrow) bw else canvas.width
+            val shift = if (narrow) spanFrom else 0
+            var canvasBand: IntArray? = null
             paintedOnGpu = gpuBands(gpu, gpuPlan, c0, row0, bw, bh, weightOnly = false) { band, bandRow, rows ->
                 val mergeStartedAt = System.currentTimeMillis()
-                parallelRows(row0 + bandRow, rows, canvas.width) { r, rowPixels ->
+                val strip = canvasBand?.takeIf { it.size >= spanWidth * rows }
+                    ?: IntArray(spanWidth * rows).also { canvasBand = it }
+                output.getPixels(strip, 0, spanWidth, spanFrom, row0 + bandRow, spanWidth, rows)
+                parallelRows(row0 + bandRow, rows, 0) { r, _ ->
                     val by = bandRow + r
                     val insideBlendRows = hasOverlap && by in sy0..sy1
-                    var touched = false
-                    var readRow = false
                     val from = r * bw
+                    val to = r * spanWidth
                     for (bx in 0 until bw) {
                         if (insideBlendRows && bx in sx0..sx1) continue
                         val weightByte = newW[by * bw + bx].toInt() and 0xFF
                         if (weightByte == 0) continue
                         val packed = band[from + bx]
                         if (packed ushr 24 == 0) continue
-                        if (!readRow) {
-                            readRow = true
-                            output.getPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
-                        }
-                        rowPixels[columns[bx]] = 0xFF000000.toInt() or (packed and 0xFFFFFF)
-                        touched = true
-                    }
-                    if (touched) {
-                        output.setPixels(rowPixels, 0, canvas.width, 0, row0 + by, canvas.width, 1)
+                        strip[to + columns[bx] - shift] = 0xFF000000.toInt() or (packed and 0xFFFFFF)
                     }
                 }
+                output.setPixels(strip, 0, spanWidth, spanFrom, row0 + bandRow, spanWidth, rows)
                 gpuMergeMillis += System.currentTimeMillis() - mergeStartedAt
                 true
             }
@@ -4333,6 +4369,7 @@ class PanoramaStitcher(
         val gh = (sbh + s - 1) / s
         val gcount = gw * gh
         val gridStartedAt = System.currentTimeMillis()
+        val blendGridCpuAt = coreMillis()
 
         // L'istantanea dei possessori, presa PRIMA di qualsiasi scrittura. Senza, la riga
         // dispari di ogni coppia leggeva il peso appena scritto dalla riga sopra (stessa
@@ -4473,6 +4510,7 @@ class PanoramaStitcher(
         for (g in 0 until gcount) if (!valid[g]) newColor[g] = baseColor[g]
 
         blendGridMillis += System.currentTimeMillis() - gridStartedAt
+        blendGridCpuMillis += coreMillis() - blendGridCpuAt
 
         // 2) La fusione sulla versione ridotta, un canale per volta. Della fusione si
         // tengono DUE correzioni — rispetto al nuovo e rispetto al vecchio — così ogni
@@ -4484,6 +4522,7 @@ class PanoramaStitcher(
         // Manopola multibanda spenta: correzioni a zero, il montaggio resta a taglio netto —
         // è la ricetta diagnostica che mostra dove cadono le giunzioni.
         val pyramidStartedAt = System.currentTimeMillis()
+        val blendPyramidCpuAt = coreMillis()
         if (tuning.multiband) {
             // La maschera è la stessa per i tre canali — chi possiede un pixel non dipende dal
             // rosso o dal blu — e prima ogni canale se la ricostruiva per conto suo: un terzo
@@ -4505,6 +4544,7 @@ class PanoramaStitcher(
             }
         }
         blendPyramidMillis += System.currentTimeMillis() - pyramidStartedAt
+        blendPyramidCpuMillis += coreMillis() - blendPyramidCpuAt
 
         // 3) Riga per riga a piena risoluzione, tutte le CPU insieme: montaggio netto più
         // la correzione della propria sorgente. Le decisioni leggono l'istantanea, mai la
@@ -4622,6 +4662,7 @@ class PanoramaStitcher(
         // fascia alla volta, così la memoria non deve reggere l'intero rettangolo — che a
         // sei megapixel per fotogramma sarebbe un centinaio di megabyte in una volta sola.
         val applyStartedAt = System.currentTimeMillis()
+        val blendApplyCpuAt = coreMillis()
         var doneRows = 0
         var blendedOnGpu = false
         // La fusione per intero sulla scheda.
@@ -4757,6 +4798,7 @@ class PanoramaStitcher(
             blendRow(doneRows + r, rowPixels, notes)
         }
         blendApplyMillis += System.currentTimeMillis() - applyStartedAt
+        blendApplyCpuMillis += coreMillis() - blendApplyCpuAt
         // La scala della fusione nel log, e chi l'ha materialmente fatta: quando un
         // fotogramma ci mette ottantatré secondi invece di sei, la prima cosa da sapere è se
         // ha lavorato a una scala diversa dagli altri, o su una strada diversa, o se era il

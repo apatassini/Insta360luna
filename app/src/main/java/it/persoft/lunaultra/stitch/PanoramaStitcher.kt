@@ -2500,39 +2500,93 @@ class PanoramaStitcher(
         val maxY = (centerY + radiusPx).toInt().coerceAtMost(targetHeight - 1 - r)
         if (minX > maxX || minY > maxY) return null
 
+        // Prima a passo largo, poi fine attorno al migliore.
+        //
+        // La finestra di ricerca e` quasi cinquanta pixel di lato: duemilaquattrocento
+        // posizioni, e per ognuna un quadratino da centosessantanove pixel da correlare. Ma la
+        // superficie di correlazione non e` fatta di punte isolate — il quadratino e` largo
+        // tredici pixel, quindi il massimo e` una collina larga qualche pixel, non uno spillo.
+        // Guardando una posizione su due si trova sempre il fianco della collina giusta, e la
+        // cima esatta si prende con una passata fitta di due pixel attorno. Seicento posizioni
+        // invece di duemilaquattrocento, e il massimo e` lo stesso.
         var bestX = -1
         var bestY = -1
         var best = -1f
-        for (py in minY..maxY) {
-            for (px in minX..maxX) {
-                var sum = 0f
-                for (dy in -r..r) {
-                    val rowBase = (py + dy) * targetWidth + px
-                    for (dx in -r..r) sum += target.luminance(rowBase + dx)
-                }
-                val targetMean = sum / patch.size
-                var cross = 0f
-                var targetNorm = 0f
-                for (dy in -r..r) {
-                    val rowBase = (py + dy) * targetWidth + px
-                    val patchBase = (dy + r) * side + r
-                    for (dx in -r..r) {
-                        val d = target.luminance(rowBase + dx) - targetMean
-                        cross += d * patch[patchBase + dx]
-                        targetNorm += d * d
-                    }
-                }
-                if (targetNorm < CONTROL_MIN_VARIANCE) continue
-                val ncc = cross / sqrt(targetNorm * norm)
+        var py = minY
+        while (py <= maxY) {
+            var px = minX
+            while (px <= maxX) {
+                val ncc = nccAt(target, targetWidth, px, py, patch, r, side, norm)
                 if (ncc > best) {
                     best = ncc
                     bestX = px
                     bestY = py
                 }
+                px += CONTROL_SEARCH_STRIDE
+            }
+            py += CONTROL_SEARCH_STRIDE
+        }
+        if (bestX < 0) return null
+        val fromX = (bestX - CONTROL_SEARCH_STRIDE).coerceAtLeast(minX)
+        val toX = (bestX + CONTROL_SEARCH_STRIDE).coerceAtMost(maxX)
+        val fromY = (bestY - CONTROL_SEARCH_STRIDE).coerceAtLeast(minY)
+        val toY = (bestY + CONTROL_SEARCH_STRIDE).coerceAtMost(maxY)
+        for (fy in fromY..toY) {
+            for (fx in fromX..toX) {
+                val ncc = nccAt(target, targetWidth, fx, fy, patch, r, side, norm)
+                if (ncc > best) {
+                    best = ncc
+                    bestX = fx
+                    bestY = fy
+                }
             }
         }
-        if (bestX < 0 || best < CONTROL_FLOOR_NCC) return null
+        if (best < CONTROL_FLOOR_NCC) return null
         return floatArrayOf(bestX.toFloat(), bestY.toFloat(), best)
+    }
+
+    /**
+     * La correlazione normalizzata in una passata sola invece che in due.
+     *
+     * Il conto di prima leggeva il quadratino due volte: una per farsi la media della zona, una
+     * per correlare. La seconda lettura non serve, e non e` un'approssimazione — e` algebra. Il
+     * quadratino di riferimento e` gia` a media zero, quindi la somma dei suoi valori e` zero,
+     * e nel prodotto scalare il termine della media sparisce da solo: sommare i prodotti con i
+     * valori grezzi da` esattamente lo stesso numero. La varianza della zona, allo stesso modo,
+     * e` la somma dei quadrati meno il quadrato della somma. Una passata, tre accumulatori, e
+     * lo stesso risultato di prima fino all'ultima cifra.
+     *
+     * Torna un valore negativo quando la zona e` troppo piatta perche` la correlazione
+     * significhi qualcosa: un muro bianco correla benissimo con qualunque altro muro bianco.
+     */
+    private fun nccAt(
+        target: ByteArray,
+        targetWidth: Int,
+        px: Int,
+        py: Int,
+        patch: FloatArray,
+        r: Int,
+        side: Int,
+        patchNorm: Float,
+    ): Float {
+        var sum = 0f
+        var sumSquares = 0f
+        var dot = 0f
+        for (dy in -r..r) {
+            val rowBase = (py + dy) * targetWidth + px
+            val patchBase = (dy + r) * side + r
+            for (dx in -r..r) {
+                val v = target.luminance(rowBase + dx)
+                sum += v
+                sumSquares += v * v
+                dot += v * patch[patchBase + dx]
+            }
+        }
+        // In doppia precisione perche` e` una differenza fra due numeri grandi e vicini: in
+        // singola, su una zona quasi uniforme, si perderebbero le cifre che contano.
+        val variance = (sumSquares.toDouble() - sum.toDouble() * sum / patch.size).toFloat()
+        if (variance < CONTROL_MIN_VARIANCE) return -1f
+        return dot / sqrt(variance * patchNorm)
     }
 
     /** La media dei residui senza le code: il dieci per cento più estremo per lato non vota. */
@@ -5605,6 +5659,16 @@ class PanoramaStitcher(
 
         /** Raggio di ricerca attorno alla previsione: sotto il passo di una foglia di palma. */
         const val CONTROL_SEARCH_DEGREES = 0.7f
+
+        /**
+         * Ogni quante posizioni si guarda nella prima passata della ricerca.
+         *
+         * Due. Il quadratino di riferimento e` largo tredici pixel, quindi il massimo della
+         * correlazione e` una collina larga qualche pixel e non uno spillo: guardandone una su
+         * due non la si manca, e la cima esatta la trova la passata fitta che segue. Quattro
+         * volte meno posizioni, stesso massimo.
+         */
+        const val CONTROL_SEARCH_STRIDE = 2
 
         /** Sotto questo gradiente in entrambe le direzioni non è un angolo, è una superficie. */
         const val CONTROL_MIN_TEXTURE = 5f

@@ -64,6 +64,12 @@ fun ViewfinderScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+
+    // Il selettore di sistema restituisce le foto nell'ordine in cui vengono toccate: toccarle
+    // una, due, tre come sono state scattate è il modo di dare l'ordine all'unione.
+    val photoPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris -> if (uris.isNotEmpty()) viewModel.stitchPickedPhotos(context, uris) }
     val settings by viewModel.settings.collectAsState()
     val connection by viewModel.connectionState.collectAsState()
     val status by viewModel.status.collectAsState()
@@ -415,6 +421,7 @@ fun ViewfinderScreen(
                     onOpenGallery = { onOpenPanel(Panel.GALLERY) },
                     onOpenDiagnostics = { onOpenPanel(Panel.DIAGNOSTICS) },
                     onRefreshStatus = viewModel::refreshStatus,
+                    onPickPhotos = { photoPicker.launch(arrayOf("image/*")) },
                     onShareLog = { viewModel.shareLog(context) },
                 )
             }

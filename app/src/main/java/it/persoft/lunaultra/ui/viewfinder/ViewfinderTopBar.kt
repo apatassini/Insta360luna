@@ -64,6 +64,8 @@ fun ViewfinderTopBar(
     onOpenSequence: () -> Unit,
     onOpenGallery: () -> Unit,
     onOpenDiagnostics: () -> Unit,
+    /** Unisci foto che stanno già sul telefono: il selettore di sistema, e via. */
+    onPickPhotos: () -> Unit,
     onRefreshStatus: () -> Unit,
     onShareLog: () -> Unit,
     modifier: Modifier = Modifier,
@@ -129,13 +131,20 @@ fun ViewfinderTopBar(
                 size = 40.dp,
             )
             Box {
+                // Un telefono, non tre puntini. Tre puntini non dicono niente; il telefono
+                // dice la cosa che da qui si fa piu` spesso — unire foto che stanno gia` qui
+                // dentro, senza passare dalla camera — e il resto del menu ci sta sotto.
                 HudIconButton(
-                    icon = LunaIcons.More,
-                    contentDescription = "Altre azioni",
+                    icon = LunaIcons.Phone,
+                    contentDescription = "Foto del telefono e altre azioni",
                     onClick = { menuOpen = true },
                     size = 40.dp,
                 )
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    MenuRow(label = "Panoramica da foto del telefono", icon = LunaIcons.Phone) {
+                        menuOpen = false
+                        onPickPhotos()
+                    }
                     MenuRow(
                         label = if (fillScreen) "Adatta l'immagine" else "Riempi lo schermo",
                         icon = if (fillScreen) LunaIcons.Fit else LunaIcons.Fill,

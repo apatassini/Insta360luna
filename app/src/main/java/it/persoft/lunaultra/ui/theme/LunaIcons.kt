@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Panorama
 import androidx.compose.material.icons.filled.PendingActions
@@ -99,6 +100,9 @@ object LunaIcons {
     val Delete: ImageVector = Icons.Filled.Delete
     val Back: ImageVector = Icons.AutoMirrored.Filled.ArrowBack
     val More: ImageVector = Icons.Filled.MoreVert
+
+    /** Il telefono: le foto che stanno gia` qui dentro, non quelle sulla camera. */
+    val Phone: ImageVector = Icons.Filled.PhoneAndroid
     val Menu: ImageVector = Icons.Filled.Menu
     val Share: ImageVector = Icons.Filled.Share
 

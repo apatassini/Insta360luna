@@ -398,6 +398,36 @@ giro che si richiude, o una griglia dove il fotogramma tocca il vicino di fianco
 sopra) il nuovo domina in mezzo e la tela alle estremità, la covarianza si annulla, e vuol
 dire che un taglio solo non può separarli: lì si torna alla mediana geometrica.
 
+### 6.1.1 La messa a fuoco, quando le due foto non ce l'hanno uguale
+
+Due scatti della stessa scena non hanno la stessa messa a fuoco. Su una panoramica verticale il
+primo inquadra il prato a tre metri e l'ultimo il cielo, e l'autofocus decide ogni volta per
+conto suo: nella sovrapposizione la stessa cosa c'è **due volte, una nitida e una molle**. Fino
+a ieri la scelta la faceva la geometria — chi era più al centro del proprio fotogramma — senza
+guardare quale delle due si vedesse meglio.
+
+Con l'opzione accesa (Impostazioni → *Unione foto · Allineamento* → «Tieni la parte più a
+fuoco») il taglio guarda anche quello.
+
+**La nitidezza** si misura sulla griglia ridotta della fusione come contrasto locale: la somma
+dei salti di luminanza verso destra e verso il basso, stesa su una finestra di tre per tre
+perché quello che conta è la zona, non il pixel. Una zona a fuoco ha dettagli fitti; una sfocata
+è liscia. Non serve sapere *quanto* sia sfocata né con che obiettivo: serve sapere quale delle
+due lo è di più nello stesso punto, e quella differenza sopravvive anche a un quarto di
+risoluzione.
+
+**Come entra nel taglio.** Il costo di un taglio era «quanto le due foto discordano *qui*»: una
+domanda sul punto. La nitidezza è una domanda sulla **zona** — chi si prende quel pezzo di
+sovrapposizione — quindi non può essere un costo per cella: va contata come somma su tutto
+quello che il taglio lascia da una parte e dall'altra. Con due somme progressive per passo il
+conto resta lo stesso di prima: una sottrazione per ogni posizione possibile del taglio.
+
+Dare una cella alla foto meno nitida costa la differenza di nitidezza. Dove le due si
+somigliano — un cielo liscio, un muro — non costa niente, e il taglio resta libero di seguire il
+minimo disaccordo, che lì è la cosa giusta. Le due grandezze si mettono in scala sulle
+rispettive medie, così il peso è un numero puro e vale uguale su una panoramica scura e su una
+in pieno sole.
+
 ### 6.2 Fusione multibanda, solo dove serve
 
 Della fusione multibanda serve solo la **correzione** — la differenza fra la fusione vera e il

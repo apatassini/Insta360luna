@@ -129,6 +129,17 @@ data class StitchSettings(
     val seamMinimalDifference: Boolean = true,
 
     /**
+     * Far passare la giunzione dove la foto **più a fuoco** può tenersi la sua parte.
+     *
+     * Due scatti della stessa scena non hanno la stessa messa a fuoco: su una panoramica
+     * verticale il primo inquadra il prato a tre metri e l'ultimo il cielo, e l'autofocus
+     * decide ogni volta per conto suo. Nella sovrapposizione la stessa cosa c'è due volte, una
+     * nitida e una molle, e finora la scelta la faceva la geometria — chi era più al centro
+     * del proprio fotogramma — senza guardare quale delle due si vedesse meglio.
+     */
+    val focusAwareSeam: Boolean = false,
+
+    /**
      * La deformazione locale che assorbe la parallasse: il gimbal non ruota attorno al
      * centro ottico, e quello che è vicino si sposta più di quello che è lontano.
      */

@@ -421,6 +421,16 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     icon = LunaIcons.Center,
                 )
                 ToggleRow(
+                    title = "Tieni la parte più a fuoco",
+                    subtitle = "Nella sovrapposizione la stessa cosa c'è due volte, e non sempre " +
+                        "a fuoco in tutte e due: su una panoramica verticale l'autofocus decide " +
+                        "ogni scatto per conto suo. Acceso, il taglio guarda anche quale delle " +
+                        "due si vede meglio lì, e le lascia la sua parte",
+                    checked = settings.stitch.focusAwareSeam,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(focusAwareSeam = on) } },
+                    icon = LunaIcons.Photo,
+                )
+                ToggleRow(
                     title = "Deformazione locale",
                     subtitle = "Assorbe la parallasse: il gimbal non ruota attorno al centro " +
                         "dell'obiettivo, e ciò che è vicino si sposta più di ciò che è lontano",

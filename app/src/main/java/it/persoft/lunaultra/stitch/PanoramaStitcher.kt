@@ -4479,8 +4479,11 @@ class PanoramaStitcher(
         val windowHeight = if (bw > 0) windowNewW.size / bw else 0
         val manySided = sbw >= bw * SEAM_ONE_SIDED_FRACTION &&
             sbh >= windowHeight * SEAM_ONE_SIDED_FRACTION
+        // Chi è a fuoco, dove. Solo se serve: costa due passate sulla griglia ridotta.
+        val focusNew = if (tuning.focusAwareSeam) sharpness(newColor, bothPresent, gw, gh) else null
+        val focusOld = if (tuning.focusAwareSeam) sharpness(baseColor, bothPresent, gw, gh) else null
         val seam = if (tuning.seamMinimalDifference && !manySided) {
-            findSeam(difference, bothPresent, newWeightGrid, oldWeightGrid, gw, gh)
+            findSeam(difference, bothPresent, newWeightGrid, oldWeightGrid, gw, gh, focusNew, focusOld)
         } else {
             null
         }
@@ -4810,7 +4813,7 @@ class PanoramaStitcher(
             seam == null && tuning.seamMinimalDifference ->
                 "taglio a metà strada (la polarità della sovrapposizione non è chiara), $come"
             seam == null -> "taglio a metà strada, $come"
-            else -> "taglio sul minimo disaccordo, %s, %s".format(
+            else -> (if (tuning.focusAwareSeam) "taglio sul minimo disaccordo e sulla messa a fuoco, %s, %s" else "taglio sul minimo disaccordo, %s, %s").format(
                 if (seam.vertical) "verticale" else "orizzontale",
                 come,
             )
@@ -4925,6 +4928,51 @@ class PanoramaStitcher(
      * meglio da dietro. Le celle dove uno dei due non c'è sono proibite per costo, così il
      * percorso resta dentro la sovrapposizione vera.
      */
+    /**
+     * Quanto è nitida ogni cella della griglia ridotta: il contrasto locale, addolcito.
+     *
+     * Una zona a fuoco ha dettagli fitti — la luminanza salta da un pixel all'altro; una
+     * sfocata è liscia. Non serve sapere quanto sia sfocata, e nemmeno con che obiettivo:
+     * serve sapere **quale delle due foto lo è di più nello stesso punto**, e quella è una
+     * differenza che sopravvive anche a un quarto di risoluzione.
+     *
+     * Il valore grezzo è la somma dei salti verso destra e verso il basso. Da solo sarebbe
+     * rumoroso — un ramo isolato lo fa schizzare — quindi si stende su una finestra di tre per
+     * tre: quello che conta è la nitidezza della **zona**, non del pixel.
+     */
+    private fun sharpness(colour: IntArray, present: BooleanArray, gw: Int, gh: Int): FloatArray {
+        val raw = FloatArray(gw * gh)
+        for (gy in 0 until gh) {
+            for (gx in 0 until gw) {
+                val g = gy * gw + gx
+                if (!present[g]) continue
+                val here = luma(colour[g])
+                val right = if (gx + 1 < gw) luma(colour[g + 1]) else here
+                val below = if (gy + 1 < gh) luma(colour[g + gw]) else here
+                raw[g] = abs(here - right) + abs(here - below)
+            }
+        }
+        val smooth = FloatArray(gw * gh)
+        for (gy in 0 until gh) {
+            for (gx in 0 until gw) {
+                var sum = 0f
+                var count = 0
+                for (dy in -1..1) {
+                    val y = gy + dy
+                    if (y < 0 || y >= gh) continue
+                    for (dx in -1..1) {
+                        val x = gx + dx
+                        if (x < 0 || x >= gw) continue
+                        sum += raw[y * gw + x]
+                        count++
+                    }
+                }
+                smooth[gy * gw + gx] = if (count > 0) sum / count else 0f
+            }
+        }
+        return smooth
+    }
+
     private fun findSeam(
         difference: FloatArray,
         bothPresent: BooleanArray,
@@ -4932,6 +4980,9 @@ class PanoramaStitcher(
         oldWeight: FloatArray,
         gw: Int,
         gh: Int,
+        /** La nitidezza dei due contendenti, quando la si è misurata. */
+        focusNew: FloatArray? = null,
+        focusOld: FloatArray? = null,
     ): Seam? {
         var shared = 0
         for (present in bothPresent) if (present) shared++
@@ -4985,6 +5036,66 @@ class PanoramaStitcher(
             for (k in 0 until choices) {
                 val g = if (vertical) step * gw + k else k * gw + step
                 cost[step * choices + k] = if (bothPresent[g]) difference[g] else SEAM_FORBIDDEN
+            }
+        }
+
+        // La messa a fuoco, quando la si guarda.
+        //
+        // Fin qui il costo di un taglio era solo «quanto le due foto discordano **qui**»: una
+        // domanda sul punto, che non sa niente di cosa succede ai due lati. La nitidezza è una
+        // domanda sulla **zona** — chi si prende quel pezzo di sovrapposizione — e quindi non
+        // può essere un costo per cella: va contata come somma su tutto quello che il taglio
+        // lascia da una parte e dall'altra.
+        //
+        // Per fortuna quella somma si calcola in un colpo solo con le somme progressive: per
+        // ogni passo si scorre la banda una volta, e per ogni possibile posizione del taglio
+        // il conto è una sottrazione. Costa quanto quello che c'era prima.
+        //
+        // Il conto: dare una cella alla foto meno nitida costa la differenza di nitidezza.
+        // Dove le due sono uguali — un cielo liscio, un muro — non costa niente e il taglio
+        // resta libero di seguire il minimo disaccordo, che è la cosa giusta.
+        if (focusNew != null && focusOld != null) {
+            var meanDifference = 0f
+            var counted = 0
+            var meanPenalty = 0f
+            for (g in 0 until gw * gh) {
+                if (!bothPresent[g]) continue
+                meanDifference += difference[g]
+                meanPenalty += abs(focusNew[g] - focusOld[g])
+                counted++
+            }
+            if (counted > 0 && meanPenalty > 0f) {
+                meanDifference /= counted
+                meanPenalty /= counted
+                // Le due grandezze non hanno la stessa unità: una è colore, l'altra contrasto.
+                // Si mettono in scala sui rispettivi valori medi, così il peso è un numero
+                // puro e vale lo stesso su una panoramica scura e su una in pieno sole.
+                val scale = FOCUS_SEAM_STRENGTH * meanDifference / meanPenalty
+                // Due somme progressive per passo: quanto costa dare una cella al nuovo, e
+                // quanto costa darla alla tela. Il resto è una sottrazione per ogni possibile
+                // posizione del taglio.
+                val toNew = FloatArray(choices + 1)
+                val toOld = FloatArray(choices + 1)
+                for (step in 0 until steps) {
+                    for (j in 0 until choices) {
+                        val g = if (vertical) step * gw + j else j * gw + step
+                        val here = bothPresent[g]
+                        toNew[j + 1] = toNew[j] + if (here) max(0f, focusOld[g] - focusNew[g]) else 0f
+                        toOld[j + 1] = toOld[j] + if (here) max(0f, focusNew[g] - focusOld[g]) else 0f
+                    }
+                    val allToNew = toNew[choices]
+                    val allToOld = toOld[choices]
+                    for (k in 0 until choices) {
+                        // Un taglio in k spartisce la banda: da una parte il nuovo, dall'altra
+                        // quello che c'era. Il costo è la nitidezza che si butta via.
+                        val loss = if (newOnHighSide) {
+                            toOld[k] + (allToNew - toNew[k])
+                        } else {
+                            toNew[k + 1] + (allToOld - toOld[k + 1])
+                        }
+                        cost[step * choices + k] += scale * loss / choices
+                    }
+                }
             }
         }
 
@@ -6151,6 +6262,16 @@ class PanoramaStitcher(
          * chiude l'applicazione.
          */
         const val PREFETCH_HEADROOM = 3L
+
+        /**
+         * Quanto pesa la messa a fuoco nella scelta del taglio, rispetto al disaccordo.
+         *
+         * Uno: le due cose contano uguale, dopo che ognuna è stata messa in scala sulla
+         * propria media. Più alto, il taglio andrebbe a cercare la nitidezza anche a costo di
+         * passare dove le foto discordano — e una giunzione visibile su una zona nitida è
+         * peggio di una zona un po' molle senza giunzione.
+         */
+        const val FOCUS_SEAM_STRENGTH = 1f
 
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96

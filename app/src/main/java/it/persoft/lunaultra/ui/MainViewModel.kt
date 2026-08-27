@@ -2490,6 +2490,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             multiband = stitch.multiband,
             candidateScale = stitch.controlDensity.coerceIn(1, 4).toFloat(),
             seamMinimalDifference = stitch.seamMinimalDifference,
+            focusAwareSeam = stitch.focusAwareSeam,
             localWarp = stitch.localWarp,
             focalFreedom = stitch.focalFreedomPercent.coerceIn(0, 35) / 100f,
             warpStrength = stitch.warpStrength,

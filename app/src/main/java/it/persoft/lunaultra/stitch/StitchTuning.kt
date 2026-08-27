@@ -65,6 +65,22 @@ data class StitchTuning(
     val seamMinimalDifference: Boolean = true,
 
     /**
+     * Nel decidere dove tagliare, guardare anche **quale delle due foto è a fuoco** lì.
+     *
+     * Il taglio sul minimo disaccordo cerca dove le due immagini si somigliano; questo
+     * aggiunge una seconda domanda: dove non si somigliano, chi delle due ha ragione. Una
+     * zona sfocata e la stessa zona nitida *si somigliano poco*, quindi il taglio da solo le
+     * evita — ma quando è costretto a passarci, senza questa opzione può lasciare la parte
+     * alla foto sbagliata.
+     *
+     * La nitidezza si misura sulla griglia ridotta della fusione, come contrasto locale: una
+     * zona a fuoco ha dettagli fitti, una sfocata è liscia. Non serve sapere *quanto* sfocata:
+     * serve sapere quale delle due lo è di più, ed è una differenza che regge anche a un
+     * quarto della risoluzione.
+     */
+    val focusAwareSeam: Boolean = false,
+
+    /**
      * La deformazione locale che assorbe quello che la rotazione non può assorbire.
      *
      * Il gimbal non ruota attorno al centro ottico dell'obiettivo: fra un'inquadratura e

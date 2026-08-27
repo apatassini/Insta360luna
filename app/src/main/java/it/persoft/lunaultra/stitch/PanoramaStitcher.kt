@@ -145,6 +145,19 @@ class PanoramaStitcher(
      * `pittura` è il resto, cioè la gran parte della tela. Senza tenerli separati si può
      * solo tirare a indovinare quale dei tre stia costando — ed è già successo di sbagliare.
      */
+    /**
+     * Le fasi dell'allineamento, che adesso e` il pezzo piu` grosso di tutti.
+     *
+     * La cucitura e` scesa da quarantasette secondi a ventotto, e cosi` il primo posto e` passato
+     * all'allineamento senza che nessuno lo avesse mai guardato. «Allineamento 27 s» pero` non
+     * dice quale dei tre mestieri se li prende: riconoscere i dettagli, cercare col confronto a
+     * piramide quando i dettagli non bastano, o inseguire le migliaia di punti di controllo che
+     * rifiniscono la posa. Tre numeri, e la mossa successiva si sceglie invece di indovinarla.
+     */
+    private var featureMillis = 0L
+    private var searchMillis = 0L
+    private var pointMillis = 0L
+
     private var recogniseMillis = 0L
     private var blendMillis = 0L
     private var paintMillis = 0L
@@ -315,9 +328,11 @@ class PanoramaStitcher(
             val scaleNotes = mutableListOf<String>()
             var measuredPanScale: Float? = null
             var measuredTiltScale: Float? = null
+            var measuredScale: GimbalScale? = null
             if (!wideSearch && tuning.calibrateGimbal && shots.size >= 3) {
                 onProgress(0.06f, "Verifico gli angoli del gimbal")
                 val scale = measureGimbalScale(frames, placements, lens, tiltIsKnown = haveAttitude)
+                measuredScale = scale
                 if (scale == null) {
                     scaleNotes += "Gimbal: non sono riuscito a verificare gli angoli, li prendo per buoni"
                 } else {
@@ -655,6 +670,51 @@ class PanoramaStitcher(
                 fullResSampling, refinement.photometric, refinement.warps, composeDetail,
             )
             val composeSeconds = (System.currentTimeMillis() - composeStartedAt) / 1000f
+            // Di quale misura ci si puo` fidare abbastanza da riscriverci sopra il profilo.
+            //
+            // Una panoramica di quattro scatti ha misurato una sola giunzione e ha riscritto un
+            // profilo che veniva da nove: il giro dopo, le nove lo hanno riscritto indietro. Il
+            // profilo faceva avanti e indietro a ogni unione, e nessuna delle due misure era
+            // sbagliata — semplicemente il gimbal non e` lineare, e chi misura poco misura un
+            // tratto di corsa, non la corsa.
+            //
+            // Quindi il profilo si tocca solo con abbastanza materiale sotto: abbastanza scatti,
+            // e abbastanza giunzioni **su quell'asse**. Un asse che ha preso in prestito il
+            // fattore dell'altro non ha misurato niente, e non conta.
+            val enoughShots = shots.size >= CALIBRATION_MIN_SHOTS
+            val panPairs = measuredScale?.panPairs ?: 0
+            val tiltPairs = measuredScale?.tiltPairs ?: 0
+            val borrowed = measuredScale?.borrowed ?: false
+            val tiltLevels = shots.map { it.tiltDegrees }.distinct().size
+            val trustPan = enoughShots && !borrowed && panPairs >= CALIBRATION_MIN_JUNCTIONS
+            // Il verticale dalla gravita` non passa dalle giunzioni: quello che gli serve e`
+            // avere abbastanza altezze diverse per tirare una retta che significhi qualcosa.
+            val trustTilt = enoughShots && if (tiltScaleFromGravity != null) {
+                tiltLevels >= CALIBRATION_MIN_TILT_LEVELS
+            } else {
+                !borrowed && tiltPairs >= CALIBRATION_MIN_JUNCTIONS
+            }
+            if (measuredPanScale != null && !trustPan) {
+                scaleNotes += ("Taratura: la misura orizzontale (×%.3f) resta a questa panoramica " +
+                    "e non tocca il profilo — %s")
+                    .format(measuredPanScale, whyNotTrusted(enoughShots, shots.size, panPairs, borrowed))
+            }
+            if ((tiltScaleFromGravity ?: measuredTiltScale) != null && !trustTilt) {
+                scaleNotes += ("Taratura: la misura verticale (×%.3f) resta a questa panoramica " +
+                    "e non tocca il profilo — %s").format(
+                    tiltScaleFromGravity ?: measuredTiltScale,
+                    if (!enoughShots) {
+                        "servono almeno %d scatti, qui sono %d".format(CALIBRATION_MIN_SHOTS, shots.size)
+                    } else if (tiltScaleFromGravity != null) {
+                        "servono almeno %d altezze diverse, qui sono %d".format(
+                            CALIBRATION_MIN_TILT_LEVELS, tiltLevels,
+                        )
+                    } else {
+                        whyNotTrusted(true, shots.size, tiltPairs, borrowed)
+                    },
+                )
+            }
+
             val patchedRows = if (fillNadir) {
                 onProgress(0.97f, "Chiudo il buco sotto")
                 fillNadirHole(bitmap)
@@ -683,6 +743,12 @@ class PanoramaStitcher(
             )
             notes += memory.describe()
             notes += composeDetail
+            notes += ("Dentro l'allineamento: dettagli riconosciuti %.1f s · ricerca a piramide " +
+                "%.1f s · punti di controllo %.1f s").format(
+                featureMillis / 1000f,
+                searchMillis / 1000f,
+                pointMillis / 1000f,
+            )
             notes += ("Tempi: allineamento %.0f s · cucitura %.0f s — riconoscimento %.0f s · " +
                 "fusione %.0f s · pittura %.0f s · possessori %.0f s · apertura originali %.0f s").format(
                 refineSeconds,
@@ -766,10 +832,13 @@ class PanoramaStitcher(
                     worstCorrectionDegrees = refinement.worstCorrection,
                     nadirPatchRows = patchedRows,
                     verdict = verdict,
-                    gimbalScalePan = measuredPanScale,
+                    // Quello che esce di qui riscrive il profilo del gimbal, e un profilo si
+                    // riscrive solo su una misura che vale. La correzione di *questa*
+                    // panoramica e` gia` stata fatta sopra e resta: quella la si vuole sempre.
+                    gimbalScalePan = measuredPanScale.takeIf { trustPan },
                     // Sul verticale vince la gravità: quella misura non passa dalla lente né
                     // dai dettagli abbinati, quindi non può portarsi dietro i loro errori.
-                    gimbalScaleTilt = tiltScaleFromGravity ?: measuredTiltScale,
+                    gimbalScaleTilt = (tiltScaleFromGravity ?: measuredTiltScale).takeIf { trustTilt },
                 ),
             )
         }
@@ -907,6 +976,15 @@ class PanoramaStitcher(
                     ""
                 },
             )
+    }
+
+    /** Perché una misura non basta a riscrivere il profilo, detto a chi legge il verdetto. */
+    private fun whyNotTrusted(enoughShots: Boolean, shots: Int, pairs: Int, borrowed: Boolean): String = when {
+        !enoughShots -> "servono almeno %d scatti, qui sono %d".format(CALIBRATION_MIN_SHOTS, shots)
+        borrowed -> "quell'asse non è stato misurato, ha preso in prestito il fattore dell'altro"
+        else -> "servono almeno %d giunzioni su quell'asse, qui è %d".format(
+            CALIBRATION_MIN_JUNCTIONS, pairs,
+        )
     }
 
     private fun projectionFor(
@@ -1598,21 +1676,32 @@ class PanoramaStitcher(
             // anche il motivo per cui l'allineamento diventa più veloce invece che più lento.
             var byFeatures = 0
             val results = anchors.mapNotNull { anchor ->
-                registerByFeatures(
+                val featureStartedAt = System.currentTimeMillis()
+                val found = registerByFeatures(
                     moving = frames[index],
                     fixed = frames[anchor],
                     movingPlacement = placements[index],
                     fixedPlacement = placements[anchor],
                     lens = lens,
-                )?.also { byFeatures++ } ?: registerPair(
-                    moving = frames[index],
-                    fixed = frames[anchor],
-                    movingPlacement = placements[index],
-                    fixedPlacement = placements[anchor],
-                    lens = lens,
-                    wideSearch = wideSearch,
-                    attitudeKnown = attitudeKnown,
                 )
+                featureMillis += System.currentTimeMillis() - featureStartedAt
+                if (found != null) {
+                    byFeatures++
+                    found
+                } else {
+                    val searchStartedAt = System.currentTimeMillis()
+                    val fallback = registerPair(
+                        moving = frames[index],
+                        fixed = frames[anchor],
+                        movingPlacement = placements[index],
+                        fixedPlacement = placements[anchor],
+                        lens = lens,
+                        wideSearch = wideSearch,
+                        attitudeKnown = attitudeKnown,
+                    )
+                    searchMillis += System.currentTimeMillis() - searchStartedAt
+                    fallback
+                }
             }
             if (results.isEmpty() && postpone(
                     "la ricerca grossolana non ha trovato niente di affidabile: parte dagli " +
@@ -1697,6 +1786,7 @@ class PanoramaStitcher(
                 var found = 0
                 val all = mutableListOf<FloatArray>()
                 anchors.forEach { anchor ->
+                    val pointsStartedAt = System.currentTimeMillis()
                     val tally = controlPoints(
                         moving = frames[index],
                         fixed = frames[anchor],
@@ -1704,6 +1794,7 @@ class PanoramaStitcher(
                         fixedPlacement = placements[anchor],
                         lens = lens,
                     )
+                    pointMillis += System.currentTimeMillis() - pointsStartedAt
                     found += tally.candidates
                     // Ogni punto si porta dietro da quale vicino viene: la fotometria ha
                     // bisogno di sapere quale coppia di foto sta confrontando.
@@ -5694,6 +5785,22 @@ class PanoramaStitcher(
          * sempre, e la miniatura viene grande esattamente quanto si e` chiesto.
          */
         const val PREVIEW_DENSITY = 10_000f
+
+        /**
+         * Quanti scatti servono perché la misura possa riscrivere il profilo del gimbal.
+         *
+         * Sei. Una panoramica di quattro ha misurato una sola giunzione e ha riscritto un
+         * profilo che veniva da nove; il giro dopo, le nove lo hanno riscritto indietro.
+         * Nessuna delle due misure era sbagliata — il gimbal non è lineare, e chi misura poco
+         * misura un tratto di corsa, non la corsa.
+         */
+        const val CALIBRATION_MIN_SHOTS = 6
+
+        /** E quante giunzioni su quell'asse: una sola non dice se l'errore è costante. */
+        const val CALIBRATION_MIN_JUNCTIONS = 2
+
+        /** Quante altezze diverse servono alla gravità per tirare una retta che significhi. */
+        const val CALIBRATION_MIN_TILT_LEVELS = 3
 
         /**
          * Quanto possono discordare CPU e scheda sulla fusione, in livelli di colore.

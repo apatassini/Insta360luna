@@ -40,6 +40,11 @@ data class PanoJob(
     /** La proiezione voluta come ordinale, o -1 per lasciar decidere alla copertura. */
     val viewProjectionCode: Int = -1,
     val viewVerticalLimitDegrees: Float = 0f,
+    /** Il rettangolo del ritaglio, in frazioni della tela. Zero-zero-uno-uno = tela intera. */
+    val cropLeft: Float = 0f,
+    val cropTop: Float = 0f,
+    val cropRight: Float = 1f,
+    val cropBottom: Float = 1f,
     /** Vero solo quando qualcuno ha davvero guardato e salvato: zero non basta a dirlo. */
     val viewChosen: Boolean = false,
 ) {
@@ -54,6 +59,10 @@ data class PanoJob(
                 rollDegrees = viewRollDegrees,
                 projection = StitchProjection.entries.getOrNull(viewProjectionCode),
                 verticalLimitDegrees = viewVerticalLimitDegrees,
+                cropLeft = cropLeft,
+                cropTop = cropTop,
+                cropRight = cropRight,
+                cropBottom = cropBottom,
             )
         }
 
@@ -64,6 +73,10 @@ data class PanoJob(
         viewRollDegrees = view.rollDegrees,
         viewProjectionCode = view.projection?.ordinal ?: -1,
         viewVerticalLimitDegrees = view.verticalLimitDegrees,
+        cropLeft = view.cropLeft,
+        cropTop = view.cropTop,
+        cropRight = view.cropRight,
+        cropBottom = view.cropBottom,
         viewChosen = true,
     )
 }

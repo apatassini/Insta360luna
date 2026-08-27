@@ -100,7 +100,7 @@ alla foto.**
 ├───────────────────────────────┤
 │  rollio   ──────●──────       │  ← subito sotto la foto
 │  [auto] [sfera] [cil] [merc]  │  ← tutte e quattro le proiezioni, con icona
-│  [tutta] [55°] [65°] [75°]    │  ← fin dove arriva la tela
+│  [Ritaglia] [tutta] [55°] …   │  ← il ritaglio, e fin dove arriva la tela
 │  188° × 142° · 74 px/grado    │
 │  [Com'era] [Decidi tu] [Salva] [Cuci] │
 └───────────────────────────────┘
@@ -123,6 +123,17 @@ produce lo scatto.
 **Il tocco** porta il mirino dove sta il dito, ma solo se il dito è **dentro l'immagine
 disegnata** (non nelle bande nere ai lati) e non oltre **40° in orizzontale, 25° in verticale**:
 un tocco è un'indicazione, non un salto.
+
+**Il ritaglio** si accende con la sua pastiglia, e finché è acceso il dito fa un altro
+mestiere: prende l'angolo più vicino, o sposta tutto il rettangolo se è caduto dentro. Il punto
+di fuga non si tocca — una matita e una gomma non sono lo stesso oggetto. Fuori dal rettangolo
+l'immagine si scurisce, perché una scelta si fa vedendo cosa si butta, non cosa si tiene. Il
+rettangolo vive in **frazioni della tela**, non in pixel: l'anteprima è dieci volte più piccola
+della panoramica vera, e le frazioni valgono per tutte e due.
+
+Nella cucitura il ritaglio a mano si applica **prima** di quello automatico del nero ai bordi:
+chi ha disegnato il rettangolo ha già deciso cosa tenere, e se dentro resta ancora del nero
+toglierlo è un favore, non una seconda opinione.
 
 Le quattro proiezioni hanno un'icona disegnata a mano — arco con punto (automatica), globo
 (sferica), cilindro (cilindrica), griglia (Mercatore) — perché quattro parole in fila su uno

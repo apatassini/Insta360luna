@@ -1519,6 +1519,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         repaintPointOfView(immediate = true)
     }
 
+    /**
+     * Il rettangolo del ritaglio, in frazioni della tela.
+     *
+     * Non fa ridisegnare niente: il ritaglio non cambia la panoramica, cambia quanta se ne
+     * tiene. L'anteprima resta quella, e il rettangolo ci sta disegnato sopra — così si vede
+     * cosa si sta buttando via, che è l'unica cosa che conta mentre lo si tira.
+     */
+    fun setPointOfViewCrop(left: Float, top: Float, right: Float, bottom: Float) {
+        _pointOfView.value = _pointOfView.value.copy(
+            cropLeft = left.coerceIn(0f, 1f),
+            cropTop = top.coerceIn(0f, 1f),
+            cropRight = right.coerceIn(0f, 1f),
+            cropBottom = bottom.coerceIn(0f, 1f),
+        )
+    }
+
+    /** Via il ritaglio: si torna alla tela intera. */
+    fun clearPointOfViewCrop() {
+        _pointOfView.value = _pointOfView.value.copy(
+            cropLeft = 0f,
+            cropTop = 0f,
+            cropRight = 1f,
+            cropBottom = 1f,
+        )
+    }
+
     /** Torna al punto di vista che la cucitura avrebbe scelto da sola. */
     fun resetPointOfView() {
         _pointOfView.value = pointOfViewStart ?: pointOfViewPainter?.suggested ?: PanoramaView()

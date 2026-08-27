@@ -827,9 +827,32 @@ data class PanoramaView(
     val projection: StitchProjection? = null,
     /** Fin dove sale la tela, in gradi dall'orizzonte. Zero = nessun limite. */
     val verticalLimitDegrees: Float = 0f,
+    /**
+     * Il ritaglio finale, in frazioni della tela: sinistra, alto, destra, basso.
+     *
+     * Zero-zero-uno-uno è la tela intera, ed è il valore di chi non ha ritagliato niente. Sono
+     * frazioni e non pixel perché la tela vera è grande dieci volte l'anteprima su cui il
+     * rettangolo è stato disegnato: le frazioni valgono per tutte e due, i pixel no.
+     *
+     * Il ritaglio dell'utente si applica **prima** di quello automatico del nero ai bordi. Chi
+     * ha disegnato il rettangolo ha già deciso cosa tenere; se dentro resta ancora del nero,
+     * toglierlo è un favore, non una seconda opinione.
+     */
+    val cropLeft: Float = 0f,
+    val cropTop: Float = 0f,
+    val cropRight: Float = 1f,
+    val cropBottom: Float = 1f,
 ) {
     val turned: Boolean
         get() = panDegrees != 0f || tiltDegrees != 0f || rollDegrees != 0f
+
+    /** Vero quando il rettangolo tiene meno di tutta la tela. */
+    val cropped: Boolean
+        get() = cropLeft > 0.001f || cropTop > 0.001f || cropRight < 0.999f || cropBottom < 0.999f
+
+    /** Che parte della tela resta: serve a dire in anticipo quanto verrà grande. */
+    val cropShare: Float
+        get() = ((cropRight - cropLeft) * (cropBottom - cropTop)).coerceIn(0f, 1f)
 }
 
 /**

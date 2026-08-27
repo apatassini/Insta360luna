@@ -603,6 +603,9 @@ class PanoramaStitcher(
             // ancora stata dimensionata, e la sua forma dipende proprio da quello che si sta per
             // scegliere. Un passo prima non ci sarebbe niente da vedere, un passo dopo sarebbe
             // troppo tardi. Le copie di lavoro sono ancora aperte, ed è l'anteprima a servirsene.
+            // Il punto di vista che vale davvero: quello passato dal lavoro, o quello scelto
+            // adesso nell'anteprima. Serve piu` avanti, perche` porta anche il ritaglio.
+            var chosenView: PanoramaView? = view
             if (view != null) {
                 applyPointOfView(view, levelNotes) { placements = it(placements) }
             } else if (onPreview != null) {
@@ -633,6 +636,7 @@ class PanoramaStitcher(
                         throw PreviewStopped(answer.view)
                     }
                     is AfterPreview.Stitch -> answer.view?.let {
+                        chosenView = it
                         applyPointOfView(it, levelNotes) { turn -> placements = turn(placements) }
                     }
                 }
@@ -791,6 +795,24 @@ class PanoramaStitcher(
                     gpuMergeMillis / 1000f,
                     gpuUploadMillis / 1000f,
                 )
+            }
+            // Il ritaglio disegnato a mano, prima di quello automatico.
+            //
+            // Chi ha tirato il rettangolo sull'anteprima ha già deciso cosa tenere, e lo ha
+            // deciso guardando: qui non c'è niente da interpretare, solo da tagliare. Le
+            // frazioni valgono per la tela vera come valevano per l'anteprima, che è dieci
+            // volte più piccola — ed è il motivo per cui sono frazioni e non pixel.
+            chosenView?.takeIf { it.cropped }?.let { crop ->
+                onProgress(0.97f, "Ritaglio come hai chiesto")
+                val left = (crop.cropLeft * bitmap.width).toInt().coerceIn(0, bitmap.width - 2)
+                val top = (crop.cropTop * bitmap.height).toInt().coerceIn(0, bitmap.height - 2)
+                val right = (crop.cropRight * bitmap.width).toInt().coerceIn(left + 2, bitmap.width)
+                val bottom = (crop.cropBottom * bitmap.height).toInt().coerceIn(top + 2, bitmap.height)
+                val before = "${bitmap.width}×${bitmap.height}"
+                val cut = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+                if (cut !== bitmap) bitmap.recycle()
+                bitmap = cut
+                notes += "Ritaglio a mano: da $before a ${bitmap.width}×${bitmap.height}"
             }
             if (!fillNadir) {
                 onProgress(0.98f, "Ritaglio il nero ai bordi")

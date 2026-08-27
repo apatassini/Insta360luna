@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -37,6 +38,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -44,6 +47,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import it.persoft.lunaultra.stitch.PanoramaView
 import it.persoft.lunaultra.stitch.StitchProjection
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.theme.Luna
@@ -89,6 +93,12 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
     // di una virgola — quello che cambia e` quanto da vicino lo si guarda.
     var zoom by remember { mutableStateOf(1f) }
     var shift by remember { mutableStateOf(Offset.Zero) }
+
+    // Il ritaglio si accende: finché è spento il dito sceglie il punto di fuga, acceso tira
+    // il rettangolo. Due mestieri sullo stesso dito non possono convivere senza un
+    // interruttore — è la stessa ragione per cui una matita e una gomma non sono lo stesso
+    // oggetto.
+    var cropping by remember { mutableStateOf(false) }
 
     /**
      * L'ultima anteprima disegnata, letta **dentro** il gesto invece che dall'esterno.
@@ -176,7 +186,37 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                                     )
                                 }
 
-                                finger = down.position
+                                // Col ritaglio acceso il dito fa un altro mestiere: prende
+                                // l'angolo più vicino, o sposta tutto il rettangolo se il
+                                // dito è caduto dentro. Il punto di fuga non si tocca.
+                                if (cropping) {
+                                    val rect = cropRect(view, left, top, drawnWidth, drawnHeight)
+                                    val start = unzoom(down.position)
+                                    // Il raggio di presa non scala con l'ingrandimento: un
+                                    // pollice resta un pollice, e ingrandendo la maniglia
+                                    // deve restare della stessa taglia sotto il dito.
+                                    val grabbed = grabOf(start, rect, GRAB_DP.dp.toPx() / zoom)
+                                    var current = rect
+                                    var lastAt = start
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                        if (!change.pressed) break
+                                        change.consume()
+                                        val now = unzoom(change.position)
+                                        current = dragCrop(current, grabbed, now - lastAt, left, top, drawnWidth, drawnHeight)
+                                        lastAt = now
+                                        viewModel.setPointOfViewCrop(
+                                            left = (current.left - left) / drawnWidth,
+                                            top = (current.top - top) / drawnHeight,
+                                            right = (current.right - left) / drawnWidth,
+                                            bottom = (current.bottom - top) / drawnHeight,
+                                        )
+                                    }
+                                    return@awaitEachGesture
+                                }
+
+                                finger = unzoom(down.position)
                                 viewModel.beginPointOfViewDrag()
                                 var last = down.position
                                 var travelled = 0f
@@ -229,7 +269,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                                     val step = change.position - last
                                     last = change.position
                                     travelled += step.getDistance()
-                                    finger = change.position
+                                    finger = unzoom(change.position)
                                     if (travelled > slop) {
                                         change.consume()
                                         // Il dito trascina l'immagine, non il punto di vista:
@@ -271,15 +311,26 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                 )
                 // Il mirino: il punto di fuga è il centro della tela, e finché non si vede si
                 // sta scegliendo alla cieca. Il cerchietto è il dito, che porta lì il suo punto.
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    // Il mirino sta sul punto di fuga, non in mezzo allo schermo: ingrandendo
-                    // e spostando, il centro della panoramica finisce da un'altra parte e un
-                    // mirino fermo al centro indicherebbe un punto che non e` quello.
-                    val cx = size.width / 2f + shift.x
-                    val cy = size.height / 2f + shift.y
-                    val arm = 16.dp.toPx()
-                    val ring = 7.dp.toPx()
-                    val stroke = 1.5.dp.toPx()
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        // Lo stesso ingrandimento dell'immagine, se no il mirino e il
+                        // rettangolo restano fermi mentre la foto sotto si sposta — e
+                        // indicherebbero un punto che non e` quello.
+                        .graphicsLayer(
+                            scaleX = zoom,
+                            scaleY = zoom,
+                            translationX = shift.x,
+                            translationY = shift.y,
+                        ),
+                ) {
+                    val cx = size.width / 2f
+                    val cy = size.height / 2f
+                    // I segni restano della stessa taglia sullo schermo: ingranditi insieme
+                    // all'immagine diventerebbero pennellate.
+                    val arm = 16.dp.toPx() / zoom
+                    val ring = 7.dp.toPx() / zoom
+                    val stroke = 1.5.dp.toPx() / zoom
                     val ink = Luna.Ok
                     drawLine(ink, Offset(cx - arm, cy), Offset(cx - ring, cy), strokeWidth = stroke)
                     drawLine(ink, Offset(cx + ring, cy), Offset(cx + arm, cy), strokeWidth = stroke)
@@ -289,10 +340,69 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                     finger?.let {
                         drawCircle(
                             Color.White,
-                            radius = 18.dp.toPx(),
+                            radius = 18.dp.toPx() / zoom,
                             center = it,
                             style = Stroke(stroke),
                         )
+                    }
+
+                    // Il rettangolo del ritaglio, con fuori l'ombra di quello che si butta.
+                    // Vederlo scuro è ciò che rende la scelta una scelta: un rettangolo
+                    // disegnato sopra un'immagine tutta uguale non dice cosa stai perdendo.
+                    if (view.cropped || cropping) {
+                        val painted = latest.value
+                        if (painted != null) {
+                            val fit = min(
+                                size.width / painted.bitmap.width,
+                                size.height / painted.bitmap.height,
+                            )
+                            val dw = painted.bitmap.width * fit
+                            val dh = painted.bitmap.height * fit
+                            val dl = (size.width - dw) / 2f
+                            val dt = (size.height - dh) / 2f
+                            val rect = Rect(
+                                dl + view.cropLeft * dw,
+                                dt + view.cropTop * dh,
+                                dl + view.cropRight * dw,
+                                dt + view.cropBottom * dh,
+                            )
+                            // Le quattro fasce buttate via, in trasparenza.
+                            val shade = Color.Black.copy(alpha = 0.55f)
+                            drawRect(shade, Offset(dl, dt), Size(dw, rect.top - dt))
+                            drawRect(shade, Offset(dl, rect.bottom), Size(dw, dt + dh - rect.bottom))
+                            drawRect(shade, Offset(dl, rect.top), Size(rect.left - dl, rect.height))
+                            drawRect(shade, Offset(rect.right, rect.top), Size(dl + dw - rect.right, rect.height))
+                            val edge = if (cropping) Luna.Ok else Luna.OnSurfaceDim
+                            drawRect(
+                                edge,
+                                topLeft = Offset(rect.left, rect.top),
+                                size = Size(rect.width, rect.height),
+                                style = Stroke(stroke * 1.5f),
+                            )
+                            if (cropping) {
+                                // Gli angoli si vedono, se no non si sa dove mettere il dito.
+                                val armLength = 22.dp.toPx() / zoom
+                                listOf(
+                                    Offset(rect.left, rect.top) to Offset(1f, 1f),
+                                    Offset(rect.right, rect.top) to Offset(-1f, 1f),
+                                    Offset(rect.left, rect.bottom) to Offset(1f, -1f),
+                                    Offset(rect.right, rect.bottom) to Offset(-1f, -1f),
+                                ).forEach { (corner, way) ->
+                                    drawLine(
+                                        edge,
+                                        corner,
+                                        Offset(corner.x + way.x * armLength, corner.y),
+                                        strokeWidth = stroke * 3f,
+                                    )
+                                    drawLine(
+                                        edge,
+                                        corner,
+                                        Offset(corner.x, corner.y + way.y * armLength),
+                                        strokeWidth = stroke * 3f,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -346,7 +456,29 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("Tela", style = MaterialTheme.typography.labelMedium, color = Luna.OnSurfaceDim)
+            FilterChip(
+                selected = cropping,
+                onClick = {
+                    cropping = !cropping
+                    // Accendendolo la prima volta il rettangolo parte da tutta la tela: si
+                    // stringe da lì, che è il verso in cui si ragiona guardando una foto.
+                    if (cropping && !view.cropped) viewModel.setPointOfViewCrop(0f, 0f, 1f, 1f)
+                },
+                label = {
+                    Text(
+                        "Ritaglia",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center,
+                    )
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Luna.Ok.copy(alpha = 0.20f),
+                    selectedLabelColor = Luna.Ok,
+                ),
+                modifier = Modifier.weight(1.2f),
+            )
             for (limit in intArrayOf(0, 55, 65, 75)) {
                 FilterChip(
                     selected = view.verticalLimitDegrees.roundToInt() == limit,
@@ -370,6 +502,12 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             buildString {
                 append("Tocca per centrare · pan %+.0f° · su/giù %+.0f°".format(view.panDegrees, view.tiltDegrees))
                 if (zoom > 1.01f) append(" · ingrandita ×%.1f".format(zoom))
+                if (view.cropped) {
+                    append(" · ritaglio %.0f%% × %.0f%%".format(
+                        (view.cropRight - view.cropLeft) * 100,
+                        (view.cropBottom - view.cropTop) * 100,
+                    ))
+                }
                 shape?.let {
                     append(" · %s fino a %.0f° · cima ×%.1f↔ ×%.1f↕".format(
                         shortName(it.projection), it.reachDegrees, it.horizontalStretch, it.verticalStretch,
@@ -552,3 +690,93 @@ private fun shortName(projection: StitchProjection): String = when (projection) 
     StitchProjection.CYLINDRICAL -> "Cilindrica"
     StitchProjection.MERCATOR -> "Mercatore"
 }
+
+/** Quale parte del rettangolo ha preso il dito. */
+private enum class Grab { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT, INSIDE, NONE }
+
+/** Quanto e` largo il bersaglio di un angolo, in dp: un polpastrello, non un pixel. */
+private const val GRAB_DP = 28
+
+/** Il rettangolo del ritaglio in pixel di schermo, dalle frazioni salvate. */
+private fun cropRect(view: PanoramaView, left: Float, top: Float, width: Float, height: Float) = Rect(
+    left + view.cropLeft * width,
+    top + view.cropTop * height,
+    left + view.cropRight * width,
+    top + view.cropBottom * height,
+)
+
+/**
+ * Cosa ha preso il dito: l'angolo più vicino, o tutto il rettangolo se è caduto dentro.
+ *
+ * Gli angoli vincono sul dentro anche quando il dito è dentro: un angolo è un bersaglio
+ * piccolo e chi lo cerca lo cerca apposta, mentre il dentro è grande e ci si finisce per caso.
+ */
+private fun grabOf(point: Offset, rect: Rect, radius: Float): Grab {
+    val corners = listOf(
+        Grab.TOP_LEFT to Offset(rect.left, rect.top),
+        Grab.TOP_RIGHT to Offset(rect.right, rect.top),
+        Grab.BOTTOM_LEFT to Offset(rect.left, rect.bottom),
+        Grab.BOTTOM_RIGHT to Offset(rect.right, rect.bottom),
+    )
+    val nearest = corners.minByOrNull { (_, corner) -> (point - corner).getDistance() }
+    if (nearest != null && (point - nearest.second).getDistance() <= radius) return nearest.first
+    return if (rect.contains(point)) Grab.INSIDE else Grab.NONE
+}
+
+/**
+ * Il rettangolo dopo che il dito si è mosso di [step], senza uscire dall'immagine.
+ *
+ * Spostandolo tutto intero il rettangolo si ferma al bordo invece di deformarsi: è la
+ * differenza fra spostare una cornice e stiracchiarla. Tirando un angolo, l'angolo opposto
+ * resta fermo — perché è quello che si vede fare a una cornice, e perché altrimenti il
+ * rettangolo scappa via mentre lo si stringe.
+ */
+private fun dragCrop(
+    rect: Rect,
+    grab: Grab,
+    step: Offset,
+    left: Float,
+    top: Float,
+    width: Float,
+    height: Float,
+): Rect {
+    val right = left + width
+    val bottom = top + height
+    val minSide = MIN_CROP_SHARE * min(width, height)
+    fun x(value: Float, low: Float, high: Float) = value.coerceIn(low, high)
+    return when (grab) {
+        Grab.INSIDE -> {
+            val dx = step.x.coerceIn(left - rect.left, right - rect.right)
+            val dy = step.y.coerceIn(top - rect.top, bottom - rect.bottom)
+            rect.translate(dx, dy)
+        }
+        Grab.TOP_LEFT -> Rect(
+            x(rect.left + step.x, left, rect.right - minSide),
+            x(rect.top + step.y, top, rect.bottom - minSide),
+            rect.right,
+            rect.bottom,
+        )
+        Grab.TOP_RIGHT -> Rect(
+            rect.left,
+            x(rect.top + step.y, top, rect.bottom - minSide),
+            x(rect.right + step.x, rect.left + minSide, right),
+            rect.bottom,
+        )
+        Grab.BOTTOM_LEFT -> Rect(
+            x(rect.left + step.x, left, rect.right - minSide),
+            rect.top,
+            rect.right,
+            x(rect.bottom + step.y, rect.top + minSide, bottom),
+        )
+        Grab.BOTTOM_RIGHT -> Rect(
+            rect.left,
+            rect.top,
+            x(rect.right + step.x, rect.left + minSide, right),
+            x(rect.bottom + step.y, rect.top + minSide, bottom),
+        )
+        Grab.NONE -> rect
+    }
+}
+
+/** Sotto un decimo del lato il rettangolo non si stringe piu`: sarebbe un ritaglio per sbaglio. */
+private const val MIN_CROP_SHARE = 0.1f

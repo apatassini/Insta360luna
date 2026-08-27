@@ -21,6 +21,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -427,11 +429,20 @@ fun UpdateNotice(
                 color = Color.White,
             )
 
-            is UpdateUiState.UpToDate -> Text(
-                "Sei sull'ultima build di ${state.branch}.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.White,
-            )
+            is UpdateUiState.UpToDate -> {
+                // «Sei aggiornato» è una buona notizia e dura un attimo: sta lì il tempo di
+                // leggerla e se ne va da sola. Un cartello che aspetta di essere chiuso ha
+                // senso quando c'è qualcosa da fare; qui non c'è niente da fare.
+                LaunchedEffect(state) {
+                    delay(UP_TO_DATE_LINGER_MS)
+                    onDismiss()
+                }
+                Text(
+                    "Sei sull'ultima build di ${state.branch}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+            }
 
             is UpdateUiState.Failed -> Text(
                 "${state.reason}. La camera si usa lo stesso: l'aggiornamento non blocca niente.",
@@ -441,9 +452,9 @@ fun UpdateNotice(
 
             UpdateUiState.Idle -> Unit
         }
-        if (state is UpdateUiState.UpToDate || state is UpdateUiState.Failed ||
-            state is UpdateUiState.ReadyToInstall
-        ) {
+        // Il tasto «Chiudi» resta solo dove c'è davvero qualcosa da decidere: l'installazione
+        // da confermare, o un errore da leggere con calma.
+        if (state is UpdateUiState.Failed || state is UpdateUiState.ReadyToInstall) {
             Text(
                 text = "Chiudi",
                 style = MaterialTheme.typography.labelMedium,
@@ -630,3 +641,6 @@ private fun shortDuration(millis: Long): String {
     val seconds = (millis / 1000).coerceAtLeast(0)
     return if (seconds < 60) "$seconds s" else "${seconds / 60} min ${seconds % 60} s"
 }
+
+/** Quanto resta il cartello «sei aggiornato»: il tempo di leggerlo, non di piu`. */
+private const val UP_TO_DATE_LINGER_MS = 2_000L

@@ -1,5 +1,6 @@
 package it.persoft.lunaultra.ui.viewfinder
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -121,9 +122,15 @@ fun PanoJobsSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // La faccia del lavoro. Un elenco di righe tutte uguali — «9 scatti · 82° di
-                // campo» — non dice quale sia quale; la scena si`, e a colpo d'occhio.
-                JobFace(path = face(job))
+                // La faccia del lavoro, e la porta per entrarci. Un elenco di righe tutte
+                // uguali — «9 scatti · 82° di campo» — non dice quale sia quale; la scena si`,
+                // e a colpo d'occhio. E toccare l'immagine per aprirla e` il gesto che uno fa
+                // da solo: l'iconcina accanto diceva la stessa cosa due volte.
+                JobFace(
+                    path = face(job),
+                    chosen = job.viewChosen,
+                    modifier = Modifier.clickable(enabled = !busy) { onPrepare(job) },
+                )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = buildString {
@@ -143,15 +150,6 @@ fun PanoJobsSheet(
                         color = if (job.viewChosen) Luna.Ok else Luna.OnSurfaceDim,
                     )
                 }
-                HudIconButton(
-                    icon = LunaIcons.Panorama,
-                    contentDescription = "Guarda e scegli il punto di vista",
-                    onClick = { onPrepare(job) },
-                    enabled = !busy,
-                    size = 40.dp,
-                    selected = job.viewChosen,
-                    activeColor = Luna.Ok,
-                )
                 HudIconButton(
                     icon = LunaIcons.Play,
                     contentDescription = "Unisci adesso",
@@ -227,7 +225,7 @@ private fun jobDateLabel(timeMs: Long): String =
  * l'originale. Un elenco di miniature deve costare quanto un elenco.
  */
 @Composable
-private fun JobFace(path: String?, modifier: Modifier = Modifier) {
+private fun JobFace(path: String?, chosen: Boolean, modifier: Modifier = Modifier) {
     val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path) {
         value = if (path == null) {
             null
@@ -251,7 +249,14 @@ private fun JobFace(path: String?, modifier: Modifier = Modifier) {
         modifier = modifier
             .size(FACE_SIZE)
             .clip(RoundedCornerShape(8.dp))
-            .background(Luna.Surface),
+            .background(Luna.Surface)
+            // Il bordo verde dice che il punto di vista e` gia` scelto: la stessa cosa che
+            // diceva l'iconcina accesa, detta sull'immagine a cui si riferisce.
+            .border(
+                width = if (chosen) 2.dp else 0.dp,
+                color = if (chosen) Luna.Ok else Color.Transparent,
+                shape = RoundedCornerShape(8.dp),
+            ),
         contentAlignment = Alignment.Center,
     ) {
         bitmap?.let {

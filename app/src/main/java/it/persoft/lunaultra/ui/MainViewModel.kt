@@ -2051,6 +2051,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * anche tutti i job insieme, anche stasera. Se invece si preme «Cuci così», la cucitura
      * parte subito da dov'era: l'allineamento è già fatto e non si rifà.
      */
+    /**
+     * Il lato lungo con cui si allinea per l'anteprima: un terzo di quello della cucitura.
+     *
+     * Un decimo dei pixel, e gli angoli restano angoli. La precisione che si perde e` quella
+     * dell'ultimo decimo di grado, che serve a far combaciare le giunzioni — non a decidere
+     * dove mettere il centro della panoramica.
+     */
+    private val PREPARE_WORKING_LONG_SIDE = 1_100
+
     /** La cartella degli appunti: i file privati dell'app, non la galleria. */
     private val prepRoot: java.io.File get() = getApplication<Application>().filesDir
 
@@ -2110,7 +2119,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     overlapPercent = sequence.value.panoramaOverlapPercent,
                     fillNadir = job.spherical,
                     shotAtMs = job.createdAtMs,
-                    tuning = stitchTuning(),
+                    // Una micro-panoramica, apposta. Qui non si sta cucendo niente: si sta
+                    // decidendo da dove guardare, e per quello un allineamento a un terzo del
+                    // lato basta e avanza — gli angoli sono angoli, non cambiano con la
+                    // risoluzione, e un decimo dei pixel vuol dire un decimo del tempo. La
+                    // cucitura vera rifara` l'allineamento come si deve, quando la si lancia.
+                    tuning = stitchTuning().copy(workingLongSide = PREPARE_WORKING_LONG_SIDE),
                     onPreview = ::choosePointOfView,
                     onProgress = { fraction, message ->
                         _stitchState.value = StitchUiState.Working(fraction, message)

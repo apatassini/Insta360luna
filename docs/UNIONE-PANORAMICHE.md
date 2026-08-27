@@ -79,9 +79,13 @@ py = H/2 − f · y/z        (y in su, py in giù)
 
 Un raggio con `z ≤ 0` è dietro la camera e non ha nessun pixel: va scartato, non specchiato.
 
-> **Nota misurata.** Il campo dichiarato è risultato corretto: su una panoramica reale la
-> stima dai punti di controllo ha dato 81,6° contro gli 81,7° dichiarati. Il sospetto che il
-> dato di catalogo fosse ottimistico era infondato, ed è stato chiuso da una misura.
+> **Nota misurata, e poi corretta.** La stima dai punti di controllo dava 81,6° contro gli
+> 81,7° dichiarati, e sembrava chiudere il caso. Non lo chiudeva: **focale e scala del gimbal
+> sono degeneri**, una lente più stretta e un gimbal più veloce danno la stessa
+> sovrapposizione, quindi quella misura confermava soltanto sé stessa. Contro la gravità — che
+> è un righello esterno — il campo vero è **77,7°**: la camera ritaglia il 7% del fotogramma, e
+> il gimbal si muove ×1,235 di quanto gli si chiede. Vedi
+> [CAMERA-E-OTTICA.md §3](CAMERA-E-OTTICA.md#3-lottica-quello-che-dice-il-catalogo-e-quello-che-fa-la-lente).
 
 ### 2.2 Dove sta un fotogramma
 

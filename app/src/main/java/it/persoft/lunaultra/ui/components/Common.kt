@@ -7,6 +7,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,6 +33,11 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import it.persoft.lunaultra.ui.theme.Luna
+import it.persoft.lunaultra.ui.theme.LunaIcons
 
 /**
  * Riquadro di una sezione nei pannelli a schermo intero.
@@ -101,6 +108,108 @@ fun SectionCard(
                 trailing?.invoke()
             }
             content()
+        }
+    }
+}
+
+/**
+ * Sezione che si apre e si chiude, con una riga di riassunto quando e` chiusa.
+ *
+ * Un pannello di impostazioni lungo non si legge: si scorre, e scorrendo non si trova niente.
+ * Chiuse, dieci sezioni stanno in uno schermo e ognuna dice in una riga come sta messa —
+ * «connessa · Luna Ultra», «Cilindrica · GPU accesa» — cosi` chi cerca una manopola sa gia`
+ * dove aprirla, e chi voleva solo controllare uno stato non apre niente.
+ *
+ * Lo stato di apertura sopravvive alla rotazione ma non alla chiusura del pannello: rientrando
+ * si ritrova tutto chiuso, che e` la posizione da cui si legge meglio.
+ */
+@Composable
+fun CollapsibleSection(
+    title: String,
+    modifier: Modifier = Modifier,
+    summary: String? = null,
+    icon: ImageVector? = null,
+    accent: Color = Luna.Accent,
+    /** Quando diventa vero la sezione si apre da sola, e resta aperta anche dopo. */
+    openWhen: Boolean = false,
+    trailing: @Composable (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    var open by rememberSaveable(title) { mutableStateOf(openWhen) }
+    // Aprire solo alla prima composizione non basterebbe: la calibrazione parte mentre il
+    // pannello e` gia` sullo schermo. E chiudere quando ridiventa falso sarebbe peggio —
+    // chiuderebbe il gruppo proprio quando la misura finisce e c'e` il risultato da leggere.
+    LaunchedEffect(openWhen) { if (openWhen) open = true }
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 5.dp)
+            .border(1.dp, Luna.GlassBorder, RoundedCornerShape(20.dp)),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Luna.Surface),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                // Tutta la riga apre e chiude, non solo la freccetta: su un telefono un
+                // bersaglio da 24 dp si manca, una riga intera no.
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { open = !open },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (icon != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .background(accent.copy(alpha = 0.16f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                tint = accent,
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = title, style = MaterialTheme.typography.titleMedium)
+                        if (!open && !summary.isNullOrBlank()) {
+                            Text(
+                                text = summary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Luna.OnSurfaceDim,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    // Il distintivo si vede anche a sezione chiusa: «in corso» e «mai fatta»
+                    // sono esattamente le due cose che si vogliono sapere senza aprire niente.
+                    trailing?.invoke()
+                    Icon(
+                        imageVector = if (open) LunaIcons.Up else LunaIcons.Down,
+                        contentDescription = if (open) "Chiudi $title" else "Apri $title",
+                        tint = Luna.OnSurfaceDim,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+            if (open) content()
         }
     }
 }

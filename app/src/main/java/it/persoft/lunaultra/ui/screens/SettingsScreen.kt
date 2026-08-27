@@ -46,7 +46,7 @@ import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.NumberField
-import it.persoft.lunaultra.ui.components.SectionCard
+import it.persoft.lunaultra.ui.components.CollapsibleSection
 import it.persoft.lunaultra.ui.components.SliderRow
 import it.persoft.lunaultra.ui.components.StatusChip
 import it.persoft.lunaultra.ui.components.ToggleRow
@@ -88,13 +88,103 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
         uri?.let { viewModel.importCalibration(context, it) }
     }
 
+    // Le righe di riassunto: a sezione chiusa sono l'unica cosa che si legge, quindi devono
+    // dire lo stato, non ripetere il titolo.
+    val cameraSummary = if (connected) {
+        listOfNotNull(
+            "connessa",
+            status.model,
+            status.batteryPercent?.let { "$it%" },
+        ).joinToString(" · ")
+    } else {
+        connection.italianLabel().lowercase()
+    }
+    val previewSummary = if (preview.active) {
+        "accesa · ${preview.source.name.lowercase()}"
+    } else {
+        "spenta"
+    }
+    val panoAspectLabel = if (settings.panoAspect == LunaProtocolCodes.PanoAspect.SPHERE_360) {
+        "sferica 360°"
+    } else {
+        "panorama 2:1"
+    }
+    val projectionName = when (settings.stitch.projectionCode) {
+        1 -> "Cilindrica"
+        2 -> "Mercatore"
+        else -> "Equirettangolare"
+    }
+    val limitLabel = if (settings.stitch.verticalLimitDegrees < 0.5f) {
+        "tela intera"
+    } else {
+        "fino a %.0f°".format(settings.stitch.verticalLimitDegrees)
+    }
+    val gpuOn = listOf(
+        settings.stitch.gpuRecognise to "ricognizione",
+        settings.stitch.gpuPaint to "pittura",
+        settings.stitch.gpuBlend to "fusione",
+    ).filter { it.first }.joinToString(" · ") { it.second }
+    val recipeLabel = viewModel.stitchRecipeLetter(settings.stitch) ?: "personalizzata"
+    val calibrationSummary = when {
+        calibrationState.running -> "misura in corso"
+        calibration.isValid -> "del ${formatCalibrationDate(calibration.calibratedAtMs)}"
+        else -> "mai fatta: gli spostamenti a coordinate sono stime"
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(vertical = 8.dp),
     ) {
-        SectionCard(title = "Camera", icon = LunaIcons.Connected, accent = Luna.Ok) {
+        CollapsibleSection(
+            title = "Camera",
+            summary = cameraSummary,
+            icon = if (connected) LunaIcons.Connected else LunaIcons.Disconnected,
+            accent = if (connected) Luna.Ok else Luna.OnSurfaceDim,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { if (connected) viewModel.disconnect() else viewModel.connect() },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        ButtonLabel(
+                            icon = if (connected) LunaIcons.Disconnected else LunaIcons.Connected,
+                            label = if (connected) "Disconnetti" else "Connetti",
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = viewModel::refreshStatus,
+                        enabled = connected,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        ButtonLabel(LunaIcons.Refresh, "Aggiorna")
+                    }
+                }
+                LabeledValue(
+                    label = "Stato",
+                    value = connection.italianLabel(),
+                    valueColor = if (connected) Luna.Ok else Luna.OnSurfaceDim,
+                )
+                LabeledValue("Batteria", status.batteryPercent?.let { "$it%" } ?: "—")
+                LabeledValue("Spazio libero", status.freeSpaceBytes?.let(::formatBytes) ?: "—")
+                LabeledValue("Modello", status.model ?: "—")
+                LabeledValue("Seriale", status.serial ?: "—")
+                LabeledValue("Firmware", status.firmware ?: "—")
+            }
+        }
+
+        // Indirizzo, porta e password si toccano una volta nella vita dell'installazione, e
+        // finche` la camera risponde non vogliono nemmeno essere lette: stanno in un gruppo
+        // loro, chiuso, invece di occupare mezzo pannello sopra tutto il resto.
+        CollapsibleSection(
+            title = "Rete e password",
+            summary = "${settings.host}:${settings.port} · " +
+                if (settings.cameraWifiPassword.isBlank()) "password non salvata" else "password salvata",
+            icon = LunaIcons.Settings,
+            accent = Luna.Ok,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     NumberField(
@@ -141,38 +231,15 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = { if (connected) viewModel.disconnect() else viewModel.connect() },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        ButtonLabel(
-                            icon = if (connected) LunaIcons.Disconnected else LunaIcons.Connected,
-                            label = if (connected) "Disconnetti" else "Connetti",
-                        )
-                    }
-                    OutlinedButton(
-                        onClick = viewModel::refreshStatus,
-                        enabled = connected,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        ButtonLabel(LunaIcons.Refresh, "Aggiorna")
-                    }
-                }
-                LabeledValue(
-                    label = "Stato",
-                    value = connection.italianLabel(),
-                    valueColor = if (connected) Luna.Ok else Luna.OnSurfaceDim,
-                )
-                LabeledValue("Batteria", status.batteryPercent?.let { "$it%" } ?: "—")
-                LabeledValue("Spazio libero", status.freeSpaceBytes?.let(::formatBytes) ?: "—")
-                LabeledValue("Modello", status.model ?: "—")
-                LabeledValue("Seriale", status.serial ?: "—")
-                LabeledValue("Firmware", status.firmware ?: "—")
             }
         }
 
-        SectionCard(title = "Anteprima", icon = LunaIcons.Video, accent = Luna.Movie) {
+        CollapsibleSection(
+            title = "Anteprima",
+            summary = previewSummary,
+            icon = LunaIcons.Video,
+            accent = Luna.Movie,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 LabeledValue("Sorgente", preview.source.name.lowercase())
                 LabeledValue("Fotogrammi decodificati", preview.framesDecoded.toString())
@@ -197,7 +264,12 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Panorama della camera", icon = LunaIcons.Panorama, accent = Luna.Pano) {
+        CollapsibleSection(
+            title = "Panorama della camera",
+            summary = panoAspectLabel,
+            icon = LunaIcons.Panorama,
+            accent = Luna.Pano,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     listOf(
@@ -225,50 +297,21 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Unione foto", icon = LunaIcons.Jobs, accent = Luna.Pano) {
+        CollapsibleSection(
+            title = "Unione foto · Proiezione",
+            summary = "$projectionName · $limitLabel",
+            icon = LunaIcons.Panorama,
+            accent = Luna.Pano,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 ToggleRow(
-                    title = "Modalità test",
-                    subtitle = "3 foto a 1024 px, tutte le ricette in fila: in galleria arrivano " +
-                        "Panorama_TEST_A…F, una per ricetta, da confrontare fianco a fianco",
-                    checked = settings.stitch.testMode,
-                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(testMode = on) } },
-                    icon = LunaIcons.Diagnostics,
-                )
-                Hint(
-                    "Le ricette: A storica (solo piramide e punti, multibanda) · B storica + " +
-                        "fotometria · C rollio e focale senza fotometria · D completa attuale · " +
-                        "E completa con punti severi · F taglio netto, per vedere dove cadono le " +
-                        "giunzioni. Trovata la migliore, si spegne il test e si regola qui sotto.",
-                )
-                // La lettera scelta nel banco di prova, applicata all'unione vera: senza
-                // questo, la ricetta che aveva convinto restava chiusa nella modalità test.
-                val recipe = viewModel.stitchRecipeLetter(settings.stitch)
-                Text(
-                    text = "Ricetta: " + (recipe?.let { "$it — la stessa della prova $it" }
-                        ?: "personalizzata"),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (recipe != null) Luna.Pano else Luna.OnSurfaceDim,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                    listOf("A", "B", "C", "D", "E", "F").forEach { letter ->
-                        FilterChip(
-                            selected = recipe == letter,
-                            onClick = { viewModel.applyStitchRecipe(letter) },
-                            label = { Text(letter) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
-                                selectedLabelColor = Luna.Pano,
-                            ),
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
-                Hint(
-                    "Sono le stesse sei ricette della modalità test, ma a piena risoluzione: " +
-                        "toccata una lettera, l'unione normale fa esattamente quello che ha " +
-                        "fatto quella prova. Toccando invece una manopola qui sotto la ricetta " +
-                        "diventa «personalizzata», ed è giusto così.",
+                    title = "Scegli da dove guardarla",
+                    subtitle = "Prima di cucire a piena risoluzione, l'unione si ferma e mostra " +
+                        "la panoramica in piccolo: il dito sposta il centro e la deformazione " +
+                        "cambia mentre lo muovi. Vale per le unioni lanciate a mano",
+                    checked = settings.stitch.chooseViewpoint,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(chooseViewpoint = on) } },
+                    icon = LunaIcons.Panorama,
                 )
                 ToggleRow(
                     title = "Sfumatura multibanda",
@@ -326,6 +369,17 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "densità della tela la decide l'area totale. Con un limite la " +
                         "proiezione scelta viene rispettata invece di essere sostituita.",
                 )
+            }
+        }
+
+        CollapsibleSection(
+            title = "Unione foto · Allineamento",
+            summary = "punti al ${settings.stitch.controlQualityPercent}%" +
+                (if (settings.stitch.localWarp) " · deformazione locale" else ""),
+            icon = LunaIcons.Center,
+            accent = Luna.Pano,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 ToggleRow(
                     title = "Livella l'orizzonte",
                     subtitle = "Spento, la tela resta centrata sul centro esatto delle foto. " +
@@ -472,18 +526,16 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                         "nuvole o in controluce nessun punto arriva al 95%, e restare senza " +
                         "significherebbe spegnere tutta la rifinitura insieme.",
                 )
+            }
+        }
 
-                ToggleRow(
-                    title = "Scegli da dove guardarla",
-                    subtitle = "Prima di cucire a piena risoluzione, l'unione si ferma e mostra " +
-                        "la panoramica in piccolo: il dito sposta il centro e la deformazione " +
-                        "cambia mentre lo muovi. Vale per le unioni lanciate a mano",
-                    checked = settings.stitch.chooseViewpoint,
-                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(chooseViewpoint = on) } },
-                    icon = LunaIcons.Panorama,
-                )
-
-                Text("Scheda grafica")
+        CollapsibleSection(
+            title = "Unione foto · Scheda grafica",
+            summary = if (gpuOn.isEmpty()) "tutto sulla CPU" else "su GPU: $gpuOn",
+            icon = LunaIcons.Gpu,
+            accent = Luna.Pano,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 ToggleRow(
                     title = "Ricognizione su GPU",
                     subtitle = "Dove cade ogni pixel della tela e quanto pesa: solo geometria, " +
@@ -522,7 +574,66 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Movimento manuale", icon = LunaIcons.Joystick, accent = Luna.PathLapse) {
+        CollapsibleSection(
+            title = "Unione foto · Banco di prova",
+            summary = if (settings.stitch.testMode) "modalità test accesa" else "ricetta $recipeLabel",
+            icon = LunaIcons.Diagnostics,
+            accent = Luna.Pano,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ToggleRow(
+                    title = "Modalità test",
+                    subtitle = "3 foto a 1024 px, tutte le ricette in fila: in galleria arrivano " +
+                        "Panorama_TEST_A…F, una per ricetta, da confrontare fianco a fianco",
+                    checked = settings.stitch.testMode,
+                    onCheckedChange = { on -> viewModel.updateStitch { it.copy(testMode = on) } },
+                    icon = LunaIcons.Diagnostics,
+                )
+                Hint(
+                    "Le ricette: A storica (solo piramide e punti, multibanda) · B storica + " +
+                        "fotometria · C rollio e focale senza fotometria · D completa attuale · " +
+                        "E completa con punti severi · F taglio netto, per vedere dove cadono le " +
+                        "giunzioni. Trovata la migliore, si spegne il test e si regola nei gruppi " +
+                        "«Proiezione», «Allineamento» e «Scheda grafica».",
+                )
+                // La lettera scelta nel banco di prova, applicata all'unione vera: senza
+                // questo, la ricetta che aveva convinto restava chiusa nella modalità test.
+                val recipe = viewModel.stitchRecipeLetter(settings.stitch)
+                Text(
+                    text = "Ricetta: " + (recipe?.let { "$it — la stessa della prova $it" }
+                        ?: "personalizzata"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (recipe != null) Luna.Pano else Luna.OnSurfaceDim,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    listOf("A", "B", "C", "D", "E", "F").forEach { letter ->
+                        FilterChip(
+                            selected = recipe == letter,
+                            onClick = { viewModel.applyStitchRecipe(letter) },
+                            label = { Text(letter) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Luna.Pano.copy(alpha = 0.20f),
+                                selectedLabelColor = Luna.Pano,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Hint(
+                    "Sono le stesse sei ricette della modalità test, ma a piena risoluzione: " +
+                        "toccata una lettera, l'unione normale fa esattamente quello che ha " +
+                        "fatto quella prova. Toccando invece una manopola negli altri gruppi " +
+                        "la ricetta diventa «personalizzata», ed è giusto così.",
+                )
+            }
+        }
+
+        CollapsibleSection(
+            title = "Movimento manuale",
+            summary = "levetta al ${gimbal.manualSpeedPercent}%",
+            icon = LunaIcons.Joystick,
+            accent = Luna.PathLapse,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SliderRow(
                     label = "Intensità della levetta",
@@ -606,10 +717,14 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(
+        CollapsibleSection(
             title = "Calibrazione gimbal",
+            summary = calibrationSummary,
             icon = LunaIcons.Center,
             accent = Luna.Pano,
+            // Sette minuti di misura non si nascondono dentro una sezione chiusa: mentre
+            // gira, il gruppo si apre da solo e resta aperto.
+            openWhen = calibrationState.running,
             trailing = {
                 when {
                     calibrationState.running -> StatusChip("in corso", Luna.Amber, pulsing = true)
@@ -686,7 +801,12 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Timelapse della camera", icon = LunaIcons.Timelapse, accent = Luna.Lapse) {
+        CollapsibleSection(
+            title = "Timelapse della camera",
+            summary = "modalità ${settings.timelapseMode}",
+            icon = LunaIcons.Timelapse,
+            accent = Luna.Lapse,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 NumberField(
                     label = "Modalità timelapse",
@@ -701,7 +821,12 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Log diagnostico", icon = LunaIcons.Diagnostics, accent = Luna.Accent) {
+        CollapsibleSection(
+            title = "Diagnostica",
+            summary = "${logEntries.size} eventi nel log",
+            icon = LunaIcons.Diagnostics,
+            accent = Luna.Accent,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 LabeledValue("Eventi presenti", logEntries.size.toString())
                 Button(
@@ -711,6 +836,15 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 ) {
                     ButtonLabel(LunaIcons.Download, "Salva il log nei Download")
                 }
+                // La diagnostica vera — scanner dei codici, sonde, log grezzo — resta un
+                // pannello a se`, perche` e` un altro mestiere: da qui ci si arriva, ma non
+                // ci si inciampa scorrendo le impostazioni di tutti i giorni.
+                OutlinedButton(
+                    onClick = onOpenDiagnostics,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    ButtonLabel(LunaIcons.Diagnostics, "Apri la diagnostica")
+                }
                 Hint(
                     "Viene creato un HTML con testo, miniature e punti di controllo incorporati. " +
                         "Il log dell'app viene azzerato soltanto dopo che il file è stato salvato correttamente.",
@@ -718,7 +852,12 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Aggiornamenti", icon = LunaIcons.Download, accent = Luna.Ok) {
+        CollapsibleSection(
+            title = "Aggiornamenti",
+            summary = "build del ${buildDateLabel(BuildConfig.BUILT_AT_MS)}",
+            icon = LunaIcons.Download,
+            accent = Luna.Ok,
+        ) {
             var branch by remember(settings.updateBranch) { mutableStateOf(settings.updateBranch) }
             val effective = settings.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -786,15 +925,21 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
             }
         }
 
-        SectionCard(title = "Su questa app", icon = LunaIcons.Info, accent = Luna.Photo) {
+        CollapsibleSection(
+            title = "Su questa app",
+            summary = "controllo non ufficiale della Insta360 Luna Ultra",
+            icon = LunaIcons.Info,
+            accent = Luna.Photo,
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Hint(
                     "Controllo non ufficiale della Insta360 Luna Ultra, basato sul protocollo " +
                         "ricostruito da progetti di reverse engineering indipendenti.",
                 )
                 Hint(
-                    "Il numero del comando del gimbal non è pubblico: finché non viene trovato, i " +
-                        "comandi di movimento restano visibili ma inerti, e la sequenza non parte.",
+                    "Il comando del gimbal è il 226 (0x00E2), verificato su questa camera: " +
+                        "movimento e sequenze funzionano. Quello che la camera non dice è dove " +
+                        "il gimbal si trovi davvero, e da lì viene tutto il lavoro di taratura.",
                 )
             }
         }

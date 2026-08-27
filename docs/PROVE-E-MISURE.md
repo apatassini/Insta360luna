@@ -447,6 +447,27 @@ costa una seconda programmazione dinamica sulla griglia ridotta, spiccioli). Un 
 spostato` con lo 0% accanto è un buco; un 30% accanto e nessuna differenza dal vivo vuol dire
 che le due foto erano nitide uguale davvero.
 
+### 5.13 Il ritaglio automatico guardava solo i due capi della riga
+
+Nove foto in griglia, log `20260827-182030`: `Ritaglio: da 13833×10428 a 13502×9733`. Cioè
+via il 2,4% di larghezza e il 6,7% di altezza — e in cima restava il merletto nero.
+
+Il conto misurava, riga per riga, la **corsa di nero da sinistra** e quella **da destra**, con
+il commento «il nero sta sempre al bordo, per costruzione». Su una fila sola di scatti è vero.
+Su una griglia no: in equirettangolare il bordo alto di uno scatto inclinato si incurva, e fra
+la cima di una foto e la cima della vicina resta una festonatura nera **in mezzo alla riga**,
+che non tocca né il capo sinistro né il destro. Quel nero non veniva contato: la riga
+risultava pulita, il ritaglio si fermava dopo pochi fili, e il merletto restava.
+
+Ora si contano tutti i pixel neri della riga (e della colonna), ovunque stiano. Il conto si fa
+su una griglia a passo otto pixel con le somme parziali in due dimensioni: il nero di un
+rettangolo qualsiasi costa quattro letture, così il giro che rosicchia può guardare tutti e
+quattro i lati a ogni passo senza riscandire la tela. Nove megabyte di somme invece di
+cinquecento di tela, e otto pixel su tredicimila non cambiano dove cade il taglio.
+
+Il limite «mai più di metà per dimensione» resta. Quando morde, il log ora lo dice:
+`resta il 3,2% di nero dentro (il ritaglio non mangia mai più di metà)`.
+
 ## 6. Memoria
 
 | | prima | dopo |

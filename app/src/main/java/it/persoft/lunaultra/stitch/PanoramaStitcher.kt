@@ -183,6 +183,9 @@ class PanoramaStitcher(
 
     private var gpuBusyMillis = 0L
     private var gpuReadMillis = 0L
+
+    /** Quanto nero è rimasto dentro il rettangolo dopo il ritaglio automatico. */
+    private var lastCropBlackShare = 0f
     private var gpuTimerReady = false
 
     /** Quanti originali sono stati aperti in anticipo, mentre si dipingeva quello prima. */
@@ -906,13 +909,24 @@ class PanoramaStitcher(
             }
             if (!fillNadir) {
                 onProgress(0.98f, "Ritaglio il nero ai bordi")
+                lastCropBlackShare = 0f
                 val before = "${bitmap.width}×${bitmap.height}"
                 bitmap = cropBlackEdges(
                     bitmap,
                     allowColumns = canvas.horizontalDegrees < PanoramaCanvas.FULL_TURN_DEGREES - 0.5f,
                 )
                 if ("${bitmap.width}×${bitmap.height}" != before) {
-                    notes += "Ritaglio: da $before a ${bitmap.width}×${bitmap.height}, via il nero ai bordi"
+                    // Il nero rimasto dentro il rettangolo è la sola cosa che dice se il
+                    // ritaglio ha finito il lavoro o si è fermato sul limite del «mai più di
+                    // metà». Senza, un merletto nero in cima si scopre solo guardando.
+                    val resta = if (lastCropBlackShare > EDGE_EMPTY_TOLERANCE) {
+                        ", resta il %.1f%% di nero dentro (il ritaglio non mangia mai più di metà)"
+                            .format(lastCropBlackShare * 100)
+                    } else {
+                        ""
+                    }
+                    notes += "Ritaglio: da $before a ${bitmap.width}×${bitmap.height}, " +
+                        "via il nero ai bordi$resta"
                 }
             }
 
@@ -5594,10 +5608,23 @@ class PanoramaStitcher(
      *
      * La copertura vera di una panoramica non è mai rettangolare: fotogrammi corretti in
      * altezza lasciano cunei neri in alto e in basso, e i bordi proiettati sono stirati. Si
-     * misurano le corse di nero da sinistra e da destra su ogni riga — il nero sta sempre al
-     * bordo, per costruzione — e poi si rosicchia dal lato che ne ha di più, un filo alla
-     * volta, finché ogni lato del rettangolo è quasi pulito. Non è il rettangolo massimo
-     * teorico, ma gli somiglia, e non taglia mai il centro.
+     * rosicchia dal lato che ha più nero, un filo alla volta, finché ogni lato del rettangolo
+     * è quasi pulito. Non è il rettangolo massimo teorico, ma gli somiglia, e non taglia mai
+     * il centro.
+     *
+     * **Il nero non sta solo alle due estremità della riga.** La versione precedente contava
+     * la corsa di nero da sinistra e quella da destra, e si fermava lì: su una fila sola di
+     * scatti è giusto, perché il nero è per costruzione ai due capi. Su una griglia no. In
+     * equirettangolare il bordo alto di uno scatto inclinato si incurva, e fra la cima di una
+     * foto e la cima della vicina resta una **festonatura** nera in mezzo alla riga: un nero
+     * che non tocca né il capo sinistro né il destro, e che quel conto non vedeva. La riga
+     * risultava pulita, il ritaglio si fermava subito, e la panoramica usciva col merletto
+     * nero in cima. Ora si contano tutti i pixel neri della riga, ovunque stiano.
+     *
+     * Il conto si fa su una griglia a passo [CROP_CELL] — otto pixel su una tela da
+     * tredicimila non cambiano dove cade il taglio, e permettono di tenere le somme parziali
+     * in memoria e di rispondere «quanto nero c'è in questo rettangolo» in un colpo solo,
+     * invece di riscandire la tela a ogni filo rosicchiato.
      *
      * Sulle tele che chiudono il giro le colonne non si toccano: destra e sinistra sono lo
      * stesso meridiano, e ritagliarle romperebbe la continuità.
@@ -5605,61 +5632,80 @@ class PanoramaStitcher(
     private suspend fun cropBlackEdges(bitmap: Bitmap, allowColumns: Boolean): Bitmap = coroutineScope {
         val width = bitmap.width
         val height = bitmap.height
-        val leftRun = IntArray(height)
-        val rightRun = IntArray(height)
-        // La scansione dei bordi guarda ogni pixel della tela: su una panoramica da sessanta
-        // megapixel, in fila, sono secondi buttati su un core solo mentre gli altri sette
-        // guardano. Le righe sono indipendenti, e ognuna scrive solo la propria casella.
+        val dw = (width + CROP_CELL - 1) / CROP_CELL
+        val dh = (height + CROP_CELL - 1) / CROP_CELL
+        if (dw < 4 || dh < 4) return@coroutineScope bitmap
+        val black = IntArray(dw * dh)
+        // La scansione guarda ogni pixel della tela: su una panoramica da sessanta megapixel,
+        // in fila, sono secondi buttati su un core solo mentre gli altri sette guardano. Le
+        // fasce sono multiple della cella, così due lavoratori non scrivono mai nella stessa
+        // casella e non serve nessun lucchetto.
         val workers = min(Runtime.getRuntime().availableProcessors(), MAX_STITCH_WORKERS)
-        val band = (height + workers - 1) / workers
-        (0 until height step band.coerceAtLeast(1)).map { start ->
+        val band = ((((height + workers - 1) / workers + CROP_CELL - 1) / CROP_CELL) * CROP_CELL)
+            .coerceAtLeast(CROP_CELL)
+        (0 until height step band).map { start ->
             async(Dispatchers.Default) {
                 val row = IntArray(width)
                 for (y in start until min(start + band, height)) {
                     bitmap.getPixels(row, 0, width, 0, y, width, 1)
-                    var left = 0
-                    while (left < width && row[left] == EMPTY_PIXEL) left++
-                    var right = 0
-                    while (right < width - left && row[width - 1 - right] == EMPTY_PIXEL) right++
-                    leftRun[y] = left
-                    rightRun[y] = right
+                    val into = (y / CROP_CELL) * dw
+                    for (x in 0 until width) {
+                        if (row[x] == EMPTY_PIXEL) black[into + x / CROP_CELL]++
+                    }
                 }
             }
         }.awaitAll()
 
-        var top = 0
-        var bottom = height - 1
-        var left = 0
-        var right = width - 1
-        val minWidth = (width * MIN_CROP_KEEP).toInt().coerceAtLeast(16)
-        val minHeight = (height * MIN_CROP_KEEP).toInt().coerceAtLeast(16)
-
-        fun rowEmptiness(y: Int): Float {
-            val span = right - left + 1
-            val fromLeft = (leftRun[y] - left).coerceIn(0, span)
-            val fromRight = (rightRun[y] - (width - 1 - right)).coerceIn(0, span)
-            return (fromLeft + fromRight).coerceAtMost(span).toFloat() / span
-        }
-
-        fun columnEmptiness(atLeft: Boolean): Float {
-            var count = 0
-            for (y in top..bottom) {
-                val empty = if (atLeft) leftRun[y] > left else rightRun[y] > width - 1 - right
-                if (empty) count++
+        // Somme parziali in due dimensioni: da qui il nero di un rettangolo qualsiasi costa
+        // quattro letture, e il giro che rosicchia può guardare tutti e quattro i lati a ogni
+        // passo senza ricontare niente.
+        val stride = dw + 1
+        val sums = IntArray(stride * (dh + 1))
+        for (dy in 0 until dh) {
+            var run = 0
+            for (dx in 0 until dw) {
+                run += black[dy * dw + dx]
+                sums[(dy + 1) * stride + dx + 1] = sums[dy * stride + dx + 1] + run
             }
-            return count.toFloat() / (bottom - top + 1)
         }
+
+        /** Il nero dentro il rettangolo di celle [x0, x1) × [y0, y1). */
+        fun blackIn(x0: Int, y0: Int, x1: Int, y1: Int): Int =
+            sums[y1 * stride + x1] - sums[y0 * stride + x1] - sums[y1 * stride + x0] + sums[y0 * stride + x0]
+
+        // I pixel veri coperti da una fascia di celle: l'ultima cella per lato è più corta, e
+        // dividere per la larghezza nominale farebbe sembrare il bordo più pulito di quanto è.
+        fun pixelsWide(x0: Int, x1: Int): Int = min(width, x1 * CROP_CELL) - x0 * CROP_CELL
+        fun pixelsTall(y0: Int, y1: Int): Int = min(height, y1 * CROP_CELL) - y0 * CROP_CELL
+
+        var top = 0
+        var bottom = dh
+        var left = 0
+        var right = dw
+        val minCols = (dw * MIN_CROP_KEEP).toInt().coerceAtLeast(1)
+        val minRows = (dh * MIN_CROP_KEEP).toInt().coerceAtLeast(1)
 
         while (true) {
             var worst = EDGE_EMPTY_TOLERANCE
             var side = -1
-            if (bottom - top + 1 > minHeight) {
-                rowEmptiness(top).let { if (it > worst) { worst = it; side = 0 } }
-                rowEmptiness(bottom).let { if (it > worst) { worst = it; side = 1 } }
+            val wide = pixelsWide(left, right)
+            val tall = pixelsTall(top, bottom)
+            if (wide <= 0 || tall <= 0) break
+            if (bottom - top > minRows) {
+                val up = blackIn(left, top, right, top + 1).toFloat() /
+                    (wide * pixelsTall(top, top + 1)).coerceAtLeast(1)
+                if (up > worst) { worst = up; side = 0 }
+                val down = blackIn(left, bottom - 1, right, bottom).toFloat() /
+                    (wide * pixelsTall(bottom - 1, bottom)).coerceAtLeast(1)
+                if (down > worst) { worst = down; side = 1 }
             }
-            if (allowColumns && right - left + 1 > minWidth) {
-                columnEmptiness(atLeft = true).let { if (it > worst) { worst = it; side = 2 } }
-                columnEmptiness(atLeft = false).let { if (it > worst) { worst = it; side = 3 } }
+            if (allowColumns && right - left > minCols) {
+                val here = blackIn(left, top, left + 1, bottom).toFloat() /
+                    (tall * pixelsWide(left, left + 1)).coerceAtLeast(1)
+                if (here > worst) { worst = here; side = 2 }
+                val there = blackIn(right - 1, top, right, bottom).toFloat() /
+                    (tall * pixelsWide(right - 1, right)).coerceAtLeast(1)
+                if (there > worst) { worst = there; side = 3 }
             }
             when (side) {
                 0 -> top++
@@ -5670,8 +5716,17 @@ class PanoramaStitcher(
             }
         }
 
-        if (top == 0 && bottom == height - 1 && left == 0 && right == width - 1) return@coroutineScope bitmap
-        val cropped = Bitmap.createBitmap(bitmap, left, top, right - left + 1, bottom - top + 1)
+        val x0 = left * CROP_CELL
+        val y0 = top * CROP_CELL
+        val x1 = min(width, right * CROP_CELL)
+        val y1 = min(height, bottom * CROP_CELL)
+        if (x0 == 0 && y0 == 0 && x1 == width && y1 == height) return@coroutineScope bitmap
+        if (x1 - x0 < 16 || y1 - y0 < 16) return@coroutineScope bitmap
+        // Quanto nero è rimasto: se il ritaglio si è fermato sul limite del «mai più di metà»
+        // il merletto c'è ancora, ed è meglio dirlo che lasciarlo scoprire dal vivo.
+        lastCropBlackShare = blackIn(left, top, right, bottom).toFloat() /
+            (pixelsWide(left, right).toLong() * pixelsTall(top, bottom)).coerceAtLeast(1L)
+        val cropped = Bitmap.createBitmap(bitmap, x0, y0, x1 - x0, y1 - y0)
         bitmap.recycle()
         cropped
     }
@@ -6377,6 +6432,15 @@ class PanoramaStitcher(
 
         /** Sotto questa frazione di nero, una riga o colonna di bordo è pulita abbastanza. */
         const val EDGE_EMPTY_TOLERANCE = 0.01f
+
+        /**
+         * Il passo con cui il ritaglio conta il nero.
+         *
+         * Otto pixel. Su una tela da tredicimila non cambiano dove cade il taglio, e a questo
+         * passo le somme parziali della tela intera stanno in nove megabyte invece di
+         * cinquecento: senza, ogni filo rosicchiato costerebbe una riscansione.
+         */
+        const val CROP_CELL = 8
 
         /** Il ritaglio non mangia mai più di così: metà per dimensione resta sempre. */
         const val MIN_CROP_KEEP = 0.5f

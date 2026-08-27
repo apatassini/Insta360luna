@@ -4656,8 +4656,24 @@ class PanoramaStitcher(
         // vedeva perche' il taglio se lo porta dentro; sul confine sul peso — cinque
         // fotogrammi su nove, fra cui la Foto 9 e la Foto 6 — il confine calcolato col fuoco
         // veniva buttato via un attimo dopo averlo scritto nel log come «spostato».
+        //
+        // Lo spostamento vale **solo dove i due si contendono davvero il posto**. Il termine
+        // d'insieme — «questa foto è più nitida dell'altra su tutta la sovrapposizione» — è per
+        // natura lo stesso numero ovunque, e messo così com'era finiva addosso anche alle celle
+        // dove il fotogramma nuovo non arriva o dove la tela è ancora vuota: mezzo peso di
+        // sfumatura tolto a mezzo mondo. Fuori dalla contesa è zero.
+        //
+        // E si stende, quattro passate di tre per tre. Il termine locale è la differenza di
+        // nitidezza cella per cella, e a piena risoluzione quella differenza balla: bastava
+        // mezzo punto per far cambiare padrone a una cella sola in mezzo alle altre, e in un
+        // montaggio a taglio netto una cella sola che cambia padrone è un'isola con
+        // un'esposizione diversa attorno. Il confine deve essere una linea, non una spruzzata.
         val focusShiftGrid = if (focusNew != null && focusOld != null && seam == null) {
-            FloatArray(gcount) { focusBias(focusNew, focusOld, it) }
+            var shift = FloatArray(gcount) {
+                if (bothPresent[it]) focusBias(focusNew, focusOld, it) else 0f
+            }
+            repeat(FOCUS_SHIFT_SMOOTHING) { shift = smoothFocus(shift, gw, gh) }
+            shift
         } else {
             null
         }
@@ -4670,21 +4686,34 @@ class PanoramaStitcher(
         // disuguaglianza e ne resta uno solo da guardare. La scheda riceve questa mappa e non
         // sa nemmeno che esiste un fuoco.
         //
-        // Il pavimento a zero serve perché la mappa che sale sulla scheda è a un byte per
-        // cella: un peso negativo diventerebbe comunque zero là sopra, e allora è meglio che
-        // sia zero anche qui, o le due strade scriverebbero pixel diversi sullo stesso posto.
+        // **Zero resta zero, e quello che non era zero non ci diventa.** Questa mappa dice due
+        // cose con un numero solo: chi vince il confine, e se sulla tela c'è già qualcosa. La
+        // prima si sposta col fuoco, la seconda no — e scontando fino a zero le confondevo:
+        // dove lo sconto azzerava un peso vero, il giro che scrive i pixel leggeva «tela
+        // vuota», saltava il pixel e non ci applicava la correzione multibanda. Il risultato
+        // era il taglio netto col becco a quarantacinque gradi, senza niente che ne nascondesse
+        // lo scalino di esposizione, e le isolette di un'altra foto dentro.
+        //
+        // Il pavimento è un livello su duecentocinquantacinque: il minimo che sopravviva al
+        // byte con cui la mappa sale sulla scheda, e abbastanza poco che il nuovo vinca lo
+        // stesso ovunque sia presente.
         val ownerForApply = if (focusShiftGrid == null) {
             ownerSnap
         } else {
             FloatArray(snapW * snapH) { i ->
-                val bx = min((i % snapW) * OWNER_SCALE, sbw - 1)
-                val by = min((i / snapW) * OWNER_SCALE, sbh - 1)
-                val shift = bilinearGrid(
-                    focusShiftGrid, gw, gh,
-                    (bx.toFloat() / s) - 0.5f + 0.5f / s,
-                    (by.toFloat() / s) - 0.5f + 0.5f / s,
-                )
-                max(0f, ownerSnap[i] - shift)
+                val here = ownerSnap[i]
+                if (here <= 0f) {
+                    0f
+                } else {
+                    val bx = min((i % snapW) * OWNER_SCALE, sbw - 1)
+                    val by = min((i / snapW) * OWNER_SCALE, sbh - 1)
+                    val shift = bilinearGrid(
+                        focusShiftGrid, gw, gh,
+                        (bx.toFloat() / s) - 0.5f + 0.5f / s,
+                        (by.toFloat() / s) - 0.5f + 0.5f / s,
+                    )
+                    (here - shift).coerceAtLeast(OWNER_MIN_PRESENT)
+                }
             }
         }
         var focusShared = 0
@@ -4715,7 +4744,7 @@ class PanoramaStitcher(
                     // Lo spostamento è limitato: il peso della sfumatura resta la cosa che
                     // comanda — è quello che tiene le giunzioni lontane dai bordi — e il fuoco
                     // sposta il confine solo dove la differenza è netta.
-                    newWeightGrid[g] + focusBias(focusNew, focusOld, g) > oldWeightGrid[g]
+                    newWeightGrid[g] + (focusShiftGrid?.get(g) ?: 0f) > oldWeightGrid[g]
                 }
                 if (tuning.focusAwareSeam && bothPresent[g]) {
                     focusShared++
@@ -6695,6 +6724,25 @@ class PanoramaStitcher(
          * telefono a ISO alti — sotto quella soglia non c'è dettaglio da difendere.
          */
         const val FOCUS_LIGHT_FLOOR = 16f
+
+        /**
+         * Quante volte si stende lo spostamento del confine prima di usarlo.
+         *
+         * Quattro passate di tre per tre, cioè un raggio di quattro celle. Il confine deve
+         * essere una linea: in un montaggio a taglio netto una cella sola che cambia padrone
+         * non è un dettaglio più nitido, è un'isola con un'altra esposizione attorno.
+         */
+        const val FOCUS_SHIFT_SMOOTHING = 4
+
+        /**
+         * Il peso più piccolo che vuol dire ancora «qui la tela c'è», in unità di sfumatura.
+         *
+         * Un livello su duecentocinquantacinque: il minimo che sopravviva al byte con cui
+         * l'istantanea dei possessori sale sulla scheda grafica. Serve perché quel numero dice
+         * due cose insieme — chi vince il confine e se c'è qualcosa sotto — e lo spostamento
+         * del fuoco può cambiare la prima ma non deve poter cancellare la seconda.
+         */
+        const val OWNER_MIN_PRESENT = 1f / 255f
 
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96

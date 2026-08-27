@@ -468,6 +468,41 @@ cinquecento di tela, e otto pixel su tredicimila non cambiano dove cade il tagli
 Il limite «mai più di metà per dimensione» resta. Quando morde, il log ora lo dice:
 `resta il 3,2% di nero dentro (il ritaglio non mangia mai più di metà)`.
 
+### 5.14 Un numero che diceva due cose, e lo sconto ne cancellava una
+
+Prima panoramica con lo spostamento del fuoco che arriva ai pixel (§5.12): un taglio dritto e
+netto, col becco a quarantacinque gradi in fondo, con uno scalino di esposizione visibile ai due
+lati e qualche isoletta dell'altra foto dentro. Anche col cursore a ×1.
+
+La forma non era il problema: il confine sul peso segue le iso-linee di
+`(min(dx, dy) / (lato corto / 2))²`, che sono rettangoli con le diagonali a quarantacinque gradi
+agli angoli. Il problema era che lo scalino non veniva nascosto da niente.
+
+L'istantanea dei possessori dice **due** cose con un numero solo:
+
+1. chi vince il confine — `nuovo > vecchio`;
+2. se sulla tela, lì, c'è già qualcosa — `vecchio > 0`.
+
+Sottrarre lo spostamento del fuoco da quel numero sposta la prima, ma con il pavimento a zero
+cancellava la seconda: dove lo sconto azzerava un peso vero, il giro che scrive i pixel leggeva
+«tela vuota», saltava il pixel e **non ci applicava la correzione multibanda**. Il taglio restava
+lì crudo. Pavimento portato a un livello su 255 — il minimo che sopravviva al byte con cui la
+mappa sale sulla scheda grafica, e abbastanza poco che il nuovo vinca lo stesso.
+
+Due altri difetti dello stesso pezzo, trovati guardando la stessa immagine:
+
+- il termine **d'insieme** dello spostamento è lo stesso numero ovunque, per costruzione, e
+  veniva applicato anche alle celle dove il fotogramma nuovo non arriva o dove la tela è vuota:
+  mezzo peso di sfumatura tolto a mezzo mondo. Ora vale solo dove i due si contendono il posto.
+- il termine **locale** balla cella per cella, e in un montaggio a taglio netto una cella sola
+  che cambia padrone non è un dettaglio più nitido: è un'isola con un'altra esposizione attorno.
+  Erano le isolette. Lo spostamento ora si stende su quattro passate di tre per tre prima di
+  essere usato — un raggio di quattro celle — e il confine torna a essere una linea.
+
+E la maschera della griglia ridotta legge adesso **lo stesso** vettore di spostamento della piena
+risoluzione, non un secondo calcolo che le somigliava: la correzione multibanda deve correggere
+il montaggio che si sta scrivendo, non uno che gli assomiglia.
+
 ## 6. Memoria
 
 | | prima | dopo |

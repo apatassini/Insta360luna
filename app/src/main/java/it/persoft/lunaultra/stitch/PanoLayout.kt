@@ -46,6 +46,14 @@ data class LayoutLink(
     val tiltDeltaDegrees: Float,
     val inliers: Int,
     val agreement: Float,
+    /**
+     * Vero quando i dettagli d'accordo erano pochi per fidarsi da soli.
+     *
+     * Non entra nello scheletro della panoramica — quello si costruisce solo con le certezze —
+     * ma serve dopo, per non buttare via una foto che a due dettagli dalla soglia era
+     * chiaramente al suo posto.
+     */
+    val tentative: Boolean = false,
 ) {
     /** Quanto pesa nella scelta dell'albero: tanti dettagli **e** tanti d'accordo fra loro. */
     val score: Float get() = inliers * agreement
@@ -252,7 +260,7 @@ object PanoLayoutFinder {
                 bestTilt = tiltShift[i]
             }
         }
-        if (bestCount < MIN_INLIERS) {
+        if (bestCount < SECOND_CHANCE_INLIERS) {
             // Quanti dettagli erano andati d'accordo, anche se non abbastanza: è la
             // differenza fra «queste due foto non si toccano» e «per un pelo».
             onNearMiss(a, b, bestCount)
@@ -270,16 +278,24 @@ object PanoLayoutFinder {
                 inliers++
             }
         }
-        if (inliers < MIN_INLIERS) {
+        if (inliers < SECOND_CHANCE_INLIERS) {
             onNearMiss(a, b, inliers)
             return null
         }
+        // Quanta parte degli abbinamenti deve essere d'accordo. Una giunzione che regge lo
+        // scheletro deve stringere; una da ripescaggio no — li` il numero che conta e` quanti
+        // dettagli sono andati d'accordo, non quanti se ne sono buttati.
         val agreement = inliers.toFloat() / matches.size
-        if (agreement < MIN_AGREEMENT) {
+        val floor = if (inliers >= MIN_INLIERS) MIN_AGREEMENT else TENTATIVE_AGREEMENT
+        if (agreement < floor) {
             onNearMiss(a, b, inliers)
             return null
         }
-        return LayoutLink(a, b, sumPan / inliers, sumTilt / inliers, inliers, agreement)
+        if (inliers < MIN_INLIERS) onNearMiss(a, b, inliers)
+        return LayoutLink(
+            a, b, sumPan / inliers, sumTilt / inliers, inliers, agreement,
+            tentative = inliers < MIN_INLIERS,
+        )
     }
 
     /**
@@ -306,7 +322,7 @@ object PanoLayoutFinder {
             return node
         }
         val tree = mutableListOf<LayoutLink>()
-        links.forEach { link ->
+        links.filter { !it.tentative }.forEach { link ->
             val ra = root(link.a)
             val rb = root(link.b)
             if (ra == rb) return@forEach
@@ -374,6 +390,51 @@ object PanoLayoutFinder {
                 placed[other] = true
                 queue.add(other)
             }
+        }
+
+        // Il ripescaggio.
+        //
+        // Lo scheletro si costruisce con le certezze, e deve restare così: una giunzione
+        // debole nell'ossatura sposta un ramo intero. Ma una foto che resta fuori per **due
+        // dettagli** sotto la soglia non è una foto di un altro momento — è la stessa
+        // panoramica vista da un punto dove il fogliame si ripete e le firme si somigliano
+        // meno. Buttarla via costa più di quanto costi tenerla nel posto che indica.
+        //
+        // Quindi, a scheletro finito: chi è rimasto fuori si attacca alla foto già piazzata
+        // con cui ha più dettagli in comune, e lo si scrive. Il giro si ripete finché non si
+        // ripesca più nessuno, così una foto ripescata può a sua volta reggerne un'altra.
+        val rescued = mutableListOf<Pair<Int, LayoutLink>>()
+        while (true) {
+            val best = links.filter { link ->
+                if (!link.tentative || placed[link.a] == placed[link.b]) return@filter false
+                // Solo le foto **sole** si ripescano. Un gruppo di due o più sta in piedi da
+                // sé ed è una panoramica per conto suo: attaccarcelo con una giunzione debole
+                // vorrebbe dire fondere due panoramiche su un indizio, che è esattamente
+                // l'errore che lo scheletro fatto di sole certezze serve a evitare.
+                val stranger = if (placed[link.a]) link.b else link.a
+                sizes[group[stranger]] == 1
+            }.maxByOrNull { it.inliers } ?: break
+            val known = if (placed[best.a]) best.a else best.b
+            val other = if (known == best.a) best.b else best.a
+            val sign = if (best.a == known) 1f else -1f
+            pan[other] = pan[known] + sign * best.panDeltaDegrees
+            tilt[other] = frames[other].knownTiltDegrees
+                ?: (tilt[known] + sign * best.tiltDeltaDegrees)
+            placed[other] = true
+            group[other] = group[known]
+            neighbours[other] += best
+            neighbours[known] += best
+            rescued += other to best
+        }
+        if (rescued.isNotEmpty()) {
+            notes += "Riprese con riserva: " + rescued.joinToString(" · ") { (index, link) ->
+                "%s (%d dettagli con %s, ne servivano %d)".format(
+                    frames[index].label,
+                    link.inliers,
+                    frames[if (link.a == index) link.b else link.a].label,
+                    MIN_INLIERS,
+                )
+            } + ". L'unione le cerca larghe."
         }
 
         val left = frames.indices.filter { !placed[it] }
@@ -490,11 +551,24 @@ object PanoLayoutFinder {
             }
     }
 
-    /** Quanti dettagli devono andare d'accordo perché una giunzione sia una giunzione. */
+    /** Quanti dettagli devono andare d'accordo perché una giunzione regga lo scheletro. */
     const val MIN_INLIERS = 10
+
+    /**
+     * E quanti bastano per il ripescaggio, a scheletro già in piedi.
+     *
+     * Sei. Sotto, l'accordo di qualche dettaglio capita per caso su qualunque fogliame; sopra,
+     * su una panoramica vera si perdevano foto che stavano al loro posto — una spazzata di
+     * quattro scatti ne ha persa una per due dettagli, e quella foto era il quarto del
+     * panorama, non un altro momento.
+     */
+    const val SECOND_CHANCE_INLIERS = 6
 
     /** E che parte degli abbinamenti devono essere: sotto, è somiglianza casuale. */
     const val MIN_AGREEMENT = 0.12f
+
+    /** Per le giunzioni da ripescaggio basta la metà: non reggono niente, aggiungono soltanto. */
+    const val TENTATIVE_AGREEMENT = 0.06f
 
     /** Due spostamenti entro questi gradi sono lo stesso spostamento. */
     const val VOTE_DEGREES = 1.5f

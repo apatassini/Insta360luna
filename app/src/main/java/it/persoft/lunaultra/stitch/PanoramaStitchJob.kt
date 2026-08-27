@@ -3,6 +3,7 @@ package it.persoft.lunaultra.stitch
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
@@ -29,6 +30,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.max
 
 /**
  * Una foto scelta dal telefono: come si chiama e come se ne fa una copia.
@@ -485,19 +487,7 @@ class PanoramaStitchJob(
             // gimbal. L'inclinazione e il rollio arrivano dalla gravità, che non si sbaglia e
             // non ha bisogno di taratura; resta da indovinare solo il pan.
             val attitudes = files.map { InstaTrailer.readAttitude(it) }
-            val known = attitudes.count { it != null }
-            val shots = if (known == files.size) {
-                shotsFromAttitude(files, attitudes.map { it!! }, horizontalFovDegrees, overlapPercent)
-            } else {
-                if (known > 0) {
-                    log.info(
-                        "UNIONE MANUALE",
-                        "Solo $known foto su ${files.size} portano la traccia inerziale: " +
-                            "non basta a dividerle in file, si assume una fila sola.",
-                    )
-                }
-                evenRow(files, horizontalFovDegrees, overlapPercent)
-            }
+            val shots = discoverShots(files, attitudes, horizontalFovDegrees, overlapPercent, onProgress)
             if (testMode) {
                 stitchTestVariants(shots, horizontalFovDegrees, wideSearch = true, shotAtMs = shotAtMs, base = tuning, onProgress = onProgress)
             } else {
@@ -510,70 +500,158 @@ class PanoramaStitchJob(
         }.onFailure { log.warn("PANORAMICA NON UNITA", it.message) }
     }
 
-    /** Il tratto comune: unione, salvataggio in galleria, racconto nel log. */
     /**
-     * Le foto disposte a righe, leggendo dove guardava la camera nella coda del file.
+     * Dove stanno delle foto che non lo dicono: glielo si chiede alle foto stesse.
      *
-     * Le foto di una panoramica si scattano quasi sempre una fila per volta, e fra una fila e
-     * l'altra l'inclinazione fa un salto. Quel salto si vede: basta guardare l'inclinazione
-     * misurata dalla gravità e tagliare dove cambia di più di un terzo del campo visivo. Dentro
-     * ogni fila il pan resta indovinato — la camera la sua rotazione attorno alla verticale non
-     * la dice, e nemmeno la gravità — ma indovinarlo su tre foto per fila invece che su nove di
-     * seguito è tutta un'altra cosa: la ricerca larga parte già vicina, e la griglia non viene
-     * srotolata in una striscia.
+     * Per le panoramiche scattate dall'app gli angoli sono nei tag e non c'è niente da
+     * scoprire. Qui no: e l'ordine con cui arrivano **non è un'informazione**. Può essere
+     * l'ordine dei tocchi, quello alfabetico, quello di scansione della cartella; e anche
+     * fosse l'ordine di scatto, direbbe la successione, non la forma — su più file nessun
+     * ordine lineare dice che la sesta foto sta *sopra* la prima invece che a destra.
+     *
+     * [PanoLayoutFinder] ritrova gli stessi dettagli in coppie di foto e da lì misura di
+     * quanti gradi una sta più in là dell'altra: le giunzioni sicure fanno un albero, e le
+     * posizioni si propagano. Le foto restano dove le mette il riconoscimento, non dove le
+     * mette l'ordine.
+     *
+     * L'inclinazione, quando la traccia inerziale c'è, non si stima nemmeno qui: viene dalla
+     * gravità, che è l'unica misura assoluta di tutto il giro.
      */
-    private fun shotsFromAttitude(
+    private suspend fun discoverShots(
         files: List<File>,
-        attitudes: List<ShotAttitude>,
+        attitudes: List<ShotAttitude?>,
         horizontalFovDegrees: Float,
         overlapPercent: Int,
+        onProgress: (Float, String) -> Unit,
     ): List<PanoramaShot> {
-        val stepDegrees = horizontalFovDegrees * (1f - overlapPercent.coerceIn(5, 90) / 100f)
-        val split = horizontalFovDegrees * ROW_SPLIT_SHARE
-
-        // Le file, nell'ordine in cui sono state scattate: si taglia dove l'inclinazione salta.
-        val rows = mutableListOf<MutableList<Int>>()
-        var reference = attitudes.first().pitchDegrees
-        var current = mutableListOf<Int>()
-        for (index in files.indices) {
-            val pitch = attitudes[index].pitchDegrees
-            if (current.isNotEmpty() && kotlin.math.abs(pitch - reference) > split) {
-                rows += current
-                current = mutableListOf()
-            }
-            if (current.isEmpty()) reference = pitch
-            current += index
+        val known = attitudes.count { it != null }
+        if (known in 1 until files.size) {
+            log.info(
+                "UNIONE MANUALE",
+                "Solo $known foto su ${files.size} portano la traccia inerziale: " +
+                    "l'inclinazione viene riconosciuta come il resto.",
+            )
         }
-        if (current.isNotEmpty()) rows += current
+        // Tutte o nessuna: mescolare inclinazioni misurate e inclinazioni riconosciute
+        // significherebbe ancorare metà panoramica a un orizzonte e metà a un altro.
+        val useGravity = known == files.size
+        val layoutFrames = readLayoutFrames(files, attitudes, useGravity, onProgress)
+            ?: return evenRow(files, horizontalFovDegrees, overlapPercent)
 
-        val shots = arrayOfNulls<PanoramaShot>(files.size)
-        for (row in rows) {
-            val start = -stepDegrees * (row.size - 1) / 2f
-            row.forEachIndexed { position, index ->
-                shots[index] = PanoramaShot(
-                    file = files[index],
-                    panDegrees = start + position * stepDegrees,
-                    tiltDegrees = attitudes[index].pitchDegrees,
-                    label = "Foto ${index + 1}",
-                    measuredTiltDegrees = attitudes[index].pitchDegrees,
-                    measuredRollDegrees = attitudes[index].rollDegrees,
-                )
-            }
-        }
-        log.info(
-            "UNIONE MANUALE · LETTA DALLE FOTO",
-            "${files.size} foto in ${rows.size} " +
-                (if (rows.size == 1) "fila" else "file") +
-                " (${rows.joinToString(" · ") { "${it.size}" }}), inclinazione e rollio dalla " +
-                "gravità: %s. Il pan resta assunto, passo %.1f°.".format(
-                    rows.joinToString(" · ") { row -> "%+.0f°".format(attitudes[row.first()].pitchDegrees) },
-                    stepDegrees,
-                ),
+        val startedAt = System.currentTimeMillis()
+        var timing: PanoLayoutFinder.Timing? = null
+        val layout = PanoLayoutFinder.solve(
+            frames = layoutFrames,
+            horizontalFovDegrees = horizontalFovDegrees,
+            onProgress = { fraction, message -> onProgress(0.02f + 0.06f * fraction, message) },
+            onTiming = { timing = it },
         )
-        return shots.filterNotNull()
+        val seconds = (System.currentTimeMillis() - startedAt) / 1000f
+
+        if (layout.links.isEmpty()) {
+            log.warn(
+                "UNIONE MANUALE · POSTO NON TROVATO",
+                "Nessuna coppia di foto ha dettagli in comune riconoscibili. " +
+                    "Si torna alla fila a passi uguali, e l'unione cerca larga.",
+            )
+            return evenRow(files, horizontalFovDegrees, overlapPercent)
+        }
+
+        log.info(
+            "UNIONE MANUALE · POSTO TROVATO DALLE FOTO",
+            buildString {
+                append("${files.size} foto messe a posto riconoscendo i dettagli, senza fidarsi ")
+                append("dell'ordine. ")
+                timing?.let {
+                    append("%d dettagli su %d coppie: riconoscimento %.1f s, abbinamenti %.1f s "
+                        .format(it.features, it.pairs, it.detectMillis / 1000f, it.matchMillis / 1000f))
+                    append("(%.1f s in tutto). ".format(seconds))
+                }
+                append(
+                    layout.spots.mapIndexed { index, spot ->
+                        "%s %+.0f°/%+.0f°%s".format(
+                            layoutFrames[index].label,
+                            spot.panDegrees,
+                            spot.tiltDegrees,
+                            if (spot.placed) "" else " (ripiego)",
+                        )
+                    }.joinToString(" · "),
+                )
+                layout.notes.forEach { append("\n").append(it) }
+            },
+        )
+
+        return files.mapIndexed { index, file ->
+            val spot = layout.spots[index]
+            PanoramaShot(
+                file = file,
+                panDegrees = spot.panDegrees,
+                tiltDegrees = spot.tiltDegrees,
+                label = layoutFrames[index].label,
+                measuredTiltDegrees = if (useGravity) attitudes[index]?.pitchDegrees else null,
+                measuredRollDegrees = if (useGravity) attitudes[index]?.rollDegrees else null,
+            )
+        }
     }
 
-    /** Il ripiego di sempre: una fila sola, passo assunto dal campo visivo e dalla sovrapposizione. */
+    /**
+     * Le foto ridotte a luminanza, per il solo scopo di capire dove stanno.
+     *
+     * Seicento pixel di lato lungo: sopra non si riconosce niente di più — i dettagli sono
+     * macchie di qualche pixel, non pixel — e sotto cominciano a sparire. Il colore non serve,
+     * e costa tre volte tanto in memoria e in letture.
+     */
+    private suspend fun readLayoutFrames(
+        files: List<File>,
+        attitudes: List<ShotAttitude?>,
+        useGravity: Boolean,
+        onProgress: (Float, String) -> Unit,
+    ): List<LayoutFrame>? = withContext(Dispatchers.IO) {
+        runCatching {
+            files.mapIndexed { index, file ->
+                currentCoroutineContext().ensureActive()
+                onProgress(0.01f, "Guardo la foto ${index + 1} di ${files.size}")
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.absolutePath, bounds)
+                val options = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSizeFor(max(bounds.outWidth, bounds.outHeight), LAYOUT_LONG_SIDE)
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                val raw = BitmapFactory.decodeFile(file.absolutePath, options)
+                    ?: error("non riesco a leggere ${file.name}")
+                val turned = runCatching {
+                    it.persoft.lunaultra.media.applyExifOrientation(raw, ExifInterface(file))
+                }.getOrDefault(raw)
+                val width = turned.width
+                val height = turned.height
+                val pixels = IntArray(width * height)
+                turned.getPixels(pixels, 0, width, 0, 0, width, height)
+                turned.recycle()
+                val gray = ByteArray(width * height)
+                for (i in pixels.indices) {
+                    val colour = pixels[i]
+                    // La solita pesata: l'occhio vede il verde più del rosso e il rosso più del blu.
+                    gray[i] = (
+                        (((colour shr 16) and 0xFF) * 77 +
+                            ((colour shr 8) and 0xFF) * 151 +
+                            (colour and 0xFF) * 28) shr 8
+                        ).toByte()
+                }
+                LayoutFrame(
+                    label = "Foto ${index + 1}",
+                    gray = gray,
+                    width = width,
+                    height = height,
+                    knownTiltDegrees = if (useGravity) attitudes[index]?.pitchDegrees else null,
+                    rollDegrees = if (useGravity) attitudes[index]?.rollDegrees ?: 0f else 0f,
+                )
+            }
+        }.onFailure {
+            log.warn("UNIONE MANUALE", "Non sono riuscito a guardare le foto in piccolo: ${it.message}")
+        }.getOrNull()
+    }
+
+    /** Il ripiego: una fila sola, passo assunto dal campo visivo e dalla sovrapposizione. */
     private fun evenRow(
         files: List<File>,
         horizontalFovDegrees: Float,
@@ -967,6 +1045,16 @@ class PanoramaStitchJob(
         const val COPY_BATCH = 4
 
         /**
+         * Quanto grandi si guardano le foto per capire dove stanno: seicento pixel di lato.
+         *
+         * Sopra non si riconosce niente di più — un dettaglio è una macchia di qualche pixel,
+         * e a piena risoluzione diventa una macchia di qualche decina, cioè lo stesso
+         * dettaglio letto più lentamente. Sotto, i dettagli piccoli spariscono e le coppie
+         * smettono di trovarsi.
+         */
+        const val LAYOUT_LONG_SIDE = 600
+
+        /**
          * I tag del tempo, copiati dal primo scatto: è l'istante in cui la panoramica è
          * cominciata. Sono cinque perché una data senza il suo fuso, o senza i decimi, è una
          * data che due programmi diversi leggono in due momenti diversi.
@@ -1017,6 +1105,5 @@ class PanoramaStitchJob(
          * salto vale piu` di mezzo campo, altrimenti le due file non si sovrapporrebbero
          * abbastanza da poter essere unite. In mezzo c'e` un abisso, e la soglia ci sta comoda.
          */
-        const val ROW_SPLIT_SHARE = 0.35f
     }
 }

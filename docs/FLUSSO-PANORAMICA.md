@@ -127,17 +127,33 @@ schermo di telefono non si leggono, e quattro forme sì.
 Dal menu del **telefono stilizzato** (in alto a destra, prima voce: *«Panoramica da foto del
 telefono»*) si sceglie un gruppo di foto qualunque e le si unisce.
 
-Se non hanno i tag della panoramica, l'app **non si arrende agli angoli inventati**: legge la
-coda Insta360 di ogni file e ne ricava beccheggio e rollio veri. Poi
+Qui non c'è nessun angolo scritto da nessuna parte, e **l'ordine con cui le foto arrivano non è
+un'informazione**: può essere l'ordine dei tocchi, quello alfabetico, quello di scansione della
+cartella. Anche fosse l'ordine di scatto direbbe la successione, non la forma — su più file
+nessun ordine lineare dice che la sesta foto sta *sopra* la prima invece che a destra.
 
-- spezza le **file** dove il beccheggio salta più del **35%** del campo orizzontale;
-- distribuisce il **pan** a passi uguali dentro ogni fila — è l'unica cosa che nessuno ha
-  scritto da nessuna parte, quindi l'unica ipotizzata;
-- passa inclinazione e rollio misurati all'allineamento, esattamente come per le panoramiche
-  pianificate.
+Quindi il posto **si trova guardando le foto**:
 
-Il log lo dichiara: `UNIONE MANUALE · LETTA DALLE FOTO`. Se la coda non c'è (foto non
-Insta360), si torna alla fila a passi uguali e alla ricerca larga.
+1. ogni foto si legge in piccolo (600 px di lato lungo, in bianco e nero) e se ne prendono i
+   **dettagli riconoscibili** — ognuno diventa una firma di 256 bit che dipende solo da com'è
+   fatto, non da dove sta;
+2. **ogni coppia** si abbina, e ogni abbinamento dice di quanti gradi una foto sta più in là
+   dell'altra. Gli abbinamenti giusti concordano tutti sullo stesso numero, quelli sbagliati
+   cadono ognuno per conto suo: si vota, e la maggioranza è la giunzione;
+3. le giunzioni fanno un **grafo**, si tiene l'albero di peso massimo — quelle di cui ci si fida
+   di più — e le posizioni si propagano da una foto sola, la più legata a tutte.
+
+L'inclinazione, quando la coda Insta360 c'è, non si stima nemmeno qui: viene dalla gravità, che
+è l'unica misura assoluta di tutto il giro. Resta da trovare solo il pan.
+
+Alla fine c'è la **controprova**: l'albero si regge su n−1 giunzioni, tutte le altre non hanno
+votato e sono testimoni indipendenti. Se le posizioni sono giuste, ognuna deve ritrovarsi
+d'accordo. Il verdetto scrive quante concordano — e quando non concordano lo dice, invece di
+consegnare una panoramica sbagliata con l'aria di essere giusta.
+
+Il log lo dichiara: `UNIONE MANUALE · POSTO TROVATO DALLE FOTO`, con le posizioni trovate e i
+tempi. Se nessuna coppia si riconosce si torna alla fila a passi uguali, e anche quello sta
+scritto.
 
 ---
 

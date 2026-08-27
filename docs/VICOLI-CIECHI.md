@@ -233,7 +233,31 @@ possono mai condividere un indirizzo.
 
 ---
 
-## 12. Le cose di Kotlin che sembrano funzionare e non funzionano
+## 12. La forza bruta per trovare il posto delle foto
+
+**Provato (a metà, e per fortuna).** Per capire dove va una foto che non porta angoli, la strada
+ovvia è: proietta ogni foto in coordinate del mondo, e per **ogni coppia** prova **tutte le
+posizioni possibili** una sull'altra, tenendo quella dove si somigliano di più. È correlazione
+pura, si parallelizza benissimo, e con venti foto — centonovanta coppie per decine di migliaia di
+posizioni ciascuna — chiede una scheda grafica per essere sopportabile.
+
+**Perché non serve.** Le firme dei dettagli danno la stessa risposta **senza scandire niente**.
+Ogni dettaglio riconoscibile diventa 256 bit che dipendono solo da com'è fatto; due firme che si
+somigliano sono lo stesso dettaglio, ovunque sia finito. Da lì lo spostamento si legge, non si
+cerca: ogni abbinamento ne propone uno, e la maggioranza vince.
+
+È la stessa lezione dei punti di controllo, che sono passati da 27,4 s a 9,5 s **smettendo di
+provare tutte le posizioni**. Due volte lo stesso errore, due volte la stessa cura.
+
+**Il numero che chiude la questione.** Venti foto, quattro file da cinque, in ordine sbagliato:
+centonovanta coppie provate, trentuno giunzioni trovate, **zero** fra foto che non si toccano,
+errore massimo di posizione 1,4°. Il tutto in una manciata di secondi di CPU. Una scheda grafica
+qui non avrebbe niente da accelerare che valga il codice per usarla — e il posto giusto per
+guardarla è il log, dove i tempi ci sono scritti.
+
+---
+
+## 13. Le cose di Kotlin che sembrano funzionare e non funzionano
 
 **Il costruttore privato annidato.** In Java la classe esterna vede i membri privati delle sue
 classi annidate. **In Kotlin no**: `Cannot access 'PanoramaStitcher.Preview' constructor: it is
@@ -250,7 +274,7 @@ cosa — che è esattamente ciò che impedisce loro di divergere.
 
 ---
 
-## 13. Gli attrezzi che mentono
+## 14. Gli attrezzi che mentono
 
 **Il controllo delle parentesi.** Uno script che conta graffe per trovare i file sbilanciati
 segnalava un file **non modificato**. Causa: i nomi dei test in Kotlin stanno fra apici

@@ -171,6 +171,16 @@ spazzata e due un altro momento diventano *due* panoramiche, una da quattro e un
 le ha scelte decide quale unire. Le foto che non si attaccano a nessun'altra restano fuori (una
 foto da sola non è una panoramica) e il log dice quali.
 
+**Perché le foto vengono copiate.** Un lavoro deve poter partire domani, e l'indirizzo che il
+selettore di sistema consegna vale finché l'app è viva: dopo un riavvio non apre più niente. In
+più tutta la cucitura legge **file** — la coda Insta360 si legge a salti, non in sequenza. Quindi
+gli scatti scelti diventano copie in `DCIM › Luna Ultra › Panoramiche/<lavoro>`.
+
+Sono copie, non originali: la foto in galleria non viene mai toccata. E siccome è un doppione,
+**si cancella da sola** appena la panoramica è salvata — il log dice quanti megabyte sono
+tornati liberi. Per le panoramiche scaricate dalla camera è diverso: lì quei file sono l'unica
+copia locale, e buttarli è una scelta da chiedere (Impostazioni → *Unione foto*).
+
 Il riconoscimento si fa **subito, all'import**: costa tre decimi di secondo su sei foto, e il
 momento giusto è quando l'utente sta ancora guardando — non un'ora dopo, quando lancia l'unione
 e scopre che mancava metà panoramica.

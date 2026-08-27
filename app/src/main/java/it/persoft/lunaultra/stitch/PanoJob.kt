@@ -40,6 +40,15 @@ data class PanoJob(
     /** La proiezione voluta come ordinale, o -1 per lasciar decidere alla copertura. */
     val viewProjectionCode: Int = -1,
     val viewVerticalLimitDegrees: Float = 0f,
+    /**
+     * Vero quando gli scatti sono copie di foto che stanno già sul telefono.
+     *
+     * Cambia una cosa sola, ed è importante: **l'originale esiste altrove**. Per una
+     * panoramica scaricata dalla camera questi file sono l'unica copia locale e buttarli
+     * significa perdere gli scatti; qui sono un doppione della galleria, e tenerli dopo che la
+     * panoramica è fatta vuol dire solo occupare due volte lo stesso spazio.
+     */
+    val fromPhone: Boolean = false,
     /** Il rettangolo del ritaglio, in frazioni della tela. Zero-zero-uno-uno = tela intera. */
     val cropLeft: Float = 0f,
     val cropTop: Float = 0f,

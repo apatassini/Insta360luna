@@ -1924,6 +1924,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 files = group.files.map { file -> file.absolutePath },
                                 fovDegrees = effectiveFov(fov.horizontalDegrees),
                                 spherical = false,
+                                fromPhone = true,
                             )
                         },
                     )
@@ -2343,7 +2344,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** La regola di sempre su cosa buttare a unione riuscita, in un punto solo. */
     private suspend fun finishJob(job: PanoJob, files: List<java.io.File>, done: StitchUiState.Done) {
-        if (settings.value.deleteJobAfterStitch) {
+        // Le copie delle foto del telefono se ne vanno da sole, panoramica fatta.
+        //
+        // Per una panoramica scaricata dalla camera quei file sono l'unica copia locale, e
+        // buttarli è una decisione da chiedere — è a questo che serve l'interruttore. Per le
+        // foto del telefono no: l'originale è rimasto in galleria e non l'abbiamo mai toccato.
+        // Tenere il doppione vuol dire occupare due volte lo stesso spazio per sempre, e
+        // nessuno l'ha chiesto.
+        if (settings.value.deleteJobAfterStitch || job.fromPhone) {
+            // Prima si misura, poi si butta: dopo, i file pesano zero e la riga del log
+            // direbbe una cosa vera e inutile.
+            val megabytes = withContext(Dispatchers.IO) {
+                files.sumOf { it.length() } / (1024f * 1024f)
+            }
             withContext(Dispatchers.IO) {
                 container.stitchJob.discardJobFiles(files.map { it.absolutePath })
             }
@@ -2351,6 +2364,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 list.copy(jobs = list.jobs.filterNot { it.id == job.id })
             }
             PanoPrepStore.discard(prepRoot, job.id)
+            if (job.fromPhone) {
+                container.log.info(
+                    "COPIE DI LAVORO RIMOSSE",
+                    "%.0f MB: le %d foto originali sono rimaste in galleria, non le tocca nessuno."
+                        .format(megabytes, files.size),
+                )
+            }
         }
         _stitchState.value = done
     }

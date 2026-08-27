@@ -4237,7 +4237,7 @@ class PanoramaStitcher(
                 val mergeStartedAt = System.currentTimeMillis()
                 val strip = canvasBand?.takeIf { it.size >= spanWidth * rows }
                     ?: IntArray(spanWidth * rows).also { canvasBand = it }
-                output.getPixels(strip, 0, spanWidth, spanFrom, row0 + bandRow, spanWidth, rows)
+                readBand(output, strip, spanFrom, row0 + bandRow, spanWidth, rows)
                 parallelRows(row0 + bandRow, rows, 0) { r, _ ->
                     val by = bandRow + r
                     val insideBlendRows = hasOverlap && by in sy0..sy1
@@ -4252,7 +4252,7 @@ class PanoramaStitcher(
                         strip[to + columns[bx] - shift] = 0xFF000000.toInt() or (packed and 0xFFFFFF)
                     }
                 }
-                output.setPixels(strip, 0, spanWidth, spanFrom, row0 + bandRow, spanWidth, rows)
+                writeBand(output, strip, spanFrom, row0 + bandRow, spanWidth, rows)
                 gpuMergeMillis += System.currentTimeMillis() - mergeStartedAt
                 true
             }
@@ -4811,7 +4811,7 @@ class PanoramaStitcher(
                     }
 
                     var rows = min(bandHeight, sbh)
-                    output.getPixels(oldBands[0], 0, sbw, spanFrom, subRow0, sbw, rows)
+                    readBand(output, oldBands[0], spanFrom, subRow0, sbw, rows)
                     var pending = renderBand(0, 0, rows)
                     while (by < sbh) {
                         currentCoroutineContext().ensureActive()
@@ -4881,7 +4881,7 @@ class PanoramaStitcher(
                         val nextAt = by + rows
                         if (nextAt < sbh) {
                             val nextRows = min(bandHeight, sbh - nextAt)
-                            output.getPixels(oldBands[1 - slot], 0, sbw, spanFrom, subRow0 + nextAt, sbw, nextRows)
+                            readBand(output, oldBands[1 - slot], spanFrom, subRow0 + nextAt, sbw, nextRows)
                             pending = renderBand(1 - slot, nextAt, nextRows)
                         }
 
@@ -4889,7 +4889,7 @@ class PanoramaStitcher(
                         // alfa opaca compresa, e va sulla bitmap così com'è. La passata di mezzo
                         // che rileggeva e riscriveva tutti i pixel per estrarne il peso costava
                         // più di quanto il disegno sulla scheda avesse fatto risparmiare.
-                        output.setPixels(outBand, 0, sbw, spanFrom, row, sbw, rows)
+                        writeBand(output, outBand, spanFrom, row, sbw, rows)
                         slot = 1 - slot
                         by += rows
                         doneRows = by
@@ -4927,6 +4927,61 @@ class PanoramaStitcher(
                 if (seam.vertical) "verticale" else "orizzontale",
                 come,
             )
+        }
+    }
+
+    /**
+     * Legge una fascia di tela con tutti i core, invece che con uno.
+     *
+     * `getPixels` e `setPixels` sembrano copie e non lo sono: la bitmap tiene l'alfa
+     * premoltiplicata, e ogni pixel che entra o esce passa da una conversione. Su una fascia
+     * da venticinque milioni di pixel sono cento megabyte in una direzione e cento nell'altra,
+     * fatti da un filo solo — ed è esattamente quello che la misura diceva: «riporto a piena
+     * risoluzione 7,3 s (1,1 core)».
+     *
+     * Righe diverse sono pixel diversi: non c'è niente da contendersi, e infatti la pittura
+     * per riga fa già così da sempre. Qui la fascia si spartisce in fette e ogni core prende
+     * la sua.
+     */
+    private suspend fun readBand(
+        output: Bitmap,
+        into: IntArray,
+        spanFrom: Int,
+        firstRow: Int,
+        width: Int,
+        rows: Int,
+    ) = bandSlices(rows) { r0, count ->
+        output.getPixels(into, r0 * width, width, spanFrom, firstRow + r0, width, count)
+    }
+
+    private suspend fun writeBand(
+        output: Bitmap,
+        from: IntArray,
+        spanFrom: Int,
+        firstRow: Int,
+        width: Int,
+        rows: Int,
+    ) = bandSlices(rows) { r0, count ->
+        output.setPixels(from, r0 * width, width, spanFrom, firstRow + r0, width, count)
+    }
+
+    private suspend fun bandSlices(rows: Int, slice: (Int, Int) -> Unit) {
+        val workers = min(Runtime.getRuntime().availableProcessors(), MAX_STITCH_WORKERS)
+        val chunk = ((rows + workers - 1) / workers).coerceAtLeast(BAND_SLICE_MIN_ROWS)
+        if (chunk >= rows) {
+            slice(0, rows)
+            return
+        }
+        coroutineScope {
+            var r0 = 0
+            val jobs = mutableListOf<kotlinx.coroutines.Deferred<Unit>>()
+            while (r0 < rows) {
+                val start = r0
+                val count = min(chunk, rows - start)
+                jobs += async(Dispatchers.Default) { slice(start, count) }
+                r0 += count
+            }
+            jobs.awaitAll()
         }
     }
 
@@ -6397,6 +6452,14 @@ class PanoramaStitcher(
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96
         const val GPU_CHECK_STEP = 7
+
+        /**
+         * Sotto questo numero di righe non vale la pena spartire una fascia fra i core.
+         *
+         * Trentadue: sotto, il costo di svegliare un lavoratore supera quello della copia che
+         * gli si dà da fare.
+         */
+        const val BAND_SLICE_MIN_ROWS = 32
 
         /** Sotto questi campioni di colore il confronto non ha abbastanza da dire. */
         const val GPU_CHECK_MIN_COLOUR = 12

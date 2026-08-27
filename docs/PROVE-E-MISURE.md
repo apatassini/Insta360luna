@@ -254,6 +254,29 @@ cinquemila, quattromila volte per fotogramma, con otto lavoratori che si accalca
 Bitmap. Ora quel passaggio legge e riscrive **a fasce**, sul solo pezzo di tela che il
 fotogramma tocca. Per sapere se era davvero quello, ogni sotto-fase ha il suo contatore di core.
 
+### 5.10 E non era la scheda: era la tela che si legge un filo per volta
+
+La pipeline fra scheda e riporto non ha spostato niente: «riporto a piena risoluzione 7,3 s
+(1,1 core)», tale e quale a prima. La misura successiva dice perché, ed è una di quelle cose
+che si vedono solo con i numeri sotto gli occhi:
+
+```
+Dentro la scheda: calcolo 0,4 s · rilettura e attesa 1,6 s · 2% del tempo di cucitura
+Dentro la fusione: … riporto a piena risoluzione 7,3 s (1,1 core)
+```
+
+Di quei 7,3 secondi, la scheda ne spiega meno di due. Il resto — cinque secondi e mezzo su **un
+core** — è `getPixels` e `setPixels`: leggere la fascia dalla tela e riscriverla.
+
+E non sono copie, anche se sembrano: la bitmap tiene l'alfa premoltiplicata, e ogni pixel che
+entra o esce passa da una conversione. Su una fascia da venticinque milioni di pixel sono cento
+megabyte in una direzione e cento nell'altra, fatti da un filo solo. Sovrapporli all'attesa
+della scheda non serviva a niente, perché la scheda non era il problema.
+
+Righe diverse sono pixel diversi: non c'è niente da contendersi — e infatti la pittura per riga
+fa già così da sempre, con otto lavoratori sulla stessa bitmap. Adesso anche le fasce si
+spartiscono in fette, una per core.
+
 ### 5.9 Trovato: il riporto della fusione era un core su otto
 
 Con i contatori per sotto-fase, il colpevole è saltato fuori al primo log:

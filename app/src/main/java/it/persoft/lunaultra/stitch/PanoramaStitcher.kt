@@ -839,10 +839,20 @@ class PanoramaStitcher(
             // tempi: una fase che dura dieci secondi può tenere otto core occupati — e allora
             // non c'è niente da spartire — oppure uno solo, e allora ce ne sono sette fermi.
             // Il tempo di calcolo di tutti i fili diviso il tempo passato è esattamente questo.
-            notes += "Resa dei core (su %d): allineamento %.1f · cucitura %.1f".format(
+            // La scheda sta sulla stessa riga dei core, perché è la stessa domanda: quanta
+            // della macchina sto usando. Metterla dieci righe più in giù, in mezzo ai tempi,
+            // voleva dire non farla trovare.
+            val composeMillis = max(1L, (composeSeconds * 1000).toLong())
+            notes += "Resa dei core (su %d): allineamento %.1f · cucitura %.1f%s".format(
                 Runtime.getRuntime().availableProcessors(),
                 refineCores,
                 composeCores,
+                when {
+                    gpuBusyMillis <= 0L && !gpuTimerReady -> " · scheda grafica: non misurabile su questo driver"
+                    gpuBusyMillis <= 0L -> " · scheda grafica ferma"
+                    else -> " · scheda grafica occupata il %.0f%% della cucitura (%.1f s su %.0f s)"
+                        .format(100f * gpuBusyMillis / composeMillis, gpuBusyMillis / 1000f, composeSeconds)
+                },
             )
             notes += ("Dentro la fusione: griglia ridotta %.1f s (%.1f core) · " +
                     "piramidi %.1f s (%.1f core) · riporto a piena risoluzione %.1f s (%.1f core)").format(
@@ -863,11 +873,12 @@ class PanoramaStitcher(
                 // collo di bottiglia non è lo shader — è il travaso dei pixel, e si cura
                 // rileggendo in modo asincrono invece di riscrivere il codice del disegno.
                 notes += if (gpuTimerReady) {
-                    "Dentro la scheda: calcolo %.1f s (dichiarato da lei) · rilettura e attesa %.1f s · %.0f%% del tempo di cucitura"
+                    ("Dentro la scheda: calcolo %.1f s (dichiarato da lei) · rilettura e attesa " +
+                        "%.1f s · sta ferma per il %.0f%% della cucitura")
                         .format(
                             gpuBusyMillis / 1000f,
                             gpuReadMillis / 1000f,
-                            100f * gpuBusyMillis / max(1L, (composeSeconds * 1000).toLong()),
+                            100f - 100f * gpuBusyMillis / max(1L, (composeSeconds * 1000).toLong()),
                         )
                 } else {
                     ("Dentro la scheda: rilettura e attesa %.1f s · il cronometro della scheda " +
@@ -1971,20 +1982,41 @@ class PanoramaStitcher(
                     panCorrectionDegrees = candidate.panDegrees,
                     tiltCorrectionDegrees = candidate.tiltDegrees,
                 )
+                val pointsStartedAt = System.currentTimeMillis()
+                val pointCpuAt = coreMillis()
+
+                // I vicini si misurano **insieme**.
+                //
+                // Ogni giunzione è un lavoro a sé: gli stessi due fotogrammi in sola lettura,
+                // punti diversi, nessuno scambio. Farli uno dopo l'altro era gratis solo in
+                // apparenza — dentro ogni giunzione la ricerca dei punti è già spartita fra i
+                // core, ma la scelta dei candidati che la precede no, e quella parte
+                // lasciava la macchina quasi ferma a ogni giro.
+                //
+                // Le luminanze e le piramidi si costruiscono la prima volta che qualcuno le
+                // chiede: si toccano prima, così due giunzioni che partono insieme non se le
+                // fabbricano tutte e due.
+                frames[index].grayLevels
+                anchors.forEach { frames[it].grayLevels }
+                val tallies = coroutineScope {
+                    anchors.map { anchor ->
+                        async(Dispatchers.Default) {
+                            anchor to controlPoints(
+                                moving = frames[index],
+                                fixed = frames[anchor],
+                                movingPlacement = place,
+                                fixedPlacement = placements[anchor],
+                                lens = lens,
+                            )
+                        }
+                    }.awaitAll()
+                }
+                pointMillis += System.currentTimeMillis() - pointsStartedAt
+                pointCpuMillis += coreMillis() - pointCpuAt
+
                 var found = 0
                 val all = mutableListOf<FloatArray>()
-                anchors.forEach { anchor ->
-                    val pointsStartedAt = System.currentTimeMillis()
-                    val pointCpuAt = coreMillis()
-                    val tally = controlPoints(
-                        moving = frames[index],
-                        fixed = frames[anchor],
-                        movingPlacement = place,
-                        fixedPlacement = placements[anchor],
-                        lens = lens,
-                    )
-                    pointMillis += System.currentTimeMillis() - pointsStartedAt
-                    pointCpuMillis += coreMillis() - pointCpuAt
+                tallies.forEach { (anchor, tally) ->
                     found += tally.candidates
                     // Ogni punto si porta dietro da quale vicino viene: la fotometria ha
                     // bisogno di sapere quale coppia di foto sta confrontando.
@@ -4482,6 +4514,27 @@ class PanoramaStitcher(
         // Chi è a fuoco, dove. Solo se serve: costa due passate sulla griglia ridotta.
         val focusNew = if (tuning.focusAwareSeam) sharpness(newColor, bothPresent, gw, gh) else null
         val focusOld = if (tuning.focusAwareSeam) sharpness(baseColor, bothPresent, gw, gh) else null
+        // La scala con cui il fuoco sposta un confine: la differenza media di nitidezza sulla
+        // sovrapposizione. Senza, un numero grezzo di contrasto non si può sommare a un peso
+        // di sfumatura che sta fra zero e uno.
+        val focusScale = if (focusNew != null && focusOld != null) {
+            var sum = 0f
+            var counted = 0
+            for (g in 0 until gcount) {
+                if (!bothPresent[g]) continue
+                sum += abs(focusNew[g] - focusOld[g])
+                counted++
+            }
+            if (counted > 0 && sum > 0f) sum / counted else 0f
+        } else {
+            0f
+        }
+        /** Di quanto il fuoco sposta il confine sul peso, in unità di sfumatura. */
+        fun focusBias(new: FloatArray?, old: FloatArray?, g: Int): Float {
+            if (new == null || old == null || focusScale <= 0f) return 0f
+            val gap = (new[g] - old[g]) / focusScale
+            return FOCUS_WEIGHT_BIAS * gap.coerceIn(-1f, 1f)
+        }
         val seam = if (tuning.seamMinimalDifference && !manySided) {
             findSeam(difference, bothPresent, newWeightGrid, oldWeightGrid, gw, gh, focusNew, focusOld)
         } else {
@@ -4501,7 +4554,19 @@ class PanoramaStitcher(
                 val ownsNew = if (seam != null) {
                     seam.ownsNew(gx.toFloat(), gy.toFloat())
                 } else {
-                    newWeightGrid[g] > oldWeightGrid[g]
+                    // Il confine sul peso guarda anche la messa a fuoco, quando gliela si
+                    // chiede.
+                    //
+                    // Questa è la strada che prendono i fotogrammi con vicini su più lati —
+                    // in una griglia sono la maggioranza, cinque su nove — e finora il fuoco
+                    // qui non entrava per niente: la scelta la faceva solo «chi è più al
+                    // centro del proprio fotogramma». Un fotogramma può essere a casa sua e
+                    // avere quella zona fuori fuoco, e la regola vecchia gliela dava lo stesso.
+                    //
+                    // Lo spostamento è limitato: il peso della sfumatura resta la cosa che
+                    // comanda — è quello che tiene le giunzioni lontane dai bordi — e il fuoco
+                    // sposta il confine solo dove la differenza è netta.
+                    newWeightGrid[g] + focusBias(focusNew, focusOld, g) > oldWeightGrid[g]
                 }
                 if (ownsNew) mask[g] = 1f
             }
@@ -4843,13 +4908,14 @@ class PanoramaStitcher(
         // ha lavorato a una scala diversa dagli altri, o su una strada diversa, o se era il
         // telefono a essere occupato altrove.
         val come = "fusione a 1/%d su %s".format(s, if (blendedOnGpu) "GPU" else "CPU")
+        val onFocus = if (tuning.focusAwareSeam) " e sulla messa a fuoco" else ""
         return when {
             manySided ->
-                "confine sul peso (vicini su più lati: un taglio solo non basterebbe), $come"
+                "confine sul peso$onFocus (vicini su più lati: un taglio solo non basterebbe), $come"
             seam == null && tuning.seamMinimalDifference ->
                 "taglio a metà strada (la polarità della sovrapposizione non è chiara), $come"
             seam == null -> "taglio a metà strada, $come"
-            else -> (if (tuning.focusAwareSeam) "taglio sul minimo disaccordo e sulla messa a fuoco, %s, %s" else "taglio sul minimo disaccordo, %s, %s").format(
+            else -> "taglio sul minimo disaccordo$onFocus, %s, %s".format(
                 if (seam.vertical) "verticale" else "orizzontale",
                 come,
             )
@@ -6308,6 +6374,17 @@ class PanoramaStitcher(
          * peggio di una zona un po' molle senza giunzione.
          */
         const val FOCUS_SEAM_STRENGTH = 1f
+
+        /**
+         * Di quanto la messa a fuoco può spostare il confine deciso sul peso.
+         *
+         * Un quinto: il peso della sfumatura va da zero a uno ed è quello che tiene le
+         * giunzioni lontane dai bordi dei fotogrammi, dove la lente è peggiore e la
+         * geometria meno sicura. Il fuoco non deve poter ribaltare quella regola — deve poter
+         * spostare il confine dove la differenza di nitidezza è netta, e lasciarlo dov'è
+         * dove non lo è.
+         */
+        const val FOCUS_WEIGHT_BIAS = 0.20f
 
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96

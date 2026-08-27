@@ -688,6 +688,10 @@ class PanoramaStitcher(
                         frames.forEach { it.releaseWorkingData() }
                         throw PreviewStopped(answer.view)
                     }
+                    is AfterPreview.Leave -> {
+                        frames.forEach { it.releaseWorkingData() }
+                        throw PreviewLeft()
+                    }
                     is AfterPreview.Stitch -> answer.view?.let {
                         chosenView = it
                         applyPointOfView(it, levelNotes) { turn -> placements = turn(placements) }
@@ -6860,6 +6864,16 @@ sealed interface AfterPreview {
 
     /** Fermati qui: la scelta e` presa, la cucitura la lancera` qualcun altro quando vuole. */
     data class StopHere(val view: PanoramaView) : AfterPreview
+
+    /**
+     * Esci e basta: niente cucitura e **niente scelta**, il lavoro resta come lo si e` trovato.
+     *
+     * E` diverso da [StopHere] proprio in quello che non fa. Chi salva vuole che quella scelta
+     * resti scritta sul lavoro; chi chiude con la croce non ha deciso niente, e scrivergli
+     * addosso una scelta - foss'anche identica a quella di prima - vorrebbe dire rispondere per
+     * lui, e dirgli pure «salvato» quando aveva chiesto di uscire.
+     */
+    data object Leave : AfterPreview
 }
 
 /**
@@ -6870,6 +6884,14 @@ sealed interface AfterPreview {
  * per questo si porta dietro il punto di vista invece di un messaggio e basta.
  */
 class PreviewStopped(val view: PanoramaView) : Exception("Punto di vista scelto, cucitura rimandata")
+
+/**
+ * L'anteprima e` stata chiusa con la croce: niente cucitura e niente da scrivere.
+ *
+ * Passa anche lei per la strada degli errori, e per lo stesso motivo — ma non porta nessun
+ * punto di vista, perche` e` esattamente il punto: non ce n'e` uno da ricordare.
+ */
+class PreviewLeft : Exception("Anteprima chiusa, niente da fare")
 
 interface PanoramaPreview {
 

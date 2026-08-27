@@ -26,6 +26,7 @@ import it.persoft.lunaultra.stitch.AfterPreview
 import it.persoft.lunaultra.stitch.PanoPrepStore
 import it.persoft.lunaultra.stitch.PreparedPreview
 import it.persoft.lunaultra.stitch.PanoramaPreview
+import it.persoft.lunaultra.stitch.PreviewLeft
 import it.persoft.lunaultra.stitch.PreviewStopped
 import it.persoft.lunaultra.stitch.PanoramaView
 import it.persoft.lunaultra.stitch.PreviewImage
@@ -1591,6 +1592,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * «Esci e basta»: si chiude la modalità job senza cucire e senza cambiare niente.
+     *
+     * Da questa schermata si usciva solo cucendo o salvando. Un lavoro aperto per sbaglio, o
+     * solo per guardarlo, teneva in ostaggio lo schermo: l'unico modo di andarsene era prendere
+     * una decisione.
+     *
+     * Una croce non decide niente, e infatti non riporta indietro **nessun** punto di vista —
+     * non quello smanettato qui dentro e nemmeno quello d'entrata riscritto sopra sé stesso.
+     * Uscire lascia il lavoro esattamente come lo si è trovato, e non dice «salvato» a chi
+     * aveva chiesto di uscire. Per salvare c'è il pulsante che lo dice.
+     */
+    fun leavePointOfView() {
+        pointOfViewAnswer?.complete(AfterPreview.Leave)
+    }
+
+    /**
      * «Salva e chiudi»: la scelta resta sul job, la cucitura la si lancia quando si vuole.
      *
      * È il motivo per cui questa fase esiste dentro il job e non dentro la cucitura. Guardare e
@@ -2066,8 +2083,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ).onSuccess {
             _stitchState.value = it
             showMessage("Panoramica unita: ${it.fileName}")
-        }.onFailure {
-            _stitchState.value = StitchUiState.Failed(it.message ?: "unione non riuscita")
+        }.onFailure { error ->
+            // Uscire non è fallire. Senza questo ramo la croce chiudeva la schermata e lasciava
+            // dietro un cartello rosso, che è il modo peggiore di dire «va bene, come vuoi».
+            if (error is PreviewStopped || error is PreviewLeft) {
+                _stitchState.value = StitchUiState.Idle
+            } else {
+                _stitchState.value = StitchUiState.Failed(error.message ?: "unione non riuscita")
+            }
         }
     }
 
@@ -2309,6 +2332,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (ready != null) {
                     // Nessun conto da rifare: si entra e basta.
                     when (val answer = choosePointOfView(ready)) {
+                        is AfterPreview.Leave -> _stitchState.value = StitchUiState.Idle
                         is AfterPreview.StopHere -> rememberPointOfView(job, answer.view)
                         is AfterPreview.Stitch -> {
                             answer.view?.let { rememberPointOfView(job, it, quiet = true) }
@@ -2340,10 +2364,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ).onSuccess { done ->
                     finishJob(job, files, done)
                 }.onFailure { error ->
-                    if (error is PreviewStopped) {
-                        rememberPointOfView(job, error.view)
-                    } else {
-                        _stitchState.value = StitchUiState.Failed(error.message ?: "preparazione non riuscita")
+                    when (error) {
+                        is PreviewStopped -> rememberPointOfView(job, error.view)
+                        is PreviewLeft -> _stitchState.value = StitchUiState.Idle
+                        else -> _stitchState.value =
+                            StitchUiState.Failed(error.message ?: "preparazione non riuscita")
                     }
                 }
             } finally {

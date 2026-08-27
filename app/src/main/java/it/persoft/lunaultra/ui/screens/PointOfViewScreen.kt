@@ -5,6 +5,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -43,6 +44,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -414,6 +416,47 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                             }
                         }
                     }
+                }
+            }
+
+            // La via d'uscita, in alto a sinistra sopra la foto.
+            //
+            // Da qui si usciva solo cucendo o salvando: quattro pulsanti in fondo e nessuno che
+            // dicesse «lascia stare». Un lavoro aperto per sbaglio, o solo per guardarlo, teneva
+            // in ostaggio lo schermo — l'unico modo di andarsene era prendere una decisione.
+            //
+            // Sta **sopra** la foto e non nella riga dei pulsanti apposta: la riga in fondo è
+            // fatta di scelte sulla panoramica, e uscire non è una di quelle. Il dischetto scuro
+            // sotto serve perché la croce cade su un'immagine qualunque, e una croce bianca su
+            // un cielo bianco non c'è.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp)
+                    .size(40.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                    .clickable(onClick = viewModel::leavePointOfView)
+                    .semantics { contentDescription = "Esci senza cucire" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(modifier = Modifier.size(16.dp)) {
+                    val arm = size.minDimension / 2f
+                    val middle = Offset(size.width / 2f, size.height / 2f)
+                    val thick = size.minDimension / 7f
+                    drawLine(
+                        Color.White,
+                        Offset(middle.x - arm, middle.y - arm),
+                        Offset(middle.x + arm, middle.y + arm),
+                        strokeWidth = thick,
+                        cap = StrokeCap.Round,
+                    )
+                    drawLine(
+                        Color.White,
+                        Offset(middle.x + arm, middle.y - arm),
+                        Offset(middle.x - arm, middle.y + arm),
+                        strokeWidth = thick,
+                        cap = StrokeCap.Round,
+                    )
                 }
             }
         }

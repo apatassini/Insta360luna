@@ -1875,23 +1875,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.stitchJob.collectPickedForJob(
                 sources = sources,
                 panoramaId = panoramaId,
+                horizontalFovDegrees = effectiveFov(fov.horizontalDegrees),
                 onProgress = { fraction, message ->
                     _stitchState.value = StitchUiState.Working(fraction, message)
                 },
-            ).onSuccess { files ->
+            ).onSuccess { groups ->
+                if (groups.isEmpty()) {
+                    _stitchState.value = StitchUiState.Failed("nessuna panoramica fra queste foto")
+                    showMessage("Nessuna di queste foto si attacca a un'altra")
+                    return@launch
+                }
+                // Un lavoro per panoramica trovata. Due gruppi di scatti che non si toccano
+                // non sono una panoramica sola con dei buchi: sono due panoramiche, e
+                // buttarne via una perché è la più piccola sarebbe una scelta presa al posto
+                // di chi ha scattato.
                 container.panoJobStore.update { list ->
                     list.copy(
-                        jobs = list.jobs + PanoJob(
-                            id = panoramaId,
-                            createdAtMs = System.currentTimeMillis(),
-                            files = files.map { file -> file.absolutePath },
-                            fovDegrees = effectiveFov(fov.horizontalDegrees),
-                            spherical = false,
-                        ),
+                        jobs = list.jobs + groups.map { group ->
+                            PanoJob(
+                                id = group.jobId,
+                                createdAtMs = System.currentTimeMillis(),
+                                files = group.files.map { file -> file.absolutePath },
+                                fovDegrees = effectiveFov(fov.horizontalDegrees),
+                                spherical = false,
+                            )
+                        },
                     )
                 }
-                _stitchState.value = StitchUiState.Queued(panoramaId, files.size)
-                showMessage("Job creato: ${files.size} foto in ordine di scatto, aprilo dai lavori")
+                val first = groups.first()
+                _stitchState.value = StitchUiState.Queued(first.jobId, first.files.size)
+                showMessage(
+                    if (groups.size == 1) {
+                        "Job creato: ${first.files.size} foto, aprilo dai lavori"
+                    } else {
+                        "Trovate ${groups.size} panoramiche: " +
+                            groups.joinToString(" + ") { "${it.files.size}" } +
+                            " foto, un lavoro ciascuna"
+                    },
+                )
             }.onFailure {
                 _stitchState.value = StitchUiState.Failed(it.message ?: "job non creato")
                 showMessage("Job non creato: ${it.message}")

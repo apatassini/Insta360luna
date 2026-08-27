@@ -24,8 +24,19 @@ class LayoutFrame(
     val rollDegrees: Float = 0f,
 )
 
-/** Dove è finita una foto, e se il posto gliel'hanno trovato le immagini o è un ripiego. */
-data class LayoutSpot(val panDegrees: Float, val tiltDegrees: Float, val placed: Boolean)
+/**
+ * Dove è finita una foto, e con chi.
+ *
+ * [group] è la panoramica a cui appartiene: le foto legate fra loro da giunzioni sicure ne
+ * fanno una, quelle che non si legano a nessuno restano da sole. [placed] dice se quella foto
+ * sta nel gruppo più grande, cioè in quella che l'unione farà per prima.
+ */
+data class LayoutSpot(
+    val panDegrees: Float,
+    val tiltDegrees: Float,
+    val placed: Boolean,
+    val group: Int = 0,
+)
 
 /** Una giunzione riconosciuta: due foto, di quanto distano, e su quanti dettagli si regge. */
 data class LayoutLink(
@@ -46,6 +57,23 @@ data class PanoLayout(
     val notes: List<String>,
 ) {
     val allPlaced: Boolean get() = spots.all { it.placed }
+
+    /**
+     * Le panoramiche trovate, dalla più grande alla più piccola.
+     *
+     * Non è detto che ne esca una sola, e non è un difetto: nella cartella del telefono gli
+     * scatti di momenti diversi stanno di fianco, e chi sceglie ne prende volentieri di
+     * troppo. Ogni gruppo è una panoramica per conto suo — e chi le chiama può farne lavori
+     * separati invece di buttarne via una.
+     *
+     * Le foto sole restano fuori: una foto da sola non è una panoramica.
+     */
+    val groups: List<List<Int>>
+        get() = spots.indices
+            .groupBy { spots[it].group }
+            .values
+            .filter { it.size >= 2 }
+            .sortedByDescending { it.size }
 }
 
 /**
@@ -376,7 +404,7 @@ object PanoLayoutFinder {
             else -> inside.map { tilt[it] }.average().toFloat()
         }
         return frames.indices.map { index ->
-            LayoutSpot(pan[index] - meanPan, tilt[index] - meanTilt, placed[index])
+            LayoutSpot(pan[index] - meanPan, tilt[index] - meanTilt, placed[index], group[index])
         }
     }
 

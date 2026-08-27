@@ -32,6 +32,9 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.max
 
+/** Una panoramica trovata fra le foto scelte: il suo lavoro e i suoi scatti, in ordine. */
+class PickedGroup(val jobId: String, val files: List<File>)
+
 /**
  * Una foto scelta dal telefono: come si chiama e come se ne fa una copia.
  *
@@ -276,8 +279,9 @@ class PanoramaStitchJob(
     suspend fun collectPickedForJob(
         sources: List<PickedPhoto>,
         panoramaId: String,
+        horizontalFovDegrees: Float,
         onProgress: (Float, String) -> Unit,
-    ): Result<List<File>> = withContext(Dispatchers.IO) {
+    ): Result<List<PickedGroup>> = withContext(Dispatchers.IO) {
         runCatching {
             require(sources.size >= 2) { "Servono almeno due foto per un job di unione" }
             val workshop = File(context.cacheDir, "panopick").apply { mkdirs() }
@@ -299,8 +303,10 @@ class PanoramaStitchJob(
                             val draft = File(workshop, "scelta-%03d.jpg".format(index))
                             source.copyInto(draft)
                             check(draft.length() > 0L) { "la foto ${index + 1} è arrivata vuota" }
+                            // Due terzi della barra alla copia, il resto al riconoscimento:
+                            // così l'avanzamento non torna indietro a metà strada.
                             onProgress(
-                                done.incrementAndGet() / sources.size.toFloat(),
+                                0.65f * done.incrementAndGet() / sources.size,
                                 "Copio le foto (${done.get()} di ${sources.size})",
                             )
                             draft to source.name
@@ -313,24 +319,79 @@ class PanoramaStitchJob(
                 .map { (draft, name) -> Triple(draft, name, captureInstant(draft)) }
                 .sortedWith(compareBy({ it.third }, { it.second }))
 
-            val dir = jobDirFor(panoramaId)
-            val files = ordered.mapIndexed { position, (draft, name, _) ->
-                // Il nome porta la posizione: la cartella del job si legge in ordine, e il
-                // nome originale resta lì accanto per ritrovare la foto di partenza.
-                val stored = storeInJobDirectory(draft, "%02d-%s".format(position + 1, name), dir, panoramaId)
-                draft.delete()
-                stored
-            }
-            MediaScannerConnection.scanFile(context, files.map { it.absolutePath }.toTypedArray(), null, null)
             log.info(
-                "JOB DA FOTO DEL TELEFONO",
-                "${files.size} foto messe in ordine di scatto: " +
-                    ordered.joinToString(" · ") { (_, name, instant) ->
-                        "$name (${SimpleDateFormat("HH:mm:ss", Locale.ITALIAN).format(Date(instant))})"
-                    } + ". In ${dir.path}.",
+                "FOTO DEL TELEFONO · IN ORDINE DI SCATTO",
+                ordered.joinToString(" · ") { (_, name, instant) ->
+                    "$name (${SimpleDateFormat("HH:mm:ss", Locale.ITALIAN).format(Date(instant))})"
+                },
             )
-            files
+
+            // Quante panoramiche ci sono qui dentro? Non è detto che sia una.
+            //
+            // Chi sceglie le foto dalla cartella del telefono ne prende volentieri di troppo,
+            // perché gli scatti di momenti diversi stanno di fianco. Un tempo finivano tutte
+            // nello stesso lavoro e le estranee allargavano la tela per stare in un angolo;
+            // poi si teneva solo il gruppo più grande e le altre si buttavano. Ma se le altre
+            // sono una panoramica per conto loro, buttarle è sbagliato quanto tenerle: si fa
+            // **un lavoro per ciascuna**, e chi le ha scelte decide quale unire.
+            onProgress(0.7f, "Guardo quante panoramiche sono")
+            val drafted = ordered.map { it.first }
+            val groups = groupsOf(drafted, horizontalFovDegrees, onProgress)
+            val alone = drafted.indices.filter { index -> groups.none { index in it } }
+            if (alone.isNotEmpty()) {
+                log.warn(
+                    "FOTO DEL TELEFONO · FUORI DA TUTTE",
+                    "${alone.size} foto non hanno dettagli in comune con nessun'altra: " +
+                        alone.joinToString(" · ") { ordered[it].second } +
+                        ". Una foto da sola non è una panoramica, e restano fuori.",
+                )
+            }
+
+            groups.mapIndexed { position, group ->
+                val id = if (position == 0) panoramaId else "$panoramaId-${position + 1}"
+                val dir = jobDirFor(id)
+                val files = group.mapIndexed { place, index ->
+                    val (draft, name, _) = ordered[index]
+                    // Il nome porta la posizione: la cartella del lavoro si legge in ordine, e
+                    // il nome originale resta lì accanto per ritrovare la foto di partenza.
+                    storeInJobDirectory(draft, "%02d-%s".format(place + 1, name), dir, id)
+                }
+                MediaScannerConnection.scanFile(context, files.map { it.absolutePath }.toTypedArray(), null, null)
+                log.info(
+                    "JOB DA FOTO DEL TELEFONO",
+                    "Panoramica ${position + 1} di ${groups.size}: ${files.size} foto in ${dir.path}.",
+                )
+                PickedGroup(id, files)
+            }.also { drafted.forEach { draft -> draft.delete() } }
         }.onFailure { log.warn("JOB DA FOTO DEL TELEFONO NON CREATO", it.message) }
+    }
+
+    /**
+     * Quali foto stanno insieme, senza unirne nemmeno una.
+     *
+     * È lo stesso riconoscimento che poi metterà le foto a posto, chiesto qui per una domanda
+     * più semplice: chi si tiene per mano con chi. Costa poco — tre decimi di secondo su sei
+     * foto — e vale il momento giusto: appena scelte, quando l'utente sta ancora guardando, e
+     * non un'ora dopo quando lancia l'unione e scopre che mancava metà panoramica.
+     *
+     * Se il riconoscimento non funziona non si inventa niente: tutte insieme, come prima.
+     */
+    private suspend fun groupsOf(
+        files: List<File>,
+        horizontalFovDegrees: Float,
+        onProgress: (Float, String) -> Unit,
+    ): List<List<Int>> {
+        if (files.size < 2) return listOf(files.indices.toList())
+        val attitudes = files.map { InstaTrailer.readAttitude(it) }
+        val frames = readLayoutFrames(files, attitudes, attitudes.all { it != null }) { _, message ->
+            onProgress(0.75f, message)
+        } ?: return listOf(files.indices.toList())
+        val layout = PanoLayoutFinder.solve(
+            frames = frames,
+            horizontalFovDegrees = horizontalFovDegrees,
+            onProgress = { fraction, message -> onProgress(0.75f + 0.2f * fraction, message) },
+        )
+        return layout.groups.ifEmpty { listOf(files.indices.toList()) }
     }
 
     /**

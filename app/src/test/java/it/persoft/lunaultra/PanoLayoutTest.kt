@@ -192,6 +192,10 @@ class PanoLayoutTest {
 
         val kept = layout.spots.indices.filter { layout.spots[it].placed }
         assertEquals("la panoramica tenuta è quella da quattro", listOf(0, 1, 2, 3), kept)
+        // E le due estranee non spariscono: sono una panoramica loro, e chi le ha scelte
+        // deve poterne fare un lavoro a parte invece di ritrovarsele buttate.
+        assertEquals("due panoramiche trovate", 2, layout.groups.size)
+        assertEquals("la seconda è quella da due", listOf(4, 5), layout.groups[1])
         // E le quattro tenute stanno dove devono, non appiccicate a caso.
         val expected = spread(listOf(-63f, -21f, 21f, 63f))
         kept.forEach { index ->

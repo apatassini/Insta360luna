@@ -154,11 +154,15 @@ Quindi il posto **si trova guardando le foto**:
 L'inclinazione, quando la coda Insta360 c'è, non si stima nemmeno qui: viene dalla gravità, che
 è l'unica misura assoluta di tutto il giro. Resta da trovare solo il pan.
 
-**Non tutte devono starci per forza.** Le foto legate fra loro formano gruppi, e ogni gruppo è
-una panoramica possibile: si tiene **il più grande**. Sei foto scelte di cui quattro sono una
-spazzata e due un altro momento diventano una panoramica da quattro, e il log dice quali sono
-rimaste fuori e perché. Prima si mettevano in fila tutte lo stesso, e due scatti che non
-c'entravano allargavano la tela di ottanta gradi per stare in un angolo.
+**Non tutte devono starci per forza — e quelle di troppo non si buttano.** Le foto legate fra
+loro formano gruppi, e **ogni gruppo è un lavoro**. Sei foto scelte di cui quattro sono una
+spazzata e due un altro momento diventano *due* panoramiche, una da quattro e una da due, e chi
+le ha scelte decide quale unire. Le foto che non si attaccano a nessun'altra restano fuori (una
+foto da sola non è una panoramica) e il log dice quali.
+
+Il riconoscimento si fa **subito, all'import**: costa tre decimi di secondo su sei foto, e il
+momento giusto è quando l'utente sta ancora guardando — non un'ora dopo, quando lancia l'unione
+e scopre che mancava metà panoramica.
 
 Alla fine c'è la **controprova**: l'albero si regge su n−1 giunzioni, tutte le altre non hanno
 votato e sono testimoni indipendenti. Se le posizioni sono giuste, ognuna deve ritrovarsi

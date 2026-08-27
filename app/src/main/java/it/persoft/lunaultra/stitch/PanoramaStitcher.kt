@@ -140,6 +140,9 @@ class PanoramaStitcher(
     /** Quanti originali sono stati aperti in anticipo, mentre si dipingeva quello prima. */
     private var prefetchedFrames = 0
 
+    /** Quanto è durato leggere le copie di lavoro: era il pezzo che nessuno cronometrava. */
+    private var loadMillis = 0L
+
     /**
      * I tre tempi della cucitura, tenuti separati perché sono tre lavori diversi.
      *
@@ -244,7 +247,12 @@ class PanoramaStitcher(
                 else -> WORKING_LONG_SIDE
             }
             onProgress(0.02f, "Leggo gli scatti ($workingLongSide px, heap $heapMb MB)")
-            val frames = loadFrames(shots, workingLongSide)
+            val frames = loadFrames(shots, workingLongSide) { loaded ->
+                onProgress(
+                    0.02f + 0.06f * loaded / shots.size,
+                    "Leggo gli scatti ($loaded di ${shots.size}, $workingLongSide px)",
+                )
+            }
             val first = frames.first().bitmap
             val declaredLens = PinholeLens(first.width, first.height, horizontalFovDegrees)
 
@@ -754,7 +762,8 @@ class PanoramaStitcher(
             )
             notes += ("Tempi: allineamento %.0f s · cucitura %.0f s — riconoscimento %.0f s · " +
                 "fusione %.0f s · pittura %.0f s · possessori %.0f s · apertura originali %.0f s" +
-                (if (prefetchedFrames > 0) " ($prefetchedFrames aperti in anticipo)" else "")).format(
+                (if (prefetchedFrames > 0) " ($prefetchedFrames aperti in anticipo)" else "") +
+                " · lettura delle copie di lavoro %.1f s").format(
                 refineSeconds,
                 composeSeconds,
                 recogniseMillis / 1000f,
@@ -762,6 +771,7 @@ class PanoramaStitcher(
                 paintMillis / 1000f,
                 ownerMillis / 1000f,
                 decodeMillis / 1000f,
+                loadMillis / 1000f,
             )
             // Il tempo della scheda non è un tempo in più: sta già dentro riconoscimento e
             // pittura. Separarlo dice l'unica cosa che serve per la mossa successiva — se il
@@ -1475,22 +1485,33 @@ class PanoramaStitcher(
     private suspend fun loadFrames(
         shots: List<PanoramaShot>,
         workingLongSide: Int,
+        onLoaded: (Int) -> Unit = {},
     ): List<Frame> = coroutineScope {
-        // A scaglioni, non tutte insieme.
-        //
-        // Il decodificatore riduce solo per potenze di due, quindi per ogni scatto esistono
-        // per un attimo **due** Bitmap: quello appena decodificato, un po' più grande del
-        // dovuto, e quello riscalato alla misura di lavoro. Con nove scatti in parallelo sono
-        // diciotto immagini insieme in memoria nativa, per un lavoro che dura due secondi. A
-        // quattro per volta i core restano occupati lo stesso e il picco si divide.
-        shots.chunked(LOAD_BATCH).flatMap { batch ->
+        val startedAt = System.currentTimeMillis()
+        val done = java.util.concurrent.atomic.AtomicInteger(0)
+        // A scaglioni, non tutte insieme: ogni scaglione si aspetta prima di aprire il
+        // successivo, così i core restano occupati ma il picco di memoria si divide.
+        val frames = shots.chunked(LOAD_BATCH).flatMap { batch ->
             batch.map { shot ->
                 async(Dispatchers.IO) {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeFile(shot.file.absolutePath, bounds)
+                    val sourceLongSide = max(bounds.outWidth, bounds.outHeight)
+                    val sample = sampleSizeFor(sourceLongSide, workingLongSide)
                     val options = BitmapFactory.Options().apply {
-                        inSampleSize = sampleSizeFor(bounds.outWidth, workingLongSide)
+                        inSampleSize = sample
                         inPreferredConfig = Bitmap.Config.ARGB_8888
+                        // Il salto per potenze di due non basta: una foto da 4000 px scende a
+                        // 2000, non a 1600, e quel 25% in più di lato è il 56% in più di
+                        // memoria e di pixel da riscalare subito dopo. Le due densità dicono
+                        // al decodificatore di finire il lavoro lui, mentre legge: esce un
+                        // Bitmap già della misura giusta, invece di uno grande più una copia
+                        // riscalata: metà della memoria e una passata in meno su ogni pixel.
+                        if (sourceLongSide > workingLongSide) {
+                            inScaled = true
+                            inDensity = sourceLongSide
+                            inTargetDensity = workingLongSide * sample
+                        }
                     }
                     val raw = BitmapFactory.decodeFile(shot.file.absolutePath, options)
                         ?: throw IllegalStateException("Non riesco a leggere ${shot.file.name}")
@@ -1503,9 +1524,10 @@ class PanoramaStitcher(
                             androidx.exifinterface.media.ExifInterface(shot.file),
                         )
                     }.getOrDefault(raw)
-                    // Il decodificatore riduce solo per potenze di due: una foto da 4000 pixel
-                    // scende a 2000, non a 1600, e quel 25% in più di lato è il 56% in più di
-                    // memoria — moltiplicato per gli scatti è la differenza fra unire e morire.
+                    // La rete di sicurezza, che è anche la vecchia strada: se le densità non
+                    // hanno fatto quello che dovevano — un decodificatore può ignorarle — si
+                    // riscala come prima. Un fotogramma più grande del previsto costa memoria
+                    // a tutti gli altri, e questo è il posto dove ce ne si accorge.
                     val longSide = max(decoded.width, decoded.height)
                     val bitmap = if (longSide > workingLongSide) {
                         val scale = workingLongSide.toFloat() / longSide
@@ -1520,10 +1542,13 @@ class PanoramaStitcher(
                     } else {
                         decoded
                     }
-                    Frame(bitmap, shot.label, shot.file, max(bounds.outWidth, bounds.outHeight))
+                    onLoaded(done.incrementAndGet())
+                    Frame(bitmap, shot.label, shot.file, sourceLongSide)
                 }
             }.awaitAll()
         }
+        loadMillis += System.currentTimeMillis() - startedAt
+        frames
     }
 
     private class Refinement(

@@ -181,6 +181,8 @@ vero.
 | — | fusione su GPU con alfa opaca | fusione 15 → 13 s, riporto 3,4 → 2,1 s |
 | `92667c2` | punti di controllo: NCC a passata singola + scansione a passo 2 | **27,4 → 9,5 s**, unione 67 → 41 s |
 | — | apertura del prossimo originale mentre si dipinge questo | da verificare |
+| — | copie di lavoro scalate dal decodificatore in un passaggio solo | da verificare |
+| — | foto scelte dal telefono copiate quattro per volta | da verificare |
 
 ### 5.1 L'ultima modifica, e cosa deve dire il prossimo log
 
@@ -231,6 +233,18 @@ Il log dice quanti ne ha aperti in anticipo: `apertura originali 1 s (8 aperti i
 1. **punti di controllo** — 9,5 s, ancora il pezzo più grosso dell'allineamento
 2. **riporto a piena risoluzione** nella fusione — 6,4 s
 3. **dettagli riconosciuti** — 4,0 s
+
+E una misura che finora non c'era: **la lettura delle copie di lavoro**. Nove foto da 37 Mpx
+lette e ridotte a 3200 px non sono gratis, ma nessun cronometro le contava — stavano dentro i
+quattro secondi che nel conto delle fasi non tornavano. Adesso il verdetto scrive «lettura
+delle copie di lavoro N,N s», ed è la prossima cosa da guardare.
+
+Nel frattempo quella lettura fa metà del lavoro di prima: il decodificatore riduce solo per
+potenze di due, quindi da 7008 px si scendeva a 3504 e poi si riscalava a 3200 — un Bitmap
+grande più una copia. Chiedendo la riduzione con `inDensity`/`inTargetDensity` il
+decodificatore consegna direttamente la misura giusta: un Bitmap invece di due, e una passata
+in meno su ogni pixel. Se un decodificatore ignorasse le densità, il vecchio ridimensionamento
+è ancora lì come rete di sicurezza.
 
 ---
 

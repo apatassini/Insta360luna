@@ -17,6 +17,9 @@ import it.persoft.lunaultra.media.MediaRepository
 import it.persoft.lunaultra.net.EventLog
 import it.persoft.lunaultra.timelapse.ShotAngle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -280,13 +283,28 @@ class PanoramaStitchJob(
 
             // Prima si copiano — un URI non si rilegge due volte con la stessa tranquillità —
             // e poi si guarda dentro per sapere quando sono state scattate.
-            val drafts = sources.mapIndexed { index, source ->
-                currentCoroutineContext().ensureActive()
-                onProgress(index / sources.size.toFloat(), "Copio la foto ${index + 1} di ${sources.size}")
-                val draft = File(workshop, "scelta-%03d.jpg".format(index))
-                source.copyInto(draft)
-                check(draft.length() > 0L) { "la foto ${index + 1} è arrivata vuota" }
-                draft to source.name
+            //
+            // In parallelo: copiare è aspettare il disco, non calcolare, e nove foto da otto
+            // megabyte una dopo l'altra sono nove attese messe in fila per niente. A quattro
+            // per volta il disco lavora mentre l'altra copia si chiude, e il conto
+            // dell'avanzamento sale a ogni foto finita, non a ogni foto cominciata.
+            val done = java.util.concurrent.atomic.AtomicInteger(0)
+            val drafts = coroutineScope {
+                sources.withIndex().chunked(COPY_BATCH).flatMap { batch ->
+                    batch.map { (index, source) ->
+                        async(Dispatchers.IO) {
+                            currentCoroutineContext().ensureActive()
+                            val draft = File(workshop, "scelta-%03d.jpg".format(index))
+                            source.copyInto(draft)
+                            check(draft.length() > 0L) { "la foto ${index + 1} è arrivata vuota" }
+                            onProgress(
+                                done.incrementAndGet() / sources.size.toFloat(),
+                                "Copio le foto (${done.get()} di ${sources.size})",
+                            )
+                            draft to source.name
+                        }
+                    }.awaitAll()
+                }
             }
 
             val ordered = drafts
@@ -939,6 +957,15 @@ class PanoramaStitchJob(
     }
 
     private companion object {
+        /**
+         * Quante foto si copiano insieme dal telefono.
+         *
+         * Copiare è aspettare il disco: quattro attese sovrapposte tengono occupato il
+         * dispositivo senza chiedergli più code di quante ne sappia servire, e senza tenere
+         * aperti troppi flussi insieme su un telefono che nel frattempo fa altro.
+         */
+        const val COPY_BATCH = 4
+
         /**
          * I tag del tempo, copiati dal primo scatto: è l'istante in cui la panoramica è
          * cominciata. Sono cinque perché una data senza il suo fuso, o senza i decimi, è una

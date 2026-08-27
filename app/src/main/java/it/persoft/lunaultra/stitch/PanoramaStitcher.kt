@@ -810,11 +810,11 @@ class PanoramaStitcher(
             )
             notes += memory.describe()
             notes += composeDetail
-            notes += ("Dentro l'allineamento: dettagli riconosciuti %.1f s · ricerca a piramide " +
-                "%.1f s · punti di controllo %.1f s").format(
-                featureMillis / 1000f,
-                searchMillis / 1000f,
-                pointMillis / 1000f,
+            notes += ("Dentro l'allineamento: dettagli riconosciuti %.1f s (%.1f core) · " +
+                "ricerca a piramide %.1f s (%.1f core) · punti di controllo %.1f s (%.1f core)").format(
+                featureMillis / 1000f, share(featureCpuMillis, featureMillis),
+                searchMillis / 1000f, share(searchCpuMillis, searchMillis),
+                pointMillis / 1000f, share(pointCpuMillis, pointMillis),
             )
             notes += ("Tempi: allineamento %.0f s · cucitura %.0f s — riconoscimento %.0f s · " +
                 "fusione %.0f s · pittura %.0f s · possessori %.0f s · apertura originali %.0f s" +
@@ -4705,86 +4705,122 @@ class PanoramaStitcher(
             } else {
                 val bandHeight = (GPU_BAND_PIXELS / sbw)
                     .coerceIn(1, min(sbh, gpu.renderer.maxTextureSize))
-                val oldBand = IntArray(sbw * bandHeight)
-                val outBand = IntArray(sbw * bandHeight)
+
+                // Il riporto in fila indiana costava un core su otto.
+                //
+                // Il giro era: leggi la fascia dalla tela, aspetta che la scheda la fonda,
+                // riscrivila, ricomincia. Tre lavori che non si toccano, fatti uno dopo
+                // l'altro — e la misura l'ha detto senza pietà: «riporto a piena risoluzione
+                // 6,4 s (1,1 core)».
+                //
+                // Adesso mentre la scheda lavora sulla fascia in corso, questo filo legge la
+                // prossima e riscrive la precedente. Le letture e le scritture restano tutte
+                // qui, una per volta — sulla stessa bitmap non si accalca nessuno — e quello
+                // che si sovrappone è l'attesa della scheda, che era il grosso.
+                //
+                // Leggere in anticipo è lecito perché le fasce sono **righe diverse**: la
+                // fascia successiva non la tocca nessuno finché non tocca a lei.
+                val oldBands = arrayOf(IntArray(sbw * bandHeight), IntArray(sbw * bandHeight))
+                val outBands = arrayOf(IntArray(sbw * bandHeight), IntArray(sbw * bandHeight))
+                var slot = 0
                 var good = true
                 var checked = false
                 var by = 0
-                while (by < sbh) {
-                    currentCoroutineContext().ensureActive()
-                    val rows = min(bandHeight, sbh - by)
-                    val row = subRow0 + by
-                    output.getPixels(oldBand, 0, sbw, spanFrom, row, sbw, rows)
-                    val drawStartedAt = System.currentTimeMillis()
-                    good = withContext(gpu.dispatcher) {
-                        gpu.renderer.uploadOldBand(oldBand, sbw, rows) &&
+
+                coroutineScope {
+                    /** Manda la fascia alla scheda senza aspettarla. */
+                    fun renderBand(which: Int, at: Int, rows: Int) = async(gpu.dispatcher) {
+                        gpu.renderer.uploadOldBand(oldBands[which], sbw, rows) &&
                             gpu.renderer.renderTile(
-                                gpuPlan, c0 + sx0, row, sbw, rows,
-                                into = outBand, intoStride = sbw, blend = plan.at(0, by),
+                                gpuPlan, c0 + sx0, subRow0 + at, sbw, rows,
+                                into = outBands[which], intoStride = sbw, blend = plan.at(0, at),
                             )
                     }
-                    gpuDrawMillis += System.currentTimeMillis() - drawStartedAt
-                    if (!good) {
-                        gpuGiveUp("la fusione non è tornata dalla scheda")
-                        break
-                    }
-                    if (!checked) {
-                        checked = true
-                        // L'autocontrollo della fusione: la stessa riga, fatta due volte.
-                        //
-                        // Non c'è una terza copia della formula da tenere allineata. Si fa
-                        // girare il ciclo della CPU su una riga sola — la tela lì è ancora
-                        // quella di partenza, perché la fascia non è stata scritta — poi si
-                        // rimette la riga com'era e si confronta con quello che ha disegnato la
-                        // scheda. Se le due strade divergono, la scheda si spegne prima che un
-                        // pixel sbagliato finisca sulla panoramica.
-                        //
-                        // Qualche pixel di scarto è normale e non è un errore: sul confine del
-                        // taglio la decisione si gioca su un peso identico fino all'ultima
-                        // cifra, e chi calcola in un ordine diverso può cadere dall'altra parte.
-                        // Sono pixel dove i due fotogrammi si assomigliano al massimo. Quello
-                        // che non deve succedere è che siano tanti.
-                        val probe = by + rows / 2
-                        val original = IntArray(sbw)
-                        System.arraycopy(oldBand, (probe - by) * sbw, original, 0, sbw)
-                        val mine = IntArray(sbw)
-                        blendRow(probe, mine, BlendRowNotes(snapW, gw))
-                        output.setPixels(original, 0, sbw, spanFrom, subRow0 + probe, sbw, 1)
-                        var worst = 0
-                        var offenders = 0
-                        val from = (probe - by) * sbw
-                        for (bx in 0 until sbw) {
-                            val a = mine[bx]
-                            val b = outBand[from + bx]
-                            val gap = max(
-                                abs(((a shr 16) and 0xFF) - ((b shr 16) and 0xFF)),
-                                max(
-                                    abs(((a shr 8) and 0xFF) - ((b shr 8) and 0xFF)),
-                                    abs((a and 0xFF) - (b and 0xFF)),
-                                ),
-                            )
-                            if (gap > worst) worst = gap
-                            if (gap > GPU_BLEND_TOLERANCE) offenders++
-                        }
-                        gpuNotes += "Autocontrollo fusione ${frame.label}: colore Δmax %d · %d pixel oltre %d su %d"
-                            .format(worst, offenders, GPU_BLEND_TOLERANCE, sbw)
-                        if (offenders > sbw / GPU_BLEND_OFFENDER_SHARE) {
-                            gpuGiveUp(
-                                ("la fusione sulla scheda non dice la stessa cosa della CPU: " +
-                                    "%d pixel su %d oltre %d livelli, il peggiore %d")
-                                    .format(offenders, sbw, GPU_BLEND_TOLERANCE, worst),
-                            )
-                            good = false
+
+                    var rows = min(bandHeight, sbh)
+                    output.getPixels(oldBands[0], 0, sbw, spanFrom, subRow0, sbw, rows)
+                    var pending = renderBand(0, 0, rows)
+                    while (by < sbh) {
+                        currentCoroutineContext().ensureActive()
+                        rows = min(bandHeight, sbh - by)
+                        val row = subRow0 + by
+                        val drawStartedAt = System.currentTimeMillis()
+                        good = pending.await()
+                        gpuDrawMillis += System.currentTimeMillis() - drawStartedAt
+                        if (!good) {
+                            gpuGiveUp("la fusione non è tornata dalla scheda")
                             break
                         }
+                        val oldBand = oldBands[slot]
+                        val outBand = outBands[slot]
+                        if (!checked) {
+                            checked = true
+                            // L'autocontrollo della fusione: la stessa riga, fatta due volte.
+                            //
+                            // Non c'è una terza copia della formula da tenere allineata. Si fa
+                            // girare il ciclo della CPU su una riga sola — la tela lì è ancora
+                            // quella di partenza, perché la fascia non è stata scritta — poi si
+                            // rimette la riga com'era e si confronta con quello che ha disegnato la
+                            // scheda. Se le due strade divergono, la scheda si spegne prima che un
+                            // pixel sbagliato finisca sulla panoramica.
+                            //
+                            // Qualche pixel di scarto è normale e non è un errore: sul confine del
+                            // taglio la decisione si gioca su un peso identico fino all'ultima
+                            // cifra, e chi calcola in un ordine diverso può cadere dall'altra parte.
+                            // Sono pixel dove i due fotogrammi si assomigliano al massimo. Quello
+                            // che non deve succedere è che siano tanti.
+                            val probe = by + rows / 2
+                            val original = IntArray(sbw)
+                            System.arraycopy(oldBand, (probe - by) * sbw, original, 0, sbw)
+                            val mine = IntArray(sbw)
+                            blendRow(probe, mine, BlendRowNotes(snapW, gw))
+                            output.setPixels(original, 0, sbw, spanFrom, subRow0 + probe, sbw, 1)
+                            var worst = 0
+                            var offenders = 0
+                            val from = (probe - by) * sbw
+                            for (bx in 0 until sbw) {
+                                val a = mine[bx]
+                                val b = outBand[from + bx]
+                                val gap = max(
+                                    abs(((a shr 16) and 0xFF) - ((b shr 16) and 0xFF)),
+                                    max(
+                                        abs(((a shr 8) and 0xFF) - ((b shr 8) and 0xFF)),
+                                        abs((a and 0xFF) - (b and 0xFF)),
+                                    ),
+                                )
+                                if (gap > worst) worst = gap
+                                if (gap > GPU_BLEND_TOLERANCE) offenders++
+                            }
+                            gpuNotes += "Autocontrollo fusione ${frame.label}: colore Δmax %d · %d pixel oltre %d su %d"
+                                .format(worst, offenders, GPU_BLEND_TOLERANCE, sbw)
+                            if (offenders > sbw / GPU_BLEND_OFFENDER_SHARE) {
+                                gpuGiveUp(
+                                    ("la fusione sulla scheda non dice la stessa cosa della CPU: " +
+                                        "%d pixel su %d oltre %d livelli, il peggiore %d")
+                                        .format(offenders, sbw, GPU_BLEND_TOLERANCE, worst),
+                                )
+                                good = false
+                                break
+                            }
+                        }
+                        // La prossima fascia parte adesso: la scheda lavora mentre questo filo
+                        // legge la sua sorgente e riscrive quella appena finita.
+                        val nextAt = by + rows
+                        if (nextAt < sbh) {
+                            val nextRows = min(bandHeight, sbh - nextAt)
+                            output.getPixels(oldBands[1 - slot], 0, sbw, spanFrom, subRow0 + nextAt, sbw, nextRows)
+                            pending = renderBand(1 - slot, nextAt, nextRows)
+                        }
+
+                        // E il riporto non c'è: la fascia riletta dalla scheda è già la tela,
+                        // alfa opaca compresa, e va sulla bitmap così com'è. La passata di mezzo
+                        // che rileggeva e riscriveva tutti i pixel per estrarne il peso costava
+                        // più di quanto il disegno sulla scheda avesse fatto risparmiare.
+                        output.setPixels(outBand, 0, sbw, spanFrom, row, sbw, rows)
+                        slot = 1 - slot
+                        by += rows
+                        doneRows = by
                     }
-                    // E il riporto non c'è: la fascia riletta dalla scheda è già la tela,
-                    // alfa opaca compresa, e va sulla bitmap così com'è. La passata di mezzo
-                    // che rileggeva e riscriveva tutti i pixel per estrarne il peso costava
-                    // più di quanto il disegno sulla scheda avesse fatto risparmiare.
-                    output.setPixels(outBand, 0, sbw, spanFrom, row, sbw, rows)
-                    by += rows
-                    doneRows = by
                 }
                 blendedOnGpu = good
                 withContext(gpu.dispatcher) { gpu.renderer.dropBlend() }

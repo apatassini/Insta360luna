@@ -254,6 +254,29 @@ cinquemila, quattromila volte per fotogramma, con otto lavoratori che si accalca
 Bitmap. Ora quel passaggio legge e riscrive **a fasce**, sul solo pezzo di tela che il
 fotogramma tocca. Per sapere se era davvero quello, ogni sotto-fase ha il suo contatore di core.
 
+### 5.9 Trovato: il riporto della fusione era un core su otto
+
+Con i contatori per sotto-fase, il colpevole è saltato fuori al primo log:
+
+```
+Dentro la fusione: griglia ridotta 2,2 s (3,3 core) · piramidi 2,5 s (2,7 core)
+                   · riporto a piena risoluzione 6,4 s (1,1 core)
+```
+
+Sei secondi e mezzo — la voce più grossa di tutta la cucitura — su **un core solo**. E il
+motivo, guardando il codice, era ovvio una volta saputo dove guardare: il riporto fa tre cose in
+fila indiana per ogni fascia — legge la fascia dalla tela, aspetta che la scheda la fonda, la
+riscrive — e le tre non si toccano fra loro.
+
+Ora mentre la scheda lavora sulla fascia in corso, lo stesso filo legge la prossima e riscrive
+la precedente. Le letture e le scritture restano tutte su un filo solo, una per volta: sulla
+bitmap non si accalca nessuno, e quello che si sovrappone è l'attesa della scheda, che era il
+grosso. Leggere in anticipo è lecito perché le fasce sono righe diverse — la fascia successiva
+non la tocca nessuno finché non tocca a lei.
+
+Le altre due voci della fusione stanno a 3,3 e 2,7 core: non sono sature, ma nemmeno ferme, e
+sono la metà del tempo. Il bersaglio era quello da 1,1.
+
 ### 5.5 La resa dei core, che è la domanda giusta prima di parallelizzare
 
 Parallelizzare «ancora un po'» non si decide dai tempi: una fase che dura dieci secondi può

@@ -153,6 +153,21 @@ class PanoramaStitcher(
         return if (wall <= 0L || cpu <= 0L) 0f else cpu.toFloat() / wall
     }
 
+    /**
+     * Quanto ha lavorato la scheda e quanto l'abbiamo aspettata, in millesimi.
+     *
+     * Il primo lo dichiara lei, con il proprio cronometro, e c'è solo se il driver lo offre.
+     * Il secondo è il tempo passato dentro la rilettura: aspettare che finisca, più il
+     * travaso dei pixel. Separarli dice quale delle due strade prendere — uno shader più
+     * furbo, o un travaso fatto in un altro modo.
+     *
+     * Quanti processori abbia la scheda, e quanti ne stiamo occupando, **non si può sapere**:
+     * nessuna versione di OpenGL ES lo espone, e i produttori non lo dicono.
+     */
+    private var gpuBusyMillis = 0L
+    private var gpuReadMillis = 0L
+    private var gpuTimerReady = false
+
     /** Quanti originali sono stati aperti in anticipo, mentre si dipingeva quello prima. */
     private var prefetchedFrames = 0
 
@@ -820,12 +835,28 @@ class PanoramaStitcher(
                 )
             }
             if (gpuDrawMillis + gpuMergeMillis + gpuUploadMillis > 0L) {
-                notes += ("Di cui sulla scheda grafica: disegno %.1f s · riporto sulla tela %.1f s · " +
-                    "caricamento delle sorgenti %.1f s").format(
+                notes += ("Di cui sulla scheda grafica: disegno %.1f s · riporto sulla tela %.1f s " +
+                    "(in parallelo col disegno) · caricamento delle sorgenti %.1f s").format(
                     gpuDrawMillis / 1000f,
                     gpuMergeMillis / 1000f,
                     gpuUploadMillis / 1000f,
                 )
+                // Dentro quel «disegno» ci sono due cose diverse: il calcolo della scheda e
+                // l'attesa della rilettura. Se il calcolo è piccolo e l'attesa grande, il
+                // collo di bottiglia non è lo shader — è il travaso dei pixel, e si cura
+                // rileggendo in modo asincrono invece di riscrivere il codice del disegno.
+                notes += if (gpuTimerReady) {
+                    "Dentro la scheda: calcolo %.1f s (dichiarato da lei) · rilettura e attesa %.1f s · %.0f%% del tempo di cucitura"
+                        .format(
+                            gpuBusyMillis / 1000f,
+                            gpuReadMillis / 1000f,
+                            100f * gpuBusyMillis / max(1L, (composeSeconds * 1000).toLong()),
+                        )
+                } else {
+                    ("Dentro la scheda: rilettura e attesa %.1f s · il cronometro della scheda " +
+                        "non c'è su questo driver, quindi il tempo di calcolo non è misurabile")
+                        .format(gpuReadMillis / 1000f)
+                }
             }
             // Il ritaglio disegnato a mano, prima di quello automatico.
             //
@@ -3579,6 +3610,11 @@ class PanoramaStitcher(
 
     private suspend fun closeGpu(gpu: GpuSession?) {
         if (gpu == null) return
+        // I due numeri della scheda si prendono **prima** di chiuderla: dopo non c'è più
+        // nessuno a cui chiederli.
+        gpuBusyMillis = gpu.renderer.busyNanos / 1_000_000L
+        gpuReadMillis = gpu.renderer.readNanos / 1_000_000L
+        gpuTimerReady = gpu.renderer.timerReady
         withContext(NonCancellable + gpu.dispatcher) { gpu.renderer.release() }
         gpu.dispatcher.close()
     }

@@ -248,6 +248,31 @@ l'unico modo di accorciarla è **fare meno lavoro**, non spartirlo meglio — è
 portato i punti di controllo da 27,4 s a 9,5. Molto sotto: c'è qualcuno che aspetta, e va
 trovato chi.
 
+### 5.7 E la scheda grafica? Quello che si può misurare e quello che no
+
+Per la CPU la domanda «quanti core sto occupando» ha una risposta esatta. Per la scheda **no**,
+e non per pigrizia: OpenGL ES non dice quanti processori abbia una GPU né quanti ne siano
+occupati. Non c'è una chiamata che lo chieda. Si sa il nome — `Adreno (TM) 750` — e da lì si
+può andare a leggere una scheda tecnica, ma è una consultazione, non una misura, e non dice
+niente su quanto la stiamo usando.
+
+Quello che si può misurare sono due tempi, e sono i due che servono:
+
+| | cosa è | come si misura |
+|---|---|---|
+| **calcolo** | quanto la scheda dichiara di aver passato a eseguire i nostri disegni | `GL_EXT_disjoint_timer_query`, un cronometro che sta sulla scheda; c'è quasi sempre su Adreno e Mali, ma è un'estensione |
+| **rilettura e attesa** | quanto il nostro filo passa dentro `glReadPixels`: aspettare che finisca, più travasare i pixel | tempo di parete attorno alla chiamata, sempre disponibile |
+
+La separazione è la cosa utile. Le chiamate di disegno tornano subito — la scheda lavora per
+conto suo — quindi il «disegno 2,2 s» del verdetto **non** è il tempo del disegno: è disegno più
+attesa. Se il calcolo dichiarato è mezzo secondo e l'attesa è un secondo e mezzo, il collo di
+bottiglia non è lo shader: è il travaso, e si cura rileggendo in modo asincrono (con un buffer
+di pixel) invece di riscrivere il codice del disegno. Se invece il calcolo è quasi tutto, allora
+sì che si guarda lo shader.
+
+Il verdetto scrive entrambe le righe, e quando il cronometro non c'è lo dichiara invece di
+stampare uno zero che sembrerebbe una misura.
+
 ### 5.6 Le due cose che aspettavano
 
 **La scheda e i core, nella pittura.** La scheda disegnava una fascia mentre gli otto core

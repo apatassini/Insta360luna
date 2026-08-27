@@ -114,6 +114,54 @@ class GpuStitchRenderer private constructor(
      * Con [weightOnly] non si legge la foto: torna solo il peso della sfumatura nell'alfa. È
      * la ricognizione, che di colori non sa che farsene.
      */
+    /**
+     * Quanto ha lavorato davvero la scheda, in nanosecondi, e quanto abbiamo aspettato noi.
+     *
+     * Sono due numeri diversi e vanno tenuti diversi. [busyNanos] è il tempo che la scheda
+     * dichiara di aver passato a eseguire i nostri disegni: lo misura lei, con un cronometro
+     * suo, e vale solo se il driver offre l'estensione dei cronometri. [readNanos] è il tempo
+     * che il nostro filo ha passato dentro la rilettura, cioè ad aspettare la scheda e a
+     * travasare i pixel.
+     *
+     * Quello che **non** si può sapere è quanti dei suoi processori erano occupati: nessuna
+     * versione di OpenGL ES lo dice, e nemmeno quanti ne abbia. Si sa il nome della scheda e
+     * quanto tempo ha lavorato; il resto è un dato che i produttori non espongono.
+     */
+    var busyNanos = 0L
+        private set
+    var readNanos = 0L
+        private set
+
+    /** Vero quando i cronometri della scheda ci sono: senza, [busyNanos] resta a zero. */
+    val timerReady: Boolean get() = timerSupported
+
+    internal var timerSupported = false
+    private val timerIds = IntArray(1)
+
+    private fun beginTimer(): Boolean {
+        if (!timerSupported) return false
+        return runCatching {
+            if (timerIds[0] == 0) GLES30.glGenQueries(1, timerIds, 0)
+            GLES30.glBeginQuery(TIME_ELAPSED_EXT, timerIds[0])
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun endTimer(started: Boolean) {
+        if (started) runCatching { GLES30.glEndQuery(TIME_ELAPSED_EXT) }
+    }
+
+    private fun collectTimer(started: Boolean) {
+        if (!started) return
+        runCatching {
+            // Dopo la rilettura il disegno è per forza finito: il risultato è già pronto e
+            // chiederlo non fa aspettare nessuno.
+            val out = IntArray(1)
+            GLES30.glGetQueryObjectuiv(timerIds[0], GLES30.GL_QUERY_RESULT, out, 0)
+            busyNanos += out[0].toLong() and 0xFFFFFFFFL
+        }
+    }
+
     fun renderTile(
         uniforms: GpuFrameUniforms,
         column0: Int,
@@ -147,12 +195,22 @@ class GpuStitchRenderer private constructor(
         // indici, così non serve nessun buffer di geometria.
         GLES30.glClearColor(0f, 0f, 0f, 0f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        val timer = beginTimer()
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+        endTimer(timer)
         checkError("disegno della piastrella")
 
+        // Il tempo di questa chiamata **non** è il tempo del disegno: le chiamate di disegno
+        // tornano subito, la scheda lavora per conto suo, e chi la aspetta davvero è la
+        // rilettura. Tenerli separati è l'unico modo di sapere se il collo di bottiglia è il
+        // calcolo — e allora si tocca lo shader — o il travaso dei pixel, che è un'altra cosa
+        // e si cura in un altro modo.
+        val readStartedAt = System.nanoTime()
         val pixels = readBuffer ?: error("nessun buffer di rilettura")
         pixels.rewind()
         GLES30.glReadPixels(0, 0, width, height, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, pixels)
+        readNanos += System.nanoTime() - readStartedAt
+        collectTimer(timer)
         checkError("rilettura della piastrella")
         pixels.rewind()
         val out = into ?: error("nessun vettore di destinazione")
@@ -469,6 +527,12 @@ class GpuStitchRenderer private constructor(
             GLES30.glGetIntegerv(GLES30.GL_MAX_TEXTURE_SIZE, maxTexture, 0)
             val name = (GLES30.glGetString(GLES30.GL_RENDERER) ?: "GPU").trim()
 
+            // I cronometri della scheda: ci sono quasi sempre su Adreno e Mali, ma sono
+            // un'estensione, non una garanzia. Senza, si misura lo stesso quanto si aspetta —
+            // e quello e` il numero che conta di piu`.
+            val extensions = GLES30.glGetString(GLES30.GL_EXTENSIONS) ?: ""
+            val timers = extensions.contains("GL_EXT_disjoint_timer_query")
+
             // Un pixel di comodo da legare all'unità di campionamento quando il colore non
             // serve: un'unità senza niente attaccato è comportamento indefinito, anche se
             // lo shader poi non la legge.
@@ -486,7 +550,7 @@ class GpuStitchRenderer private constructor(
             GpuStitchRenderer(
                 display, context, surface, program, dummy[0],
                 maxTexture[0].coerceAtLeast(2048), name,
-            )
+            ).also { it.timerSupported = timers }
         }.getOrNull()
 
         private fun buildProgram(): Int {
@@ -515,6 +579,16 @@ class GpuStitchRenderer private constructor(
         }
 
         private const val EGL_OPENGL_ES3_BIT = 0x0040
+
+        /**
+         * Il cronometro della scheda, da `GL_EXT_disjoint_timer_query`.
+         *
+         * ES 3.0 sa contare i campioni passati, non il tempo: il tempo lo aggiunge questa
+         * estensione, che su Adreno e Mali c'e` quasi sempre. Il numero e` una costante e le
+         * chiamate sono quelle standard delle interrogazioni, quindi non serve nient'altro
+         * che passarlo a `glBeginQuery`.
+         */
+        private const val TIME_ELAPSED_EXT = 0x88BF
 
         /** Il triangolo che copre lo schermo, fabbricato dagli indici senza nessun buffer. */
         private const val VERTEX_SHADER = """#version 300 es

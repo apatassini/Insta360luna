@@ -428,7 +428,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            // ---- Il peso del fuoco, quando il fuoco è acceso ----
+            // ---- Il peso del fuoco ----
             //
             // Un cursore e non una casella, perché non è una cosa che si decide una volta per
             // tutte: dipende da quanto le due foto sono diverse, e quello lo vede solo chi
@@ -436,26 +436,33 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             // fuoco è un'opinione fra le altre e la geometria resta padrona; verso l'alto
             // comanda lui, fino a prendersi quasi tutta la sovrapposizione quando una delle due
             // è a fuoco e l'altra no.
-            if (focusOn) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text("Fuoco", style = MaterialTheme.typography.labelLarge, color = Luna.OnSurfaceDim)
-                    Slider(
-                        value = view.focusStrength ?: 1f,
-                        onValueChange = viewModel::setPointOfViewFocusStrength,
-                        valueRange = 0f..3f,
-                        steps = 29,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        "×%.1f".format(view.focusStrength ?: 1f),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = Color.White,
-                    )
-                }
+            //
+            // Si vede **sempre**, anche a fuoco spento. Mostrarlo solo quando l'interruttore è
+            // acceso vuol dire che chi non sa dell'interruttore non trova nemmeno il cursore, e
+            // un comando che compare solo se ne hai già trovato un altro è un comando che non
+            // c'è. Spento è smorto, e muoverlo lo accende.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Fuoco",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (focusOn) Luna.OnSurfaceDim else Luna.OnSurfaceDim.copy(alpha = 0.5f),
+                )
+                Slider(
+                    value = view.focusStrength ?: 1f,
+                    onValueChange = viewModel::setPointOfViewFocusStrength,
+                    valueRange = 0f..3f,
+                    steps = 29,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    if (focusOn) "×%.1f".format(view.focusStrength ?: 1f) else "spento",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (focusOn) Color.White else Luna.OnSurfaceDim,
+                )
             }
 
             // ---- Rollio: il primo comando sotto la foto, perché è quello che si corregge a occhio ----

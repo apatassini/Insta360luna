@@ -131,6 +131,7 @@ object PanoLayoutFinder {
         for (a in frames.indices) for (b in a + 1 until frames.size) couples += a to b
 
         val matchStartedAt = System.currentTimeMillis()
+        val nearMisses = java.util.Collections.synchronizedList(mutableListOf<Triple<Int, Int, Int>>())
         val found = coroutineScope {
             couples.mapIndexed { step, (a, b) ->
                 async(Dispatchers.Default) {
@@ -138,7 +139,9 @@ object PanoLayoutFinder {
                         0.4f + 0.5f * step / couples.size,
                         "Provo ${frames[a].label} con ${frames[b].label}",
                     )
-                    link(a, b, points[a], points[b], placements, lenses, horizontalFovDegrees)
+                    link(a, b, points[a], points[b], placements, lenses, horizontalFovDegrees) { x, y, count ->
+                        if (count >= NEAR_MISS_INLIERS) nearMisses += Triple(x, y, count)
+                    }
                 }
             }.awaitAll()
         }
@@ -149,6 +152,7 @@ object PanoLayoutFinder {
         val spots = propagate(frames, links, notes)
         notes += describe(frames, links)
         notes += crossCheck(spots, links)
+        describeNearMisses(frames, nearMisses)?.let { notes += it }
         return PanoLayout(spots, links, notes)
     }
 
@@ -174,6 +178,7 @@ object PanoLayoutFinder {
         placements: List<FramePlacement>,
         lenses: List<PinholeLens>,
         horizontalFovDegrees: Float,
+        onNearMiss: (Int, Int, Int) -> Unit = { _, _, _ -> },
     ): LayoutLink? {
         if (pointsA.size < MIN_INLIERS || pointsB.size < MIN_INLIERS) return null
         val matches = FeatureMatcher.match(pointsA, pointsB)
@@ -219,7 +224,12 @@ object PanoLayoutFinder {
                 bestTilt = tiltShift[i]
             }
         }
-        if (bestCount < MIN_INLIERS) return null
+        if (bestCount < MIN_INLIERS) {
+            // Quanti dettagli erano andati d'accordo, anche se non abbastanza: è la
+            // differenza fra «queste due foto non si toccano» e «per un pelo».
+            onNearMiss(a, b, bestCount)
+            return null
+        }
 
         var sumPan = 0f
         var sumTilt = 0f
@@ -232,9 +242,15 @@ object PanoLayoutFinder {
                 inliers++
             }
         }
-        if (inliers < MIN_INLIERS) return null
+        if (inliers < MIN_INLIERS) {
+            onNearMiss(a, b, inliers)
+            return null
+        }
         val agreement = inliers.toFloat() / matches.size
-        if (agreement < MIN_AGREEMENT) return null
+        if (agreement < MIN_AGREEMENT) {
+            onNearMiss(a, b, inliers)
+            return null
+        }
         return LayoutLink(a, b, sumPan / inliers, sumTilt / inliers, inliers, agreement)
     }
 
@@ -273,12 +289,41 @@ object PanoLayoutFinder {
         val neighbours = Array(frames.size) { mutableListOf<LayoutLink>() }
         tree.forEach { neighbours[it.a] += it; neighbours[it.b] += it }
 
+        // I gruppi: chi si tiene per mano con chi.
+        //
+        // Non tutte le foto scelte fanno parte della stessa panoramica, ed è normale — nella
+        // cartella del telefono stanno di fianco scatti di momenti diversi, e chi le sceglie
+        // ne prende qualcuna di troppo. Un tempo si mettevano tutte in fila lo stesso, e due
+        // scatti che non c'entravano niente allargavano la tela di ottanta gradi per stare in
+        // un angolo. Adesso ogni gruppo di foto legate fra loro è una panoramica possibile, e
+        // si tiene **la più grande**: è quella che si voleva.
+        val group = IntArray(frames.size) { -1 }
+        var groups = 0
+        frames.indices.forEach { start ->
+            if (group[start] >= 0) return@forEach
+            val walk = ArrayDeque<Int>().apply { add(start) }
+            group[start] = groups
+            while (walk.isNotEmpty()) {
+                val node = walk.removeFirst()
+                neighbours[node].forEach { link ->
+                    val other = if (link.a == node) link.b else link.a
+                    if (group[other] >= 0) return@forEach
+                    group[other] = groups
+                    walk.add(other)
+                }
+            }
+            groups++
+        }
+        val sizes = IntArray(groups)
+        group.forEach { sizes[it]++ }
+        val chosen = (0 until groups).maxByOrNull { sizes[it] } ?: 0
+
         val pan = FloatArray(frames.size)
         val tilt = FloatArray(frames.size)
         val placed = BooleanArray(frames.size)
 
-        // Si parte dalla foto più legata di tutte: quella con più dettagli in comune attorno.
-        val anchor = frames.indices.maxByOrNull { index ->
+        // Si parte dalla foto più legata del gruppo scelto: quella con più dettagli in comune.
+        val anchor = frames.indices.filter { group[it] == chosen }.maxByOrNull { index ->
             neighbours[index].sumOf { it.score.toDouble() }
         } ?: 0
         pan[anchor] = 0f
@@ -303,27 +348,56 @@ object PanoLayoutFinder {
             }
         }
 
-        // Chi è rimasto fuori non si inventa: si mette di fianco alle altre e si **dichiara**,
-        // così l'unione sa che quella posizione è un ripiego e la cerca larga.
-        val unplaced = frames.indices.filter { !placed[it] }
-        if (unplaced.isNotEmpty()) {
-            val edge = frames.indices.filter { placed[it] }.maxOfOrNull { pan[it] } ?: 0f
-            unplaced.forEachIndexed { position, index ->
-                pan[index] = edge + STRANDED_STEP_DEGREES * (position + 1)
-                tilt[index] = frames[index].knownTiltDegrees ?: 0f
+        val left = frames.indices.filter { !placed[it] }
+        if (left.isNotEmpty()) {
+            val others = (0 until groups).filter { it != chosen && sizes[it] > 1 }
+            notes += buildString {
+                append("Fuori da questa panoramica: ")
+                append(left.joinToString(" · ") { frames[it].label })
+                append(". ")
+                append(
+                    if (others.isEmpty()) {
+                        "Non hanno dettagli in comune con le altre — sono scatti di un altro momento."
+                    } else {
+                        "Farebbero ${others.size} panoramica/he per conto loro; qui si tiene la più grande."
+                    },
+                )
             }
-            notes += "Senza posto sicuro: " + unplaced.joinToString(" · ") { frames[it].label } +
-                ". Messe di fianco alle altre, con la ricerca larga."
         }
 
         // Ricentrata: il pan sempre, perché è tutto relativo e nessuno sa dov'è il nord.
         // L'inclinazione solo se nessuna foto la sa dalla gravità — quando la sanno, quello è
         // l'orizzonte vero e spostarlo butterebbe via l'unica misura assoluta che c'è.
-        val meanPan = pan.average().toFloat()
-        val meanTilt = if (frames.any { it.knownTiltDegrees != null }) 0f else tilt.average().toFloat()
+        val inside = frames.indices.filter { placed[it] }
+        val meanPan = if (inside.isEmpty()) 0f else inside.map { pan[it] }.average().toFloat()
+        val meanTilt = when {
+            frames.any { it.knownTiltDegrees != null } -> 0f
+            inside.isEmpty() -> 0f
+            else -> inside.map { tilt[it] }.average().toFloat()
+        }
         return frames.indices.map { index ->
             LayoutSpot(pan[index] - meanPan, tilt[index] - meanTilt, placed[index])
         }
+    }
+
+    /**
+     * Le coppie che ci sono andate vicino: quante ne servivano e quante ne avevano.
+     *
+     * Una coppia scartata in silenzio non dice niente, e la differenza fra «queste due foto
+     * non si toccano» e «per un pelo» è tutto quello che serve sapere per capire se la soglia
+     * è giusta o se le foto si sovrappongono troppo poco. Chi legge il verdetto deve poterlo
+     * distinguere senza avere il codice davanti.
+     */
+    private fun describeNearMisses(
+        frames: List<LayoutFrame>,
+        misses: List<Triple<Int, Int, Int>>,
+    ): String? {
+        if (misses.isEmpty()) return null
+        val worth = misses.sortedByDescending { it.third }.take(MAX_DESCRIBED)
+        return "Coppie vicine alla soglia (ne servono %d): ".format(MIN_INLIERS) +
+            worth.joinToString(" · ") { (a, b, count) ->
+                "%s/%s %d dettagli".format(frames[a].label, frames[b].label, count)
+            }
     }
 
     /**
@@ -403,8 +477,10 @@ object PanoLayoutFinder {
     /** Di quanto una giunzione può discostarsi dalle posizioni scelte restando d'accordo. */
     const val CHECK_DEGREES = 4f
 
+    /** Sotto questi dettagli d'accordo una coppia non è nemmeno «vicina»: è rumore. */
+    private const val NEAR_MISS_INLIERS = 4
+
     private const val CELLS_ACROSS = 30
     private const val MIN_CELL = 12
-    private const val STRANDED_STEP_DEGREES = 40f
     private const val MAX_DESCRIBED = 12
 }

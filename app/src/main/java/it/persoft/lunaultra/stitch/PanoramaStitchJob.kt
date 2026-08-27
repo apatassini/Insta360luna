@@ -581,10 +581,31 @@ class PanoramaStitchJob(
             },
         )
 
-        return files.mapIndexed { index, file ->
+        // Solo il gruppo scelto. Chi non ci sta dentro non viene messo di fianco per non
+        // lasciarlo indietro: verrebbe una tela larga il doppio con due scatti in un angolo
+        // che non c'entrano niente. Meglio una panoramica vera con meno foto.
+        val kept = files.indices.filter { layout.spots[it].placed }
+        if (kept.size < 2) {
+            log.warn(
+                "UNIONE MANUALE · UN GRUPPO SOLO NON C'È",
+                "Nessun insieme di due o più foto si tiene per mano. Si prova con tutte, " +
+                    "assumendo una fila.",
+            )
+            return evenRow(files, horizontalFovDegrees, overlapPercent)
+        }
+        if (kept.size < files.size) {
+            log.warn(
+                "UNIONE MANUALE · NON TUTTE INSIEME",
+                "Unisco ${kept.size} foto su ${files.size}: " +
+                    kept.joinToString(" · ") { layoutFrames[it].label } +
+                    ". Le altre non hanno dettagli in comune con queste — se erano una " +
+                    "panoramica per conto loro, falle in un job a parte.",
+            )
+        }
+        return kept.map { index ->
             val spot = layout.spots[index]
             PanoramaShot(
-                file = file,
+                file = files[index],
                 panDegrees = spot.panDegrees,
                 tiltDegrees = spot.tiltDegrees,
                 label = layoutFrames[index].label,

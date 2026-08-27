@@ -56,6 +56,7 @@ import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
 import it.persoft.lunaultra.update.UpdateManager
 import it.persoft.lunaultra.ui.viewfinder.CaptureMode
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -1299,6 +1300,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val POINT_OF_VIEW_MAX_TILT = 89f
 
     /**
+     * Quanto grande si ridisegna l'anteprima quando la si ingrandisce, al massimo.
+     *
+     * Duemilaquattrocento pixel di lato lungo sono diciassette megabyte di Bitmap: abbastanza
+     * da vedere davvero le giunzioni, abbastanza pochi da stare accanto a tutto il resto senza
+     * che nessuno se ne accorga.
+     */
+    private val POINT_OF_VIEW_MAX_LONG_SIDE = 2_400
+
+    /** Di quanto l'anteprima e` ingrandita adesso: la decide il pizzico, la usa il pennello. */
+    private var pointOfViewZoom = 1f
+
+    /**
      * Quanto puo` girare un tocco solo. Oltre, si tocca di nuovo.
      *
      * «Portalo al centro» su un punto al bordo di una panoramica larga puo` valere sessanta
@@ -1406,6 +1419,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *
      * I numeri della deformazione non passano di qui: costano niente e si aggiornano subito.
      */
+    /**
+     * L'ingrandimento e` cambiato: se e` fermo da un attimo, si ridisegna piu` fitto.
+     *
+     * Non a ogni frazione di pizzico — sarebbero decine di ridisegni grandi mentre le dita si
+     * muovono, e il pizzico diventerebbe a scatti come lo era il trascinamento. Durante il
+     * gesto l'immagine si ingrandisce e basta, com'e`; il pennello arriva dopo.
+     */
+    fun setPointOfViewZoom(zoom: Float, settled: Boolean) {
+        val wanted = zoom.coerceAtLeast(1f)
+        if (abs(wanted - pointOfViewZoom) < 0.01f) return
+        pointOfViewZoom = wanted
+        if (settled) repaintPointOfView()
+    }
+
     private fun repaintPointOfView(immediate: Boolean = false) {
         val painter = pointOfViewPainter ?: return
         _pointOfViewShape.value = runCatching { painter.deformation(_pointOfView.value) }.getOrNull()
@@ -1422,7 +1449,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val side = if (_pointOfViewDragging.value) {
                         POINT_OF_VIEW_DRAG_LONG_SIDE
                     } else {
-                        POINT_OF_VIEW_LONG_SIDE
+                        // Ingrandendo, l'anteprima si ridisegna piu` fitta invece di essere
+                        // ingrandita e basta: guardare da vicino dei pixel gonfiati non dice
+                        // se due foto sono attaccate bene, dice solo che sono pixel gonfiati.
+                        (POINT_OF_VIEW_LONG_SIDE * pointOfViewZoom)
+                            .toInt()
+                            .coerceIn(POINT_OF_VIEW_LONG_SIDE, POINT_OF_VIEW_MAX_LONG_SIDE)
                     }
                     runCatching { painter.paint(view, side) }
                         .onSuccess { _pointOfViewImage.value = it }

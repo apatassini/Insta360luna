@@ -168,6 +168,42 @@ class PanoLayoutTest {
      * un ramo intero dell'albero. Qui si chiede che non ne nasca nessuna, e che l'errore non
      * cresca lungo la catena — la foto più lontana dall'ancora è cinque passi più in là.
      */
+    /**
+     * Il caso vero: si scelgono sei foto e quattro sono una panoramica, due un altro momento.
+     *
+     * Succede sempre, perché nella cartella del telefono gli scatti stanno di fianco e chi
+     * sceglie ne prende qualcuna di troppo. Prima si mettevano tutte in fila lo stesso, e due
+     * scatti che non c'entravano allargavano la tela di ottanta gradi per stare in un angolo.
+     * Adesso ogni gruppo di foto legate fra loro è una panoramica possibile, e si tiene la più
+     * grande — che è quella che si voleva.
+     */
+    @Test
+    fun `le foto di un altro momento restano fuori, e resta la panoramica piu' grande`() = runBlocking {
+        val panorama = World(seed = 31)
+        val altrove = World(seed = 77)
+        val fov = 60f
+        val frames = listOf(-63f, -21f, 21f, 63f).mapIndexed { index, pan ->
+            shoot(panorama, "Foto ${index + 1}", pan, 0f, fov)
+        } + listOf(-20f, 20f).mapIndexed { index, pan ->
+            shoot(altrove, "Estranea ${index + 1}", pan, 0f, fov)
+        }
+
+        val layout = PanoLayoutFinder.solve(frames, fov)
+
+        val kept = layout.spots.indices.filter { layout.spots[it].placed }
+        assertEquals("la panoramica tenuta è quella da quattro", listOf(0, 1, 2, 3), kept)
+        // E le quattro tenute stanno dove devono, non appiccicate a caso.
+        val expected = spread(listOf(-63f, -21f, 21f, 63f))
+        kept.forEach { index ->
+            assertEquals(
+                "pan di ${frames[index].label}",
+                expected[index].toDouble(),
+                layout.spots[index].panDegrees.toDouble(),
+                3.0,
+            )
+        }
+    }
+
     @Test
     fun `venti foto in quattro file si rimettono a posto`() = runBlocking {
         val world = World(seed = 21)

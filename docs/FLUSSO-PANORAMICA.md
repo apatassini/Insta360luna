@@ -106,6 +106,14 @@ alla foto.**
 └───────────────────────────────┘
 ```
 
+**Due dita ingrandiscono**, fino a quattro volte. Serve a controllare, non a modificare: con la
+panoramica intera in trecento pixel due foto attaccate bene e due attaccate male si somigliano.
+Il punto di fuga non cambia di una virgola — cambia solo quanto da vicino lo si guarda. E
+ingrandendo l'anteprima **si ridisegna più fitta** invece di essere gonfiata: guardare da vicino
+dei pixel ingranditi direbbe solo che sono pixel ingranditi. Con l'immagine ingrandita anche il
+dito diventa fine, perché lo stesso pixel di schermo vale meno gradi. La riga dei numeri dice
+«ingrandita ×2,4» e toccarla torna a uno.
+
 **Il trascinamento** sposta il punto di fuga dal vivo. Durante il trascinamento l'anteprima si
 ridipinge a **360 px** di lato lungo invece di 720: al dito serve la reattività, non i dettagli.
 I ridisegni **non si annullano mai a vicenda** — se ne arriva uno mentre l'altro è in corso, il
@@ -145,6 +153,12 @@ Quindi il posto **si trova guardando le foto**:
 
 L'inclinazione, quando la coda Insta360 c'è, non si stima nemmeno qui: viene dalla gravità, che
 è l'unica misura assoluta di tutto il giro. Resta da trovare solo il pan.
+
+**Non tutte devono starci per forza.** Le foto legate fra loro formano gruppi, e ogni gruppo è
+una panoramica possibile: si tiene **il più grande**. Sei foto scelte di cui quattro sono una
+spazzata e due un altro momento diventano una panoramica da quattro, e il log dice quali sono
+rimaste fuori e perché. Prima si mettevano in fila tutte lo stesso, e due scatti che non
+c'entravano allargavano la tela di ottanta gradi per stare in un angolo.
 
 Alla fine c'è la **controprova**: l'albero si regge su n−1 giunzioni, tutte le altre non hanno
 votato e sono testimoni indipendenti. Se le posizioni sono giuste, ognuna deve ritrovarsi

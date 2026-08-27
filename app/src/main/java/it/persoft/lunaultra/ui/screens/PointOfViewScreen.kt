@@ -3,6 +3,7 @@ package it.persoft.lunaultra.ui.screens
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +39,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
@@ -47,6 +49,13 @@ import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.theme.Luna
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+/**
+ * Quanto ci si puo` avvicinare all'anteprima. Quattro volte: oltre, di una panoramica larga
+ * centottanta gradi se ne vede una fetta cosi` stretta che non si capisce piu` dove si sta
+ * guardando, e il senso era controllare come stanno insieme le foto.
+ */
+private const val MAX_ZOOM = 4f
 
 /**
  * La fase intermedia: da dove guardare la panoramica.
@@ -72,6 +81,14 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
 
     // Dove sta il dito adesso, in pixel dello schermo: serve solo a disegnarci sopra il segno.
     var finger by remember { mutableStateOf<Offset?>(null) }
+
+    // L'ingrandimento e di quanto l'immagine e` stata spostata sotto la lente.
+    //
+    // Serve a **controllare**, non a modificare: con la panoramica intera in trecento pixel
+    // due foto attaccate male e due attaccate bene si somigliano. Il punto di fuga non cambia
+    // di una virgola — quello che cambia e` quanto da vicino lo si guarda.
+    var zoom by remember { mutableStateOf(1f) }
+    var shift by remember { mutableStateOf(Offset.Zero) }
 
     /**
      * L'ultima anteprima disegnata, letta **dentro** il gesto invece che dall'esterno.
@@ -111,6 +128,12 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = zoom,
+                            scaleY = zoom,
+                            translationX = shift.x,
+                            translationY = shift.y,
+                        )
                         // Un gesto solo per due mestieri, e non due che si contendono il dito.
                         //
                         // Tocco e trascinamento erano due rilevatori separati, e litigavano:
@@ -137,12 +160,70 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                                 val top = (size.height - drawnHeight) / 2f
                                 val perPixelX = shot.horizontalDegrees / drawnWidth
                                 val perPixelY = shot.verticalDegrees / drawnHeight
+                                val centre = Offset(size.width / 2f, size.height / 2f)
+
+                                /** Dal pixel dello schermo al pixel dell'immagine come sarebbe senza ingrandimento. */
+                                fun unzoom(point: Offset): Offset =
+                                    (point - centre - shift) / zoom + centre
+
+                                /** L'immagine non si porta via: si ferma quando il suo bordo arriva al bordo. */
+                                fun clamp(offset: Offset): Offset {
+                                    val slackX = (drawnWidth * zoom - size.width).coerceAtLeast(0f) / 2f
+                                    val slackY = (drawnHeight * zoom - size.height).coerceAtLeast(0f) / 2f
+                                    return Offset(
+                                        offset.x.coerceIn(-slackX, slackX),
+                                        offset.y.coerceIn(-slackY, slackY),
+                                    )
+                                }
+
                                 finger = down.position
                                 viewModel.beginPointOfViewDrag()
                                 var last = down.position
                                 var travelled = 0f
+                                var pinching = false
+                                var lastSpan = 0f
+                                var lastMiddle = Offset.Zero
                                 while (true) {
                                     val event = awaitPointerEvent()
+                                    val down2 = event.changes.filter { it.pressed }
+                                    if (down2.size >= 2) {
+                                        // Due dita: si guarda da vicino. Il punto di fuga non
+                                        // si tocca — con due dita sullo schermo nessuno sta
+                                        // scegliendo dove guardare, sta guardando meglio.
+                                        val a = down2[0].position
+                                        val b = down2[1].position
+                                        val span = (a - b).getDistance()
+                                        val middle = (a + b) / 2f
+                                        if (!pinching) {
+                                            pinching = true
+                                            travelled = Float.MAX_VALUE
+                                            finger = null
+                                        } else if (lastSpan > 1f) {
+                                            val was = zoom
+                                            zoom = (zoom * span / lastSpan).coerceIn(1f, MAX_ZOOM)
+                                            // Il punto fra le dita resta fra le dita: e` la
+                                            // differenza fra ingrandire e far scappare via
+                                            // quello che si stava guardando.
+                                            shift = clamp(
+                                                (shift + middle - lastMiddle) * (zoom / was) +
+                                                    (middle - centre) * (1f - zoom / was),
+                                            )
+                                            viewModel.setPointOfViewZoom(zoom, settled = false)
+                                        }
+                                        lastSpan = span
+                                        lastMiddle = middle
+                                        down2.forEach { it.consume() }
+                                        continue
+                                    }
+                                    if (pinching) {
+                                        if (down2.isEmpty()) break
+                                        // Un dito solo dopo il pizzico: si riparte da capo,
+                                        // altrimenti lo scarto fra le due posizioni diventa
+                                        // uno strappo.
+                                        last = down2.first().position
+                                        lastSpan = 0f
+                                        continue
+                                    }
                                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                     if (!change.pressed) break
                                     val step = change.position - last
@@ -153,27 +234,35 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                                         change.consume()
                                         // Il dito trascina l'immagine, non il punto di vista:
                                         // il punto toccato resta sotto il dito e il centro gli
-                                        // va incontro.
+                                        // va incontro. Ingrandendo, lo stesso pixel di schermo
+                                        // vale meno gradi: e` questo che rende il movimento
+                                        // fine quando serve fine.
                                         viewModel.dragPointOfView(
-                                            panDegrees = -step.x * perPixelX,
-                                            tiltDegrees = step.y * perPixelY,
+                                            panDegrees = -step.x * perPixelX / zoom,
+                                            tiltDegrees = step.y * perPixelY / zoom,
                                         )
                                     }
                                 }
                                 finger = null
                                 viewModel.endPointOfViewDrag()
-                                if (travelled <= slop) {
+                                if (pinching) {
+                                    if (zoom <= 1.01f) {
+                                        zoom = 1f
+                                        shift = Offset.Zero
+                                    }
+                                    viewModel.setPointOfViewZoom(zoom, settled = true)
+                                } else if (travelled <= slop) {
                                     // Solo dentro l'immagine. Una panoramica alta e stretta
                                     // lascia due fasce nere ai lati, e li` il conto dei gradi
                                     // continuava lo stesso: un dito appoggiato nel nero valeva
                                     // ottanta gradi e la voltava per intero.
-                                    val where = last
+                                    val where = unzoom(last)
                                     val inside = where.x >= left && where.x <= left + drawnWidth &&
                                         where.y >= top && where.y <= top + drawnHeight
                                     if (inside) {
                                         viewModel.placePointOfView(
-                                            panDegrees = (where.x - size.width / 2f) * perPixelX,
-                                            tiltDegrees = -(where.y - size.height / 2f) * perPixelY,
+                                            panDegrees = (where.x - centre.x) * perPixelX,
+                                            tiltDegrees = -(where.y - centre.y) * perPixelY,
                                         )
                                     }
                                 }
@@ -183,8 +272,11 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                 // Il mirino: il punto di fuga è il centro della tela, e finché non si vede si
                 // sta scegliendo alla cieca. Il cerchietto è il dito, che porta lì il suo punto.
                 Canvas(modifier = Modifier.fillMaxSize()) {
-                    val cx = size.width / 2f
-                    val cy = size.height / 2f
+                    // Il mirino sta sul punto di fuga, non in mezzo allo schermo: ingrandendo
+                    // e spostando, il centro della panoramica finisce da un'altra parte e un
+                    // mirino fermo al centro indicherebbe un punto che non e` quello.
+                    val cx = size.width / 2f + shift.x
+                    val cy = size.height / 2f + shift.y
                     val arm = 16.dp.toPx()
                     val ring = 7.dp.toPx()
                     val stroke = 1.5.dp.toPx()
@@ -277,6 +369,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
         Text(
             buildString {
                 append("Tocca per centrare · pan %+.0f° · su/giù %+.0f°".format(view.panDegrees, view.tiltDegrees))
+                if (zoom > 1.01f) append(" · ingrandita ×%.1f".format(zoom))
                 shape?.let {
                     append(" · %s fino a %.0f° · cima ×%.1f↔ ×%.1f↕".format(
                         shortName(it.projection), it.reachDegrees, it.horizontalStretch, it.verticalStretch,
@@ -284,7 +377,14 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                 }
             },
             style = MaterialTheme.typography.labelSmall,
-            color = Luna.OnSurfaceDim,
+            color = if (zoom > 1.01f) Luna.Ok else Luna.OnSurfaceDim,
+            modifier = Modifier.clickable(enabled = zoom > 1.01f) {
+                // Tornare indietro deve costare un tocco: con due dita si arriva a ×4 in
+                // mezzo secondo, e uscirne a pizzichi e` sempre piu` lento che entrarci.
+                zoom = 1f
+                shift = Offset.Zero
+                viewModel.setPointOfViewZoom(1f, settled = true)
+            },
         )
 
         // ---- Le decisioni, su una riga sola: la seconda era spazio tolto alla foto ----

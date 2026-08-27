@@ -849,6 +849,27 @@ montaggio. Il timelapse interno comprime i tempi e rende difficile far quadrare 
 
 ---
 
+## Documentazione
+
+Il dettaglio sta in [`docs/`](docs/README.md), diviso per argomento:
+
+* [**La camera e l'ottica**](docs/CAMERA-E-OTTICA.md) — l'esemplare in prova, le lenti
+  dichiarate contro quelle misurate (77,6° invece di 81,7°), cosa la camera sa di sé e cosa no.
+* [**La coda dei file Insta360**](docs/CODA-DEI-FILE-INSTA360.md) — i blocchi dopo la fine del
+  JPEG e la traccia inerziale a mille campioni al secondo, byte per byte.
+* [**Il gimbal e la sua taratura**](docs/GIMBAL-E-TARATURA.md) — navigazione a stima, la scala
+  ×1,235 misurata contro la gravità, la non linearità, le regole per riscrivere il profilo.
+* [**Il flusso di una panoramica**](docs/FLUSSO-PANORAMICA.md) — job, preparazione, scelta del
+  punto di fuga, unione; e le foto che stanno già sul telefono.
+* [**Come l'app unisce le panoramiche**](docs/UNIONE-PANORAMICHE.md) — la matematica:
+  proiezioni, allineamento, fotometria, cucitura, fusione multibanda.
+* [**Risultati delle prove**](docs/PROVE-E-MISURE.md) — i tempi misurati build per build, gli
+  autocontrolli della scheda grafica, la memoria, i prossimi bersagli.
+* [**Vicoli ciechi**](docs/VICOLI-CIECHI.md) — le strade provate che non portavano da nessuna
+  parte, e cosa si è fatto al loro posto.
+
+---
+
 ## Architettura
 
 ```text

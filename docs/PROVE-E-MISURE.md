@@ -378,6 +378,45 @@ in meno su ogni pixel. Se un decodificatore ignorasse le densità, il vecchio ri
 
 ---
 
+### 5.11 Il fuoco misurava l'esposizione, non il fuoco
+
+Log `20260827-180720`, nove foto, cucitura con «tieni la parte più a fuoco» accesa. La riga
+per fotogramma diceva chi aveva vinto il confine. Messa accanto ai guadagni di esposizione
+della stessa cucitura, la tabella è questa:
+
+| foto | guadagno | vantaggio di «fuoco» misurato |
+|---|---|---|
+| 3 | 0,62 | la tela più nitida del 30% |
+| 2 | 0,71 | la tela più nitida del 37% |
+| 1 | 0,81 | la tela più nitida del 16% |
+| 4 | 1,03 | la tela più nitida del 22% |
+| 6 | 1,19 | nitide uguale (+12%) |
+| 8 | 1,22 | la tela più nitida del 13% |
+| 9 | 1,22 | Foto 9 più nitida del 18% |
+| 7 | 1,33 | Foto 7 più nitida del 29% |
+
+Ordinate per guadagno si ordinano anche per «fuoco». Non è una coincidenza: la misura era la
+somma dei salti di luminanza, e il salto è **proporzionale alla luce**. Una foto moltiplicata
+per 1,33 ha salti più grandi del 33% senza essere più nitida di un capello. Il taglio si
+spostava verso la foto più chiara.
+
+Due errori, tutti e due sistematici:
+
+1. **La scala.** La nitidezza si misurava fra celle della griglia ridotta, cioè fra campioni
+   distanti fino a otto pixel di tela. La sfocatura di messa a fuoco vive su due o tre pixel:
+   a otto è già sparita, e quello che resta è la struttura della scena, che nelle due foto è
+   la stessa. Ora si misura fra due pixel di tela **adiacenti**, campionando la sorgente due
+   volte per cella.
+2. **L'esposizione.** Ora si misura il contrasto — il salto diviso la luce che c'è, con un
+   pavimento di sedici livelli per non dare il primo premio al rumore delle ombre — e si usa
+   la luce **prima** della correzione di esposizione. Un fattore moltiplicativo sparisce sopra
+   e sotto la frazione.
+
+Il costo è una seconda proiezione più un secondo campione per cella della griglia, e si paga
+solo con l'opzione accesa. Il log ora riporta anche i due contrasti medi
+(`contrasto 0,041 contro 0,033`), così la prossima volta si vede se il numero significa
+qualcosa prima di guardare la panoramica.
+
 ## 6. Memoria
 
 | | prima | dopo |

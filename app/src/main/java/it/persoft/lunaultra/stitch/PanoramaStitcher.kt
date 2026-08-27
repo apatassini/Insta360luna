@@ -4452,6 +4452,10 @@ class PanoramaStitcher(
         val oldWeightGrid = FloatArray(gcount)
         val difference = FloatArray(gcount)
         val bothPresent = BooleanArray(gcount)
+        // Il contrasto locale delle due contendenti, grezzo: si riempie qui dentro perché
+        // qui si hanno in mano i pixel veri, non le celle della griglia ridotta.
+        val focusNewRaw = if (tuning.focusAwareSeam) FloatArray(gcount) else null
+        val focusOldRaw = if (tuning.focusAwareSeam) FloatArray(gcount) else null
         parallelRows(0, gh, canvas.width) { gy, rowPixels ->
             val by = min(gy * s + s / 2, sbh - 1)
             val row = subRow0 + by
@@ -4469,11 +4473,13 @@ class PanoramaStitcher(
                 baseColor[g] = old
                 oldWeightGrid[g] = oldWeight
                 var newWeight = 0f
+                var newRawLuma = -1f
                 if (present) {
                     projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
                     if (projector.inside) {
                         newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
                         val color = sampleColor(frame, source, projector.x, projector.y)
+                        newRawLuma = luma(color)
                         val factor = correction.factorAt(projector.x, projector.y)
                         val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val gch = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -4491,6 +4497,36 @@ class PanoramaStitcher(
                     }
                 } else {
                     newColor[g] = old
+                }
+                if (focusNewRaw != null && focusOldRaw != null && bothPresent[g] && newRawLuma >= 0f) {
+                    // Chi è a fuoco si vede **fra due pixel vicini di tela**, non fra due
+                    // celle della griglia ridotta. La sfocatura di messa a fuoco vive su due o
+                    // tre pixel; confrontare campioni distanti s — fino a otto — la cancella
+                    // del tutto, e quello che resta è la struttura della scena, che nelle due
+                    // foto è la stessa. Era questo il motivo per cui il fuoco «misurato» non
+                    // spostava mai niente di visibile.
+                    //
+                    // E si misura il **contrasto**, cioè il salto diviso per la luce che c'è,
+                    // non il salto e basta. Le due contendenti arrivano qui con guadagni di
+                    // esposizione diversi — nella panoramica delle nove foto vanno da 0,62 a
+                    // 1,33 — e un salto assoluto cresce col guadagno: la misura vecchia
+                    // ordinava le foto per luminosità, non per fuoco, e i numeri del log lo
+                    // dicevano apertamente (guadagno 0,62 → «la tela più nitida del 30%»,
+                    // guadagno 1,33 → «Foto 7 più nitida del 29%»). Il rapporto non cambia
+                    // quando si moltiplica tutto per un fattore, e per lo stesso motivo qui si
+                    // usa la luce **prima** della correzione di esposizione.
+                    val bxNext = min(bx + 1, sbw - 1)
+                    val colNext = columns[sx0 + bxNext]
+                    val hereOld = luma(old)
+                    val thereOld = luma(rowPixels[colNext] and 0xFFFFFF)
+                    focusOldRaw[g] = abs(hereOld - thereOld) / (hereOld + FOCUS_LIGHT_FLOOR)
+                    projector.project(lonSin[sx0 + bxNext], lonCos[sx0 + bxNext])
+                    if (projector.inside) {
+                        val thereNew = luma(sampleColor(frame, source, projector.x, projector.y))
+                        focusNewRaw[g] = abs(newRawLuma - thereNew) / (newRawLuma + FOCUS_LIGHT_FLOOR)
+                    } else {
+                        focusNewRaw[g] = focusOldRaw[g]
+                    }
                 }
                 newWeightGrid[g] = newWeight
                 valid[g] = newWeight > 0f || oldWeight > 0f
@@ -4523,8 +4559,8 @@ class PanoramaStitcher(
         val manySided = sbw >= bw * SEAM_ONE_SIDED_FRACTION &&
             sbh >= windowHeight * SEAM_ONE_SIDED_FRACTION
         // Chi è a fuoco, dove. Solo se serve: costa due passate sulla griglia ridotta.
-        val focusNew = if (tuning.focusAwareSeam) sharpness(newColor, bothPresent, gw, gh) else null
-        val focusOld = if (tuning.focusAwareSeam) sharpness(baseColor, bothPresent, gw, gh) else null
+        val focusNew = focusNewRaw?.let { smoothFocus(it, gw, gh) }
+        val focusOld = focusOldRaw?.let { smoothFocus(it, gw, gh) }
         // Quanto sono nitide le due, qui e in generale.
         //
         // Servono due numeri diversi, e il secondo è quello che mancava. La differenza
@@ -4956,13 +4992,14 @@ class PanoramaStitcher(
         val fuoco = if (!tuning.focusAwareSeam) {
             ""
         } else if (abs(focusAdvantage) < FOCUS_CLEAR_ADVANTAGE) {
-            " · fuoco: nitide uguale (%+.0f%%, serve %.0f%%)".format(
-                focusAdvantage * 100, FOCUS_CLEAR_ADVANTAGE * 100,
+            " · fuoco: nitide uguale (%+.0f%%, serve %.0f%%; contrasto %.3f contro %.3f)".format(
+                focusAdvantage * 100, FOCUS_CLEAR_ADVANTAGE * 100, meanNewFocus, meanOldFocus,
             )
         } else {
-            " · fuoco: %s più nitida del %.0f%%, confine spostato".format(
+            " · fuoco: %s più nitida del %.0f%% (contrasto %.3f contro %.3f), confine spostato".format(
                 if (focusAdvantage > 0f) frame.label else "la tela",
                 abs(focusAdvantage) * 100,
+                meanNewFocus, meanOldFocus,
             )
         }
         val onFocus = if (tuning.focusAwareSeam) " e sulla messa a fuoco" else ""
@@ -5144,29 +5181,18 @@ class PanoramaStitcher(
      * percorso resta dentro la sovrapposizione vera.
      */
     /**
-     * Quanto è nitida ogni cella della griglia ridotta: il contrasto locale, addolcito.
+     * Il contrasto locale della cella, addolcito su tre per tre.
      *
-     * Una zona a fuoco ha dettagli fitti — la luminanza salta da un pixel all'altro; una
-     * sfocata è liscia. Non serve sapere quanto sia sfocata, e nemmeno con che obiettivo:
-     * serve sapere **quale delle due foto lo è di più nello stesso punto**, e quella è una
-     * differenza che sopravvive anche a un quarto di risoluzione.
+     * La misura grezza — quanto salta la luce fra due pixel vicini di tela, diviso la luce che
+     * c'è — la fa chi ha in mano i pixel veri, dentro il primo giro sulla griglia. Qui resta
+     * solo da stendere il risultato su una finestra di tre per tre: un ramo isolato fa
+     * schizzare la singola cella, e quello che conta è la nitidezza della **zona**, non del
+     * pixel.
      *
-     * Il valore grezzo è la somma dei salti verso destra e verso il basso. Da solo sarebbe
-     * rumoroso — un ramo isolato lo fa schizzare — quindi si stende su una finestra di tre per
-     * tre: quello che conta è la nitidezza della **zona**, non del pixel.
+     * Non serve sapere quanto una foto sia sfocata, e nemmeno con che obiettivo: serve sapere
+     * quale delle due lo è di più nello stesso punto.
      */
-    private fun sharpness(colour: IntArray, present: BooleanArray, gw: Int, gh: Int): FloatArray {
-        val raw = FloatArray(gw * gh)
-        for (gy in 0 until gh) {
-            for (gx in 0 until gw) {
-                val g = gy * gw + gx
-                if (!present[g]) continue
-                val here = luma(colour[g])
-                val right = if (gx + 1 < gw) luma(colour[g + 1]) else here
-                val below = if (gy + 1 < gh) luma(colour[g + gw]) else here
-                raw[g] = abs(here - right) + abs(here - below)
-            }
-        }
+    private fun smoothFocus(raw: FloatArray, gw: Int, gh: Int): FloatArray {
         val smooth = FloatArray(gw * gh)
         for (gy in 0 until gh) {
             for (gx in 0 until gw) {
@@ -6517,6 +6543,16 @@ class PanoramaStitcher(
          * — un lato della sovrapposizione con più foglie dell'altro — non la messa a fuoco.
          */
         const val FOCUS_CLEAR_ADVANTAGE = 0.125f
+
+        /**
+         * La luce che si somma al denominatore del contrasto, in livelli su 255.
+         *
+         * Sedici. Il contrasto è il salto diviso la luce che c'è, e nel nero pieno quella luce
+         * è zero: senza pavimento il rumore di un'ombra diventerebbe il posto più nitido della
+         * panoramica. Sedici livelli sono più o meno il rumore di lettura di un sensore da
+         * telefono a ISO alti — sotto quella soglia non c'è dettaglio da difendere.
+         */
+        const val FOCUS_LIGHT_FLOOR = 16f
 
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96

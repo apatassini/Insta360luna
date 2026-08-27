@@ -137,6 +137,9 @@ class PanoramaStitcher(
      */
     private var decodeMillis = 0L
 
+    /** Quanti originali sono stati aperti in anticipo, mentre si dipingeva quello prima. */
+    private var prefetchedFrames = 0
+
     /**
      * I tre tempi della cucitura, tenuti separati perché sono tre lavori diversi.
      *
@@ -750,7 +753,8 @@ class PanoramaStitcher(
                 pointMillis / 1000f,
             )
             notes += ("Tempi: allineamento %.0f s · cucitura %.0f s — riconoscimento %.0f s · " +
-                "fusione %.0f s · pittura %.0f s · possessori %.0f s · apertura originali %.0f s").format(
+                "fusione %.0f s · pittura %.0f s · possessori %.0f s · apertura originali %.0f s" +
+                (if (prefetchedFrames > 0) " ($prefetchedFrames aperti in anticipo)" else "")).format(
                 refineSeconds,
                 composeSeconds,
                 recogniseMillis / 1000f,
@@ -1273,6 +1277,7 @@ class PanoramaStitcher(
         private var levelsCache: List<GrayLevel>? = null
 
         private var fullCache: Bitmap? = null
+        private var fullPrefetch: kotlinx.coroutines.Deferred<Bitmap?>? = null
         var fullScaleX = 1f
             private set
         var fullScaleY = 1f
@@ -1288,21 +1293,74 @@ class PanoramaStitcher(
          */
         fun openFullResolution(): Bitmap? {
             fullCache?.let { return it }
+            return decodeFullResolution()?.also { adoptFullResolution(it) }
+        }
+
+        /**
+         * Lo stesso originale, ma aspettando quello che qualcuno ha già cominciato ad aprire.
+         *
+         * Il decoder JPEG di Android non si spartisce fra più fili, ma **due file diversi si
+         * aprono benissimo in parallelo**: e mentre si dipinge un fotogramma — due secondi e
+         * mezzo buoni — il core che apre il prossimo non toglie niente a nessuno. Aspettare
+         * qui costa zero se il prefetch è già finito, che è il caso normale.
+         */
+        suspend fun awaitFullResolution(): Bitmap? {
+            fullCache?.let { return it }
+            val pending = fullPrefetch ?: return openFullResolution()
+            fullPrefetch = null
+            return pending.await()?.also { adoptFullResolution(it) }
+        }
+
+        /**
+         * Comincia ad aprire l'originale senza aspettarlo.
+         *
+         * Si chiama sul fotogramma **successivo**, prima di dipingere quello corrente: quando
+         * toccherà a lui, il suo Bitmap è già in memoria. Un originale in più significa un
+         * originale in più di memoria nativa, quindi lo decide chi ha il conto della memoria
+         * in mano, non questa classe.
+         */
+        fun prefetchFullResolution(scope: kotlinx.coroutines.CoroutineScope) {
+            if (fullCache != null || fullPrefetch != null || file == null) return
+            fullPrefetch = scope.async(Dispatchers.IO) { decodeFullResolution() }
+        }
+
+        /**
+         * Quanto peserà in memoria l'originale, prima di aprirlo.
+         *
+         * Il lato lungo del file su disco è già stato letto quando la copia di lavoro è stata
+         * fatta; il lato corto si ricava dalla forma della copia, che è la stessa. Quattro
+         * byte per pixel. Zero quando il lato lungo non si conosce — e allora non si
+         * prefetcha, perché un costo ignoto non si può mettere in un conto.
+         */
+        fun fullResolutionEstimate(): Long {
+            val long = sourceLongSide
+            if (long <= 0 || width <= 0 || height <= 0) return 0L
+            val shortSide = long.toLong() * min(width, height) / max(width, height)
+            return long.toLong() * shortSide * 4L
+        }
+
+        private fun decodeFullResolution(): Bitmap? {
             val source = file ?: return null
-            val decoded = runCatching {
+            return runCatching {
                 val raw = BitmapFactory.decodeFile(source.absolutePath) ?: return null
                 it.persoft.lunaultra.media.applyExifOrientation(
                     raw,
                     androidx.exifinterface.media.ExifInterface(source),
                 )
-            }.getOrNull() ?: return null
+            }.getOrNull()
+        }
+
+        private fun adoptFullResolution(decoded: Bitmap) {
             fullScaleX = decoded.width.toFloat() / width
             fullScaleY = decoded.height.toFloat() / height
             fullCache = decoded
-            return decoded
         }
 
         fun closeFullResolution() {
+            // Un prefetch ancora in volo si annulla: se ha già finito, il suo Bitmap resta
+            // al netturbino — succede solo quando l'unione viene interrotta a metà.
+            fullPrefetch?.cancel()
+            fullPrefetch = null
             fullCache?.recycle()
             fullCache = null
         }
@@ -3695,38 +3753,59 @@ class PanoramaStitcher(
         // La scheda grafica, se qualcuna delle sue manopole è alzata: un contesto per tutta
         // la tela, sul suo filo, e spento in ogni caso quando si esce di qui.
         val gpu = openGpu()
+        // Quanto resta libero al telefono dopo aver messo giù la tela: è il conto che dice
+        // se ci si può permettere di tenere aperto un originale in più.
+        val spare = memory.spareBytes(canvas.width.toLong() * canvas.height * 4L)
         try {
             // Dal centro verso fuori, non in ordine di scatto: il fotogramma che vede meglio
             // il centro della tela se lo prende per intero, e gli altri gli si accostano
             // attorno. Prima il centro era il quinto ad arrivare e si faceva ricoprire i bordi
             // dai quattro che venivano dopo.
-            radialOrder(placements).forEachIndexed { step, index ->
-                val frame = frames[index]
-                currentCoroutineContext().ensureActive()
-                onProgress(
-                    0.35f + 0.6f * step / frames.size,
-                    "Cucio ${frame.label} (${step + 1}/${frames.size})",
-                )
-                val startedAt = System.currentTimeMillis()
-                pasteFrame(
-                    output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
-                    fullResSampling, warps.getOrNull(index), gpu, detail,
-                    progressBase = 0.35f + 0.6f * step / frames.size,
-                    progressSpan = 0.6f / frames.size,
-                    progressLabel = "${frame.label} (${step + 1}/${frames.size})",
-                )
-                val last = detail.removeLastOrNull()
-                if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
-                // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori, il suo
-                // originale a piena risoluzione **e la sua copia di lavoro** si liberano.
-                //
-                // La copia di lavoro se ne andava solo dopo il ritaglio, cioè nel momento
-                // peggiore: nove copie da trenta megabyte tenute in vita mentre in memoria
-                // c'erano già la tela e la sua copia ritagliata. Da qui in avanti nessuno la
-                // guarda più, e trecento megabyte in meno sul picco sono trecento megabyte.
-                frame.releaseWorkingData()
-                frame.closeFullResolution()
-                frame.bitmap.recycle()
+            val order = radialOrder(placements)
+            coroutineScope {
+                order.forEachIndexed { step, index ->
+                    val frame = frames[index]
+                    currentCoroutineContext().ensureActive()
+
+                    // Il prossimo originale si apre adesso, mentre questo si dipinge. Aprire un
+                    // JPEG da 37 Mpx è mezzo secondo di un core solo — il decoder di Android non
+                    // si spartisce — ma due file diversi si aprono in parallelo, e mentre si
+                    // dipinge (due secondi e mezzo) quel core non serve a nessun altro.
+                    if (fullResSampling && spare > 0) {
+                        order.getOrNull(step + 1)?.let { nextIndex ->
+                            val next = frames[nextIndex]
+                            val cost = next.fullResolutionEstimate()
+                            if (cost > 0 && cost * PREFETCH_HEADROOM < spare) {
+                                next.prefetchFullResolution(this@coroutineScope)
+                                prefetchedFrames++
+                            }
+                        }
+                    }
+                    onProgress(
+                        0.35f + 0.6f * step / frames.size,
+                        "Cucio ${frame.label} (${step + 1}/${frames.size})",
+                    )
+                    val startedAt = System.currentTimeMillis()
+                    pasteFrame(
+                        output, ownerWeight, frame, placements[index], corrections[index], lens, canvas,
+                        fullResSampling, warps.getOrNull(index), gpu, detail,
+                        progressBase = 0.35f + 0.6f * step / frames.size,
+                        progressSpan = 0.6f / frames.size,
+                        progressLabel = "${frame.label} (${step + 1}/${frames.size})",
+                    )
+                    val last = detail.removeLastOrNull()
+                    if (last != null) detail += "$last · ${(System.currentTimeMillis() - startedAt) / 1000f} s"
+                    // Un fotogramma alla volta anche in memoria: cucito, i suoi vettori, il suo
+                    // originale a piena risoluzione **e la sua copia di lavoro** si liberano.
+                    //
+                    // La copia di lavoro se ne andava solo dopo il ritaglio, cioè nel momento
+                    // peggiore: nove copie da trenta megabyte tenute in vita mentre in memoria
+                    // c'erano già la tela e la sua copia ritagliata. Da qui in avanti nessuno la
+                    // guarda più, e trecento megabyte in meno sul picco sono trecento megabyte.
+                    frame.releaseWorkingData()
+                    frame.closeFullResolution()
+                    frame.bitmap.recycle()
+                }
             }
         } finally {
             closeGpu(gpu)
@@ -3766,7 +3845,7 @@ class PanoramaStitcher(
             if (progressSpan > 0f) onProgress(progressBase + progressSpan * fraction, "$progressLabel · $what")
         }
         val decodeStartedAt = System.currentTimeMillis()
-        val full = if (fullResSampling) frame.openFullResolution() else null
+        val full = if (fullResSampling) frame.awaitFullResolution() else null
         decodeMillis += System.currentTimeMillis() - decodeStartedAt
         val margin = BBOX_MARGIN_DEGREES
         val halfH = lens.horizontalFovDegrees / 2f + margin
@@ -5883,6 +5962,16 @@ class PanoramaStitcher(
          * cucitura sono una manciata di pixel. Un errore vero non ne fa una manciata.
          */
         const val GPU_BLEND_OFFENDER_SHARE = 100
+
+        /**
+         * Quante volte l'originale deve starci, per aprirne uno in anticipo.
+         *
+         * Tre: quello che si sta dipingendo, quello che si sta aprendo, e la copia che la
+         * rotazione EXIF fa nascere per un istante mentre gira il fotogramma. Chiedere lo
+         * stretto necessario significherebbe scoprire di aver sbagliato quando il sistema
+         * chiude l'applicazione.
+         */
+        const val PREFETCH_HEADROOM = 3L
 
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96

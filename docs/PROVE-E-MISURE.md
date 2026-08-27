@@ -32,28 +32,37 @@ scheda grafica e la fusione.
 
 Tutti i tempi in secondi, dallo stesso telefono, sulla stessa panoramica.
 
-| fase | CPU (partenza) | con GPU su ricognizione e pittura | fusione su GPU | oggi (26 ago) |
+| fase | CPU (partenza) | con GPU su ricognizione e pittura | fusione su GPU | punti di controllo veloci |
 |---|---|---|---|---|
-| **allineamento** | 27 | 27 | 36 | **36** |
-| **cucitura** | **47** | 31 | 28 | **31** |
+| **allineamento** | 27 | 27 | 36 | **16** |
+| **cucitura** | **47** | 31 | 28 | **25** |
 | — riconoscimento | 4 | 2 | 2 | 2 |
-| — **fusione** | **31** | 15 | 13 | **14** |
+| — **fusione** | **31** | 15 | 13 | **11** |
 | — pittura | 9 | 2 | 2 | 2 |
 | — possessori | (dentro la fusione) | — | 1 | 1 |
-| — apertura originali | 6 | 6 | 6 | 6 |
+| — apertura originali | 6 | 6 | 6 | 5 |
+| **unione intera** | | | 67 | **41** |
 
-E dentro le due fasi grosse, dal log del 26 agosto:
+E dentro le due fasi grosse, prima e dopo la modifica ai punti di controllo:
 
 ```
-Dentro l'allineamento:  dettagli riconosciuti 5,3 s · ricerca a piramide 3,4 s
-                        · punti di controllo 27,4 s
-Dentro la fusione:      griglia ridotta 2,7 s · piramidi 3,3 s
-                        · riporto a piena risoluzione 8,1 s
-Di cui sulla GPU:       disegno 2,5 s · riporto sulla tela 2,2 s · caricamento sorgenti 0,5 s
+                                     17:26                18:18
+Dentro l'allineamento
+  dettagli riconosciuti               5,3 s                4,0 s
+  ricerca a piramide                  3,4 s                2,8 s
+  punti di controllo                 27,4 s                9,5 s   ← −65%
+Dentro la fusione
+  griglia ridotta                     2,7 s                2,1 s
+  piramidi                            3,3 s                2,5 s
+  riporto a piena risoluzione         8,1 s                6,4 s
+Di cui sulla scheda grafica
+  disegno / riporto / caricamento   2,5 · 2,2 · 0,5      2,2 · 1,8 · 0,6
 ```
 
-**I punti di controllo sono il 76% dell'allineamento.** È il collo di bottiglia attuale, ed è
-l'oggetto dell'ultima modifica (§5).
+I punti di controllo erano **il 76% dell'allineamento**; adesso sono il 59% di un allineamento
+che dura meno della metà. (La fusione cala in proporzione senza che nessuno l'abbia toccata:
+la stessa unione, con il telefono più libero — heap 8 MB invece di 11, sistema libero 2842 MB
+invece di 2681. È la variabilità da tenere presente leggendo differenze sotto il 20%.)
 
 ### 2.1 La fusione, cosa l'ha fatta scendere da 31 a 13
 
@@ -170,7 +179,8 @@ vero.
 | — | piramidi a tre canali in parallelo | 5,9 → 3,0 s |
 | — | possessori una volta per foto | 1 s, e la fusione smette di riscriverli |
 | — | fusione su GPU con alfa opaca | fusione 15 → 13 s, riporto 3,4 → 2,1 s |
-| `92667c2` | punti di controllo: NCC a passata singola + scansione a passo 2 | **da verificare** |
+| `92667c2` | punti di controllo: NCC a passata singola + scansione a passo 2 | **27,4 → 9,5 s**, unione 67 → 41 s |
+| — | apertura del prossimo originale mentre si dipinge questo | da verificare |
 
 ### 5.1 L'ultima modifica, e cosa deve dire il prossimo log
 
@@ -182,24 +192,45 @@ I punti di controllo facevano due sprechi:
 2. **Provavano tutte e 2401 le posizioni** della finestra di ricerca. Ora la scansione va a
    **passo 2** e poi rifinisce ±2 attorno al migliore: circa un quarto delle posizioni.
 
-Previsione: ~7 volte meno letture, da 27,4 s a **~4 s**.
+Previsione: ~7 volte meno letture, da 27,4 s a ~4 s. **Misurato: 9,5 s** — la previsione era
+ottimista di un fattore due (la rifinitura ±2 attorno a ogni massimo costa più di quanto
+stimato), ma la direzione era giusta.
 
-**Il rischio da guardare nel prossimo log** è che la riga
+**Il rischio era che la scansione grossolana saltasse i picchi stretti.** Non è successo:
 
 ```
-Punti di controllo: 121…513 per giunzione, soglia 90%
+prima   Punti di controllo: 121…513 per giunzione, soglia 90%
+dopo    Punti di controllo: 116…510 per giunzione, soglia 90%
 ```
 
-non crolli. Se i numeri restano su quell'ordine, la scansione grossolana non ha perso nessun
-massimo; se scendono, il passo 2 salta sopra picchi stretti e va rimesso a 1 con la sola
-passata singola come guadagno.
+Gli stessi punti, trovati leggendo un settimo dei pixel. Le correzioni per fotogramma
+coincidono entro tre centesimi di grado, e Foto 7 — il caso peggiore — è perfino migliorata:
+concordanza dal 38% all'80%, deformazione locale da 15,4 a 12,6 px.
 
-### 5.2 I prossimi bersagli, in ordine
+### 5.3 L'apertura degli originali, che non era seriale per forza
 
-1. **punti di controllo** — 27,4 s → in verifica
-2. **riporto a piena risoluzione** nella fusione — 8,1 s
-3. **apertura degli originali** — 6 s, e resta seriale per forza: il decoder JPEG di Android
-   non si spartisce
+Per mesi qui c'è stato scritto che i 5-6 secondi di apertura degli originali erano
+incomprimibili, perché **il decoder JPEG di Android non si spartisce fra più fili**. È vero, e
+non c'entra: un file non si apre in parallelo con sé stesso, ma **due file diversi sì**.
+
+Dipingere un fotogramma dura 2,7 s; aprirne uno ne dura circa 0,55. Quindi mentre si dipinge il
+fotogramma *n* si apre quello *n+1*, e quando tocca a lui il suo Bitmap è già in memoria:
+l'attesa scende a zero per tutti tranne il primo.
+
+Il costo è **un originale in più in memoria nativa** — 147 MB su foto da 37 Mpx. Non si prende
+per scontato: prima si chiede a `MemoryBudget.spareBytes` quanto resta libero dopo la tela, e
+si apre in anticipo solo se ci sta tre volte (quello dipinto, quello che si apre, e la copia
+che la rotazione EXIF fa nascere per un istante). Sul telefono di prova restano ~1550 MB
+liberi contro 442 MB richiesti; su un telefono stretto la condizione è falsa e tutto torna
+come prima, senza dire niente a nessuno.
+
+Il log dice quanti ne ha aperti in anticipo: `apertura originali 1 s (8 aperti in anticipo)`.
+
+### 5.4 I prossimi bersagli, in ordine
+
+1. **punti di controllo** — 9,5 s, ancora il pezzo più grosso dell'allineamento
+2. **riporto a piena risoluzione** nella fusione — 6,4 s
+3. **dettagli riconosciuti** — 4,0 s
 
 ---
 

@@ -484,8 +484,11 @@ che li usa.
 > riconoscimento, che dopo le altre correzioni vale 4 s e non merita più di essere toccato. I
 > cronometri per fase costano poco e hanno risparmiato due refactoring inutili.
 
-**Resta seriale una cosa sola, e per forza:** aprire gli originali, perché il decoder JPEG di
-Android non si spartisce. Sono 2 s su file da 37 Mpx.
+**Resta seriale una cosa sola:** aprire gli originali, perché il decoder JPEG di Android non si
+spartisce. Sono 2 s su file da 37 Mpx — e non è «per forza», come si è creduto a lungo: un file
+non si apre in parallelo con sé stesso, ma **due file diversi sì**. Da lì viene l'apertura
+anticipata del prossimo originale mentre si dipinge quello corrente
+([PROVE-E-MISURE.md §5.3](PROVE-E-MISURE.md#53-lapertura-degli-originali-che-non-era-seriale-per-forza)).
 
 ### 7.1 La scheda grafica
 

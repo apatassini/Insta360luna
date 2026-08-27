@@ -60,6 +60,21 @@ data class MemoryBudget(
             return (free * share).toLong().coerceAtLeast(MINIMUM_CANVAS_BYTES)
         }
 
+    /**
+     * Quanti byte restano davvero liberi dopo che la tela è stata messa giù.
+     *
+     * Serve a decidere se ci si può permettere di tenere aperto **un originale in più** —
+     * quello del prossimo fotogramma, aperto mentre si dipinge questo. Sono gli stessi
+     * margini di [canvasBytes]: la soglia sotto cui il sistema chiude applicazioni, più la
+     * riserva. Quando il telefono è già in affanno la risposta è zero, senza discutere.
+     */
+    fun spareBytes(canvasBytes: Long): Long = if (systemLow) {
+        0L
+    } else {
+        (systemAvailableBytes - systemThresholdBytes - SYSTEM_RESERVE_BYTES - canvasBytes)
+            .coerceAtLeast(0L)
+    }
+
     /** La riga per il log: sono i numeri da cui si capisce perché la tela è grande così. */
     fun describe(): String = if (measured) {
         ("Memoria: heap %d/%d MB · nativa %d MB · sistema libero %d MB (soglia %d MB%s) → " +

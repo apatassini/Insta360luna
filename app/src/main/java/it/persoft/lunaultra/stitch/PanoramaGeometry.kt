@@ -838,6 +838,15 @@ data class PanoramaView(
      * ha disegnato il rettangolo ha già deciso cosa tenere; se dentro resta ancora del nero,
      * toglierlo è un favore, non una seconda opinione.
      */
+    /**
+     * Tenere la parte più a fuoco, deciso **per questa panoramica**.
+     *
+     * Nullo significa «come dice l'impostazione generale», ed è il valore di chi non ha
+     * scelto niente. È una manopola che dipende dalla scena e non dall'app: una fila di
+     * scatti su un muro non ha niente da guadagnarci, una verticale che va dal prato al cielo
+     * sì, e chi guarda l'anteprima di *quel* lavoro è nella posizione giusta per dirlo.
+     */
+    val focusSeam: Boolean? = null,
     val cropLeft: Float = 0f,
     val cropTop: Float = 0f,
     val cropRight: Float = 1f,

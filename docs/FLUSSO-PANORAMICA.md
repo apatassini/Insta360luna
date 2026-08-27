@@ -124,6 +124,12 @@ produce lo scatto.
 disegnata** (non nelle bande nere ai lati) e non oltre **40° in orizzontale, 25° in verticale**:
 un tocco è un'indicazione, non un salto.
 
+**Il fuoco** ha la sua pastiglia, e vale **per questa panoramica sola**. Tre stati e non due:
+finché nessuno la tocca il lavoro segue l'impostazione generale, e toccandola diventa una
+scelta esplicita solo per lui. È una manopola che dipende dalla scena e non dall'app — una fila
+di scatti su un muro non ha niente da guadagnarci, una verticale che va dal prato al cielo sì —
+e chi sta guardando l'anteprima di *quel* lavoro è nella posizione giusta per deciderlo.
+
 **Il ritaglio** si accende con la sua pastiglia, e finché è acceso il dito fa un altro
 mestiere: prende l'angolo più vicino, o sposta tutto il rettangolo se è caduto dentro. Il punto
 di fuga non si tocca — una matita e una gomma non sono lo stesso oggetto. Fuori dal rettangolo

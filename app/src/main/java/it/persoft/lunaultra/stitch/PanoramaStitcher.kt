@@ -1091,8 +1091,11 @@ class PanoramaStitcher(
         tuning = tuning.copy(
             projection = view.projection ?: tuning.projection,
             verticalLimitDegrees = view.verticalLimitDegrees,
+            // Il fuoco deciso per questa panoramica vince sull'impostazione generale: chi ha
+            // guardato *questa* anteprima ne sa di più di una casella nelle impostazioni.
+            focusAwareSeam = view.focusSeam ?: tuning.focusAwareSeam,
         )
-        notes += ("Punto di vista scelto a mano: pan %+.1f° · inclinazione %+.1f° · rollio %+.1f° · %s%s")
+        notes += ("Punto di vista scelto a mano: pan %+.1f° · inclinazione %+.1f° · rollio %+.1f° · %s%s%s")
             .format(
                 view.panDegrees, view.tiltDegrees, view.rollDegrees,
                 tuning.projection.label,
@@ -1100,6 +1103,11 @@ class PanoramaStitcher(
                     " · tela fino a %.0f° dall'orizzonte".format(view.verticalLimitDegrees)
                 } else {
                     ""
+                },
+                when (view.focusSeam) {
+                    true -> " · tiene la parte più a fuoco"
+                    false -> " · non guarda la messa a fuoco"
+                    null -> ""
                 },
             )
     }

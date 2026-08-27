@@ -81,6 +81,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
     val shape by viewModel.pointOfViewShape.collectAsState()
     // Dentro un job la scelta si può anche solo salvare: la cucitura si lancia quando si vuole.
     val forJob by viewModel.pointOfViewForJob.collectAsState()
+    val settings by viewModel.settings.collectAsState()
 
     // Dove sta il dito adesso, in pixel dello schermo: serve solo a disegnarci sopra il segno.
     var finger by remember { mutableStateOf<Offset?>(null) }
@@ -455,6 +456,31 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            // Il fuoco, per questa panoramica sola.
+            //
+            // Tre stati e non due: «come dice l'app», «tienilo» e «lascia stare». Finché
+            // nessuno ha scelto, il lavoro segue l'impostazione generale — e deve poterlo
+            // continuare a fare, perché una casella toccata per sbaglio su una panoramica non
+            // deve diventare una scelta per tutte le altre.
+            val focusOn = view.focusSeam ?: settings.stitch.focusAwareSeam
+            FilterChip(
+                selected = focusOn,
+                onClick = { viewModel.setPointOfViewFocus(!focusOn) },
+                label = {
+                    Text(
+                        "Fuoco",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center,
+                    )
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Luna.Photo.copy(alpha = 0.20f),
+                    selectedLabelColor = Luna.Photo,
+                ),
+                modifier = Modifier.weight(1.1f),
+            )
             FilterChip(
                 selected = cropping,
                 onClick = {
@@ -465,7 +491,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                 },
                 label = {
                     Text(
-                        "Ritaglia",
+                        "Taglia",
                         style = MaterialTheme.typography.labelMedium,
                         maxLines = 1,
                         modifier = Modifier.fillMaxWidth(),
@@ -476,8 +502,10 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                     selectedContainerColor = Luna.Ok.copy(alpha = 0.20f),
                     selectedLabelColor = Luna.Ok,
                 ),
-                modifier = Modifier.weight(1.2f),
+                modifier = Modifier.weight(1.1f),
             )
+            // Sei pastiglie su una riga sola: i limiti della tela cedono un filo di larghezza
+            // alle due parole, che altrimenti finiscono con i puntini.
             for (limit in intArrayOf(0, 55, 65, 75)) {
                 FilterChip(
                     selected = view.verticalLimitDegrees.roundToInt() == limit,
@@ -491,7 +519,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
                             textAlign = TextAlign.Center,
                         )
                     },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(0.95f),
                 )
             }
         }
@@ -501,6 +529,7 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             buildString {
                 append("Tocca per centrare · pan %+.0f° · su/giù %+.0f°".format(view.panDegrees, view.tiltDegrees))
                 if (zoom > 1.01f) append(" · ingrandita ×%.1f".format(zoom))
+                view.focusSeam?.let { append(if (it) " · tiene il più a fuoco" else " · fuoco ignorato") }
                 if (view.cropped) {
                     append(" · ritaglio %.0f%% × %.0f%%".format(
                         (view.cropRight - view.cropLeft) * 100,

@@ -1535,6 +1535,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * Il fuoco per questa panoramica, che vince sull'impostazione generale.
+     *
+     * Non fa ridisegnare l'anteprima: il fuoco cambia dove passa la giunzione nella cucitura
+     * vera, e l'anteprima le giunzioni non le fa — dipinge per peso, come una bozza. Farla
+     * ridisegnare mostrerebbe la stessa identica immagine e basta.
+     */
+    fun setPointOfViewFocus(on: Boolean?) {
+        _pointOfView.value = _pointOfView.value.copy(focusSeam = on)
+    }
+
     /** Via il ritaglio: si torna alla tela intera. */
     fun clearPointOfViewCrop() {
         _pointOfView.value = _pointOfView.value.copy(

@@ -57,6 +57,8 @@ data class PanoJob(
      * dell'utente, il lavoro le legge e basta, e nessuna impostazione le deve poter cancellare.
      */
     val filesAreOurs: Boolean = true,
+    /** Il fuoco per questo lavoro: -1 come dice l'impostazione generale, 0 spento, 1 acceso. */
+    val focusSeamCode: Int = -1,
     /** Il rettangolo del ritaglio, in frazioni della tela. Zero-zero-uno-uno = tela intera. */
     val cropLeft: Float = 0f,
     val cropTop: Float = 0f,
@@ -76,6 +78,11 @@ data class PanoJob(
                 rollDegrees = viewRollDegrees,
                 projection = StitchProjection.entries.getOrNull(viewProjectionCode),
                 verticalLimitDegrees = viewVerticalLimitDegrees,
+                focusSeam = when (focusSeamCode) {
+                    0 -> false
+                    1 -> true
+                    else -> null
+                },
                 cropLeft = cropLeft,
                 cropTop = cropTop,
                 cropRight = cropRight,
@@ -90,6 +97,11 @@ data class PanoJob(
         viewRollDegrees = view.rollDegrees,
         viewProjectionCode = view.projection?.ordinal ?: -1,
         viewVerticalLimitDegrees = view.verticalLimitDegrees,
+        focusSeamCode = when (view.focusSeam) {
+            false -> 0
+            true -> 1
+            null -> -1
+        },
         cropLeft = view.cropLeft,
         cropTop = view.cropTop,
         cropRight = view.cropRight,

@@ -4522,26 +4522,55 @@ class PanoramaStitcher(
         // Chi è a fuoco, dove. Solo se serve: costa due passate sulla griglia ridotta.
         val focusNew = if (tuning.focusAwareSeam) sharpness(newColor, bothPresent, gw, gh) else null
         val focusOld = if (tuning.focusAwareSeam) sharpness(baseColor, bothPresent, gw, gh) else null
-        // La scala con cui il fuoco sposta un confine: la differenza media di nitidezza sulla
-        // sovrapposizione. Senza, un numero grezzo di contrasto non si può sommare a un peso
-        // di sfumatura che sta fra zero e uno.
-        val focusScale = if (focusNew != null && focusOld != null) {
+        // Quanto sono nitide le due, qui e in generale.
+        //
+        // Servono due numeri diversi, e il secondo è quello che mancava. La differenza
+        // **locale** sposta il confine dove una delle due è più a fuoco in un punto: è la
+        // messa a fuoco che cambia dentro la stessa foto. Ma il caso vero è un altro — una
+        // foto è a fuoco su quella zona e l'altra no, **su tutta la sovrapposizione**, perché
+        // l'autofocus ha scelto un altro piano. Lì la differenza locale è la stessa ovunque,
+        // e uno spostamento proporzionale al locale non sposta niente: bisogna dire «questa
+        // vale più di quella» e basta.
+        var focusScale = 0f
+        var focusAdvantage = 0f
+        var meanNewFocus = 0f
+        var meanOldFocus = 0f
+        if (focusNew != null && focusOld != null) {
             var sum = 0f
             var counted = 0
             for (g in 0 until gcount) {
                 if (!bothPresent[g]) continue
                 sum += abs(focusNew[g] - focusOld[g])
+                meanNewFocus += focusNew[g]
+                meanOldFocus += focusOld[g]
                 counted++
             }
-            if (counted > 0 && sum > 0f) sum / counted else 0f
-        } else {
-            0f
+            if (counted > 0) {
+                focusScale = if (sum > 0f) sum / counted else 0f
+                meanNewFocus /= counted
+                meanOldFocus /= counted
+                val louder = max(meanNewFocus, meanOldFocus)
+                // Da meno uno a uno: quanto la nuova è più nitida della tela, in proporzione.
+                focusAdvantage = if (louder > 0f) (meanNewFocus - meanOldFocus) / louder else 0f
+            }
         }
+
         /** Di quanto il fuoco sposta il confine sul peso, in unità di sfumatura. */
         fun focusBias(new: FloatArray?, old: FloatArray?, g: Int): Float {
-            if (new == null || old == null || focusScale <= 0f) return 0f
-            val gap = (new[g] - old[g]) / focusScale
-            return FOCUS_WEIGHT_BIAS * gap.coerceIn(-1f, 1f)
+            if (new == null || old == null) return 0f
+            val local = if (focusScale > 0f) {
+                FOCUS_WEIGHT_BIAS * ((new[g] - old[g]) / focusScale).coerceIn(-1f, 1f)
+            } else {
+                0f
+            }
+            // Il vantaggio d'insieme conta solo se è netto: sotto la soglia le due foto sono
+            // a fuoco allo stesso modo e il peso deve restare l'unica cosa che comanda.
+            val overall = if (abs(focusAdvantage) >= FOCUS_CLEAR_ADVANTAGE) {
+                FOCUS_OVERALL_BIAS * focusAdvantage.coerceIn(-1f, 1f)
+            } else {
+                0f
+            }
+            return local + overall
         }
         val seam = if (tuning.seamMinimalDifference && !manySided) {
             findSeam(difference, bothPresent, newWeightGrid, oldWeightGrid, gw, gh, focusNew, focusOld)
@@ -4916,16 +4945,33 @@ class PanoramaStitcher(
         // ha lavorato a una scala diversa dagli altri, o su una strada diversa, o se era il
         // telefono a essere occupato altrove.
         val come = "fusione a 1/%d su %s".format(s, if (blendedOnGpu) "GPU" else "CPU")
+
+        // Cosa ha visto il fuoco. È la riga che mancava: senza, non si sa se il confine non
+        // si è spostato perché le due foto erano nitide uguale o perché la misura non vede
+        // niente — e sono due difetti opposti, con due cure opposte.
+        val fuoco = if (!tuning.focusAwareSeam) {
+            ""
+        } else if (abs(focusAdvantage) < FOCUS_CLEAR_ADVANTAGE) {
+            " · fuoco: nitide uguale (%+.0f%%, serve %.0f%%)".format(
+                focusAdvantage * 100, FOCUS_CLEAR_ADVANTAGE * 100,
+            )
+        } else {
+            " · fuoco: %s più nitida del %.0f%%, confine spostato".format(
+                if (focusAdvantage > 0f) frame.label else "la tela",
+                abs(focusAdvantage) * 100,
+            )
+        }
         val onFocus = if (tuning.focusAwareSeam) " e sulla messa a fuoco" else ""
         return when {
             manySided ->
-                "confine sul peso$onFocus (vicini su più lati: un taglio solo non basterebbe), $come"
+                "confine sul peso$onFocus (vicini su più lati: un taglio solo non basterebbe), $come$fuoco"
             seam == null && tuning.seamMinimalDifference ->
                 "taglio a metà strada (la polarità della sovrapposizione non è chiara), $come"
             seam == null -> "taglio a metà strada, $come"
-            else -> "taglio sul minimo disaccordo$onFocus, %s, %s".format(
+            else -> "taglio sul minimo disaccordo$onFocus, %s, %s%s".format(
                 if (seam.vertical) "verticale" else "orizzontale",
                 come,
+                fuoco,
             )
         }
     }
@@ -6448,6 +6494,25 @@ class PanoramaStitcher(
          * dove non lo è.
          */
         const val FOCUS_WEIGHT_BIAS = 0.20f
+
+        /**
+         * E di quanto lo sposta un vantaggio **d'insieme**: una foto a fuoco e l'altra no.
+         *
+         * Mezzo peso di sfumatura. È tanto, ed è voluto: quando una delle due ha messo a
+         * fuoco quel piano e l'altra un altro, tenere la molle per rispettare la geometria
+         * vuol dire buttare via la ragione per cui si scattano più foto. Non è tutto — il
+         * peso resta e protegge i bordi del fotogramma, dove la lente è peggiore — ma sposta
+         * il confine di parecchio.
+         */
+        const val FOCUS_OVERALL_BIAS = 0.50f
+
+        /**
+         * Sotto questo vantaggio le due foto sono a fuoco allo stesso modo.
+         *
+         * Un ottavo di differenza di contrasto medio: sotto, quello che si misura è la scena
+         * — un lato della sovrapposizione con più foglie dell'altro — non la messa a fuoco.
+         */
+        const val FOCUS_CLEAR_ADVANTAGE = 0.125f
 
         /** Il lato del riquadro su cui scheda e CPU si confrontano, e il passo del campione. */
         const val GPU_CHECK_SIDE = 96

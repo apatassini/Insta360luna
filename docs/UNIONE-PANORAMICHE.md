@@ -416,11 +416,25 @@ perché quello che conta è la zona, non il pixel. Una zona a fuoco ha dettagli 
 due lo è di più nello stesso punto, e quella differenza sopravvive anche a un quarto di
 risoluzione.
 
+**Due differenze, non una.** La differenza *locale* sposta il confine dove una delle due è più
+a fuoco in un punto: è la messa a fuoco che cambia dentro la stessa foto. Ma il caso vero è un
+altro — una foto è a fuoco su quella zona e l'altra no, **su tutta la sovrapposizione**, perché
+l'autofocus ha scelto un altro piano. Lì la differenza locale è la stessa ovunque, e uno
+spostamento proporzionale al locale non sposta niente: bisogna dire «questa vale più di quella»
+e basta. Perciò al termine locale (fino a 0,2 di peso) si somma un **vantaggio d'insieme** (fino
+a 0,5), che entra solo quando è netto — oltre un ottavo di contrasto medio, sotto il quale
+quello che si misura è la scena, non il fuoco.
+
 **Come entra nel taglio.** Il costo di un taglio era «quanto le due foto discordano *qui*»: una
 domanda sul punto. La nitidezza è una domanda sulla **zona** — chi si prende quel pezzo di
 sovrapposizione — quindi non può essere un costo per cella: va contata come somma su tutto
 quello che il taglio lascia da una parte e dall'altra. Con due somme progressive per passo il
 conto resta lo stesso di prima: una sottrazione per ogni posizione possibile del taglio.
+
+Il verdetto scrive sempre cosa ha visto, per ogni fotogramma: «fuoco: Foto 9 più nitida del 32%,
+confine spostato», oppure «fuoco: nitide uguale (+4%, serve 13%)». Senza quella riga non si sa
+se il confine è rimasto dov'era perché le due foto erano davvero uguali o perché la misura non
+vede niente — e sono due difetti opposti, con due cure opposte.
 
 Dare una cella alla foto meno nitida costa la differenza di nitidezza. Dove le due si
 somigliano — un cielo liscio, un muro — non costa niente, e il taglio resta libero di seguire il

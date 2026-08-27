@@ -32,8 +32,14 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.max
 
-/** Una panoramica trovata fra le foto scelte: il suo lavoro e i suoi scatti, in ordine. */
-class PickedGroup(val jobId: String, val files: List<File>)
+/**
+ * Una panoramica trovata fra le foto scelte: il suo lavoro e i suoi scatti, in ordine.
+ *
+ * [ours] dice di chi sono quei file. Vero: sono copie fatte da noi, e a panoramica finita si
+ * buttano. Falso: **sono le foto dell'utente, dove stanno da sempre** — si leggono e basta, e
+ * chi le cancella non siamo noi.
+ */
+class PickedGroup(val jobId: String, val files: List<File>, val ours: Boolean)
 
 /**
  * Una foto scelta dal telefono: come si chiama e come se ne fa una copia.
@@ -41,7 +47,18 @@ class PickedGroup(val jobId: String, val files: List<File>)
  * Il nome serve al log e all'ordine a parità di istante; la copia la sa fare solo chi ha in
  * mano il `ContentResolver`, che sta nell'interfaccia. Qui dentro non entra nessun `Uri`.
  */
-class PickedPhoto(val name: String, val copyInto: (File) -> Unit)
+class PickedPhoto(
+    val name: String,
+    /**
+     * Il file vero, quando la foto e` gia` leggibile dov'e`.
+     *
+     * Nullo quando non lo e` — una foto in cloud, un provider che non espone un percorso — e
+     * allora tocca copiarla, perche` la cucitura legge file: la coda Insta360 con la traccia
+     * inerziale si legge a salti, non in sequenza.
+     */
+    val original: File?,
+    val copyInto: (File) -> Unit,
+)
 
 /** Cosa sta facendo l'unione, per il pannello che la mostra. */
 sealed interface StitchUiState {
@@ -284,6 +301,35 @@ class PanoramaStitchJob(
     ): Result<List<PickedGroup>> = withContext(Dispatchers.IO) {
         runCatching {
             require(sources.size >= 2) { "Servono almeno due foto per un job di unione" }
+
+            // La strada buona: le foto stanno gia` sul telefono e sono leggibili dove sono.
+            //
+            // Copiarle vorrebbe dire tenere due volte gli stessi megabyte per lavorarci sopra,
+            // e non serve a niente: il lavoro deve poterle **rileggere** domani, non
+            // possederle. Qui non si scrive niente da nessuna parte — si legge e basta.
+            val originals = sources.map { it.original }
+            if (originals.all { it != null && it.canRead() }) {
+                val here = originals.map { it!! }
+                log.info(
+                    "FOTO DEL TELEFONO · NESSUNA COPIA",
+                    "${here.size} foto lette dove sono: " + here.joinToString(" · ") { it.name } +
+                        ". Nessun doppione, gli originali non vengono toccati.",
+                )
+                return@runCatching groupsFor(
+                    files = here,
+                    names = sources.map { it.name },
+                    panoramaId = panoramaId,
+                    horizontalFovDegrees = horizontalFovDegrees,
+                    ours = false,
+                    onProgress = onProgress,
+                )
+            }
+            log.info(
+                "FOTO DEL TELEFONO · COPIA NECESSARIA",
+                "Almeno una foto non e` leggibile dove sta (cloud, o un fornitore che non " +
+                    "espone un percorso): si lavora su copie, che spariscono a panoramica fatta.",
+            )
+
             val workshop = File(context.cacheDir, "panopick").apply { mkdirs() }
             workshop.listFiles()?.forEach { it.delete() }
 
@@ -315,55 +361,88 @@ class PanoramaStitchJob(
                 }
             }
 
-            val ordered = drafts
-                .map { (draft, name) -> Triple(draft, name, captureInstant(draft)) }
-                .sortedWith(compareBy({ it.third }, { it.second }))
+            val drafted = drafts.map { it.first }
+            groupsFor(
+                files = drafted,
+                names = drafts.map { it.second },
+                panoramaId = panoramaId,
+                horizontalFovDegrees = horizontalFovDegrees,
+                ours = true,
+                onProgress = onProgress,
+            ).also { drafted.forEach { draft -> draft.delete() } }
+        }.onFailure { log.warn("JOB DA FOTO DEL TELEFONO NON CREATO", it.message) }
+    }
 
-            log.info(
-                "FOTO DEL TELEFONO · IN ORDINE DI SCATTO",
-                ordered.joinToString(" · ") { (_, name, instant) ->
-                    "$name (${SimpleDateFormat("HH:mm:ss", Locale.ITALIAN).format(Date(instant))})"
-                },
+    /**
+     * Dalle foto ai lavori: in ordine di scatto, divise per panoramica.
+     *
+     * Lo stesso giro vale per le foto lette dove sono e per le copie: cambia solo se alla fine
+     * i file vanno messi nella cartella del lavoro ([ours]) o lasciati dove stanno. Tenerlo in
+     * un posto solo è ciò che impedisce alle due strade di comportarsi in modo diverso su
+     * qualcosa che diverso non è.
+     */
+    private suspend fun groupsFor(
+        files: List<File>,
+        names: List<String>,
+        panoramaId: String,
+        horizontalFovDegrees: Float,
+        ours: Boolean,
+        onProgress: (Float, String) -> Unit,
+    ): List<PickedGroup> {
+        val order = files.indices.sortedWith(
+            compareBy({ captureInstant(files[it]) }, { names[it] }),
+        )
+        val ordered = order.map { files[it] }
+        log.info(
+            "FOTO DEL TELEFONO · IN ORDINE DI SCATTO",
+            order.joinToString(" · ") { index ->
+                "${names[index]} (${SimpleDateFormat("HH:mm:ss", Locale.ITALIAN).format(Date(captureInstant(files[index])))})"
+            },
+        )
+
+        // Quante panoramiche ci sono qui dentro? Non è detto che sia una.
+        //
+        // Chi sceglie le foto dalla cartella del telefono ne prende volentieri di troppo,
+        // perché gli scatti di momenti diversi stanno di fianco. Un tempo finivano tutte nello
+        // stesso lavoro e le estranee allargavano la tela per stare in un angolo; poi si
+        // teneva solo il gruppo più grande e le altre si buttavano. Ma se le altre sono una
+        // panoramica per conto loro, buttarle è sbagliato quanto tenerle: si fa **un lavoro
+        // per ciascuna**, e chi le ha scelte decide quale unire.
+        onProgress(0.7f, "Guardo quante panoramiche sono")
+        val groups = groupsOf(ordered, horizontalFovDegrees, onProgress)
+        val alone = ordered.indices.filter { index -> groups.none { index in it } }
+        if (alone.isNotEmpty()) {
+            log.warn(
+                "FOTO DEL TELEFONO · FUORI DA TUTTE",
+                "${alone.size} foto non hanno dettagli in comune con nessun'altra: " +
+                    alone.joinToString(" · ") { names[order[it]] } +
+                    ". Una foto da sola non è una panoramica, e restano fuori.",
             )
+        }
 
-            // Quante panoramiche ci sono qui dentro? Non è detto che sia una.
-            //
-            // Chi sceglie le foto dalla cartella del telefono ne prende volentieri di troppo,
-            // perché gli scatti di momenti diversi stanno di fianco. Un tempo finivano tutte
-            // nello stesso lavoro e le estranee allargavano la tela per stare in un angolo;
-            // poi si teneva solo il gruppo più grande e le altre si buttavano. Ma se le altre
-            // sono una panoramica per conto loro, buttarle è sbagliato quanto tenerle: si fa
-            // **un lavoro per ciascuna**, e chi le ha scelte decide quale unire.
-            onProgress(0.7f, "Guardo quante panoramiche sono")
-            val drafted = ordered.map { it.first }
-            val groups = groupsOf(drafted, horizontalFovDegrees, onProgress)
-            val alone = drafted.indices.filter { index -> groups.none { index in it } }
-            if (alone.isNotEmpty()) {
-                log.warn(
-                    "FOTO DEL TELEFONO · FUORI DA TUTTE",
-                    "${alone.size} foto non hanno dettagli in comune con nessun'altra: " +
-                        alone.joinToString(" · ") { ordered[it].second } +
-                        ". Una foto da sola non è una panoramica, e restano fuori.",
-                )
-            }
-
-            groups.mapIndexed { position, group ->
-                val id = if (position == 0) panoramaId else "$panoramaId-${position + 1}"
+        return groups.mapIndexed { position, group ->
+            val id = if (position == 0) panoramaId else "$panoramaId-${position + 1}"
+            val kept = if (!ours) {
+                // Niente da spostare: le foto restano dove sono, il lavoro si segna dove.
+                group.map { ordered[it] }
+            } else {
                 val dir = jobDirFor(id)
-                val files = group.mapIndexed { place, index ->
-                    val (draft, name, _) = ordered[index]
+                group.mapIndexed { place, index ->
                     // Il nome porta la posizione: la cartella del lavoro si legge in ordine, e
                     // il nome originale resta lì accanto per ritrovare la foto di partenza.
-                    storeInJobDirectory(draft, "%02d-%s".format(place + 1, name), dir, id)
+                    storeInJobDirectory(ordered[index], "%02d-%s".format(place + 1, names[order[index]]), dir, id)
                 }
-                MediaScannerConnection.scanFile(context, files.map { it.absolutePath }.toTypedArray(), null, null)
-                log.info(
-                    "JOB DA FOTO DEL TELEFONO",
-                    "Panoramica ${position + 1} di ${groups.size}: ${files.size} foto in ${dir.path}.",
-                )
-                PickedGroup(id, files)
-            }.also { drafted.forEach { draft -> draft.delete() } }
-        }.onFailure { log.warn("JOB DA FOTO DEL TELEFONO NON CREATO", it.message) }
+            }
+            if (ours) {
+                MediaScannerConnection.scanFile(context, kept.map { it.absolutePath }.toTypedArray(), null, null)
+            }
+            log.info(
+                "JOB DA FOTO DEL TELEFONO",
+                "Panoramica ${position + 1} di ${groups.size}: ${kept.size} foto" +
+                    if (ours) " copiate in ${kept.firstOrNull()?.parent}." else " lette dove sono.",
+            )
+            PickedGroup(id, kept, ours)
+        }
     }
 
     /**

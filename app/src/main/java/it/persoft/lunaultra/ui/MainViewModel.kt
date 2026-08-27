@@ -1892,6 +1892,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val sources = uris.mapIndexed { index, uri ->
                 PickedPhoto(
                     name = displayNameOf(context, uri) ?: "foto-${index + 1}.jpg",
+                    original = originalFileOf(context, uri),
                 ) { target ->
                     context.contentResolver.openInputStream(uri)?.use { input ->
                         target.outputStream().use { output -> input.copyTo(output) }
@@ -1925,6 +1926,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 fovDegrees = effectiveFov(fov.horizontalDegrees),
                                 spherical = false,
                                 fromPhone = true,
+                                // Le foto lette dove sono restano dell'utente: il lavoro le
+                                // legge, non le possiede, e non le cancellera` mai.
+                                filesAreOurs = group.ours,
                             )
                         },
                     )
@@ -1946,6 +1950,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    /**
+     * Il file vero dietro un indirizzo, quando esiste ed è leggibile.
+     *
+     * Una foto scelta dalla galleria **è già sul telefono**: farne una copia per lavorarci
+     * sopra vuol dire tenere due volte gli stessi megabyte, e non serve a niente. Il percorso
+     * lo sa la libreria multimediale, e con il permesso di lettura il file si apre dov'è.
+     *
+     * Torna nullo quando quel percorso non c'è o non si legge — una foto in cloud, un
+     * fornitore che consegna solo un flusso, il permesso negato — e allora, e solo allora, si
+     * lavora su una copia. È il ripiego, non la regola.
+     */
+    private fun originalFileOf(context: android.content.Context, uri: android.net.Uri): java.io.File? =
+        runCatching {
+            val direct = queryPath(context, uri)
+            val path = direct ?: documentPath(context, uri)
+            path?.let { java.io.File(it) }?.takeIf { it.canRead() && it.length() > 0L }
+        }.getOrNull()
+
+    /** Il percorso scritto nella libreria multimediale, per gli indirizzi che ne hanno uno. */
+    private fun queryPath(context: android.content.Context, uri: android.net.Uri): String? =
+        runCatching {
+            context.contentResolver.query(
+                uri,
+                arrayOf(android.provider.MediaStore.MediaColumns.DATA),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val column = cursor.getColumnIndex(android.provider.MediaStore.MediaColumns.DATA)
+                if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+            }
+        }.getOrNull()
+
+    /**
+     * Il percorso di un indirizzo del selettore di documenti, che non risponde da solo.
+     *
+     * Il selettore consegna qualcosa come `document/image:1000012345`: il numero dopo i due
+     * punti è la foto nella libreria multimediale, e a quella si può chiedere dove sta.
+     */
+    private fun documentPath(context: android.content.Context, uri: android.net.Uri): String? =
+        runCatching {
+            if (!android.provider.DocumentsContract.isDocumentUri(context, uri)) return null
+            val id = android.provider.DocumentsContract.getDocumentId(uri)
+            val number = id.substringAfter(':', missingDelimiterValue = id).toLongOrNull()
+                ?: return null
+            context.contentResolver.query(
+                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(android.provider.MediaStore.MediaColumns.DATA),
+                "${android.provider.MediaStore.MediaColumns._ID} = ?",
+                arrayOf(number.toString()),
+                null,
+            )?.use { cursor ->
+                val column = cursor.getColumnIndex(android.provider.MediaStore.MediaColumns.DATA)
+                if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+            }
+        }.getOrNull()
 
     /** Il nome che il telefono dà a una foto scelta: serve al log e a rompere le parità. */
     private fun displayNameOf(context: android.content.Context, uri: android.net.Uri): String? =
@@ -2142,7 +2203,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // l'interruttore lo chiede: con l'opzione spenta il job resta lì, pronto per
                 // la prova successiva — è il banco di prova dell'unione. In modalità test
                 // non si butta mai niente: le prove servono a rifare, non a chiudere.
-                if (settings.value.deleteJobAfterStitch && !testMode) {
+                // E mai i file che non sono nostri: una foto della galleria letta dov'era
+                // resta dov'era, qualunque cosa dica l'interruttore.
+                if (settings.value.deleteJobAfterStitch && !testMode && job.filesAreOurs) {
                     withContext(Dispatchers.IO) {
                         container.stitchJob.discardJobFiles(files.map { it.absolutePath })
                     }
@@ -2351,7 +2414,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // foto del telefono no: l'originale è rimasto in galleria e non l'abbiamo mai toccato.
         // Tenere il doppione vuol dire occupare due volte lo stesso spazio per sempre, e
         // nessuno l'ha chiesto.
-        if (settings.value.deleteJobAfterStitch || job.fromPhone) {
+        // Si buttano solo i file **nostri**. Quelli letti dove stavano sono le foto
+        // dell'utente: guai a cancellarle, e non c'è nessuna condizione in cui farlo sarebbe
+        // quello che voleva.
+        if (job.filesAreOurs && (settings.value.deleteJobAfterStitch || job.fromPhone)) {
             // Prima si misura, poi si butta: dopo, i file pesano zero e la riga del log
             // direbbe una cosa vera e inutile.
             val megabytes = withContext(Dispatchers.IO) {
@@ -2459,7 +2525,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // L'appunto dell'anteprima non e` un archivio: da solo non serve a niente, e se ne va
         // con il lavoro a cui apparteneva.
         PanoPrepStore.discard(prepRoot, job.id)
-        showMessage("Job annullato: le foto restano in DCIM › Luna Ultra › Panoramiche")
+        showMessage(
+            if (job.filesAreOurs) {
+                "Job annullato: le foto restano in DCIM › Luna Ultra › Panoramiche"
+            } else {
+                "Job annullato: le foto sono rimaste in galleria, dov'erano"
+            },
+        )
     }
 
     fun setStartHoldSeconds(seconds: Float) =

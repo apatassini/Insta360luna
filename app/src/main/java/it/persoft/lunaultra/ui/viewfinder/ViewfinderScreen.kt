@@ -65,11 +65,26 @@ fun ViewfinderScreen(
 ) {
     val context = LocalContext.current
 
-    // Il selettore di sistema restituisce le foto nell'ordine in cui vengono toccate: toccarle
-    // una, due, tre come sono state scattate è il modo di dare l'ordine all'unione.
+    // L'ordine con cui il selettore le consegna non conta: il posto delle foto lo trova il
+    // riconoscimento dei dettagli, non la sequenza in cui sono state toccate.
     val photoPicker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris -> if (uris.isNotEmpty()) viewModel.stitchPickedPhotos(context, uris) }
+
+    // Il permesso di leggere le foto dove sono.
+    //
+    // Serve a **non copiarle**: senza, l'unica strada è farsi consegnare un flusso e
+    // scriverne una copia, cioè tenere due volte gli stessi megabyte per lavorarci sopra. Se
+    // viene negato si lavora lo stesso, su copie che spariscono a panoramica fatta — quindi
+    // il selettore si apre in ogni caso, negato o no.
+    val photoPermission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { photoPicker.launch(arrayOf("image/*")) }
+    val readPhotos = if (android.os.Build.VERSION.SDK_INT >= 33) {
+        android.Manifest.permission.READ_MEDIA_IMAGES
+    } else {
+        android.Manifest.permission.READ_EXTERNAL_STORAGE
+    }
     val settings by viewModel.settings.collectAsState()
     val connection by viewModel.connectionState.collectAsState()
     val status by viewModel.status.collectAsState()
@@ -418,7 +433,13 @@ fun ViewfinderScreen(
                     onHideChrome = { chromeVisible = false },
                     onOpenSettings = { onOpenPanel(Panel.SETTINGS) },
                     onOpenSequence = { onOpenPanel(Panel.SEQUENCE) },
-                    onPickPhotos = { photoPicker.launch(arrayOf("image/*")) },
+                    onPickPhotos = {
+                        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                            context,
+                            readPhotos,
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (granted) photoPicker.launch(arrayOf("image/*")) else photoPermission.launch(readPhotos)
+                    },
                     onShareLog = { viewModel.shareLog(context) },
                 )
             }

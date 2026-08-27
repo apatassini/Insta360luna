@@ -31,6 +31,17 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <!--
+        Leggere le foto dove sono, invece di farne una copia.
+
+        Una panoramica presa dalla galleria del telefono e` fatta di file che esistono gia`:
+        copiarli vorrebbe dire occupare due volte lo stesso spazio per lavorarci sopra. Con
+        questo permesso l'app apre gli originali dove stanno, in sola lettura, e non li tocca.
+    -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Necessario per consegnare ad Android l'APK scaricato dalla release GitHub. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

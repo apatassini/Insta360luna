@@ -49,6 +49,14 @@ data class PanoJob(
      * panoramica è fatta vuol dire solo occupare due volte lo stesso spazio.
      */
     val fromPhone: Boolean = false,
+    /**
+     * Vero quando i file di questo lavoro sono nostri, e possiamo buttarli.
+     *
+     * Lo sono gli scatti scaricati dalla camera e le copie fatte quando una foto non era
+     * leggibile dov'era. **Non** lo sono le foto della galleria lette dove stanno: quelle sono
+     * dell'utente, il lavoro le legge e basta, e nessuna impostazione le deve poter cancellare.
+     */
+    val filesAreOurs: Boolean = true,
     /** Il rettangolo del ritaglio, in frazioni della tela. Zero-zero-uno-uno = tela intera. */
     val cropLeft: Float = 0f,
     val cropTop: Float = 0f,

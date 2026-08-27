@@ -130,6 +130,18 @@ scelta esplicita solo per lui. È una manopola che dipende dalla scena e non dal
 di scatti su un muro non ha niente da guadagnarci, una verticale che va dal prato al cielo sì —
 e chi sta guardando l'anteprima di *quel* lavoro è nella posizione giusta per deciderlo.
 
+Acceso, sotto compare un **cursore**: quanto pesa il fuoco, da zero a tre volte la taratura di
+partenza. Un cursore e non una casella perché non è una cosa che si decide una volta per tutte —
+dipende da quanto le due foto sono diverse, e quello lo vede solo chi guarda *quella*
+panoramica. Verso il basso il fuoco è un'opinione fra le altre e la geometria resta padrona;
+verso l'alto comanda lui, fino a prendersi quasi tutta la sovrapposizione quando una foto è a
+fuoco e l'altra no.
+
+I comandi sotto la foto **scorrono**, se crescono. Lo scorrimento non prende tutta la pagina:
+sull'immagine il dito sposta il punto di fuga e tira il rettangolo del ritaglio, e un
+contenitore che scorre si prenderebbe quei trascinamenti verticali prima che arrivino a
+destinazione.
+
 **Il ritaglio** si accende con la sua pastiglia, e finché è acceso il dito fa un altro
 mestiere: prende l'angolo più vicino, o sposta tutto il rettangolo se è caduto dentro. Il punto
 di fuga non si tocca — una matita e una gomma non sono lo stesso oggetto. Fuori dal rettangolo

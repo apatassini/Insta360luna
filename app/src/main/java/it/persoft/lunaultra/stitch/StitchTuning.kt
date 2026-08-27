@@ -81,6 +81,16 @@ data class StitchTuning(
     val focusAwareSeam: Boolean = false,
 
     /**
+     * Quanto pesa la messa a fuoco rispetto alla geometria. Uno è la taratura di partenza.
+     *
+     * Moltiplica tutti e tre i modi in cui il fuoco entra: il costo del taglio, lo
+     * spostamento locale del confine e il vantaggio d'insieme. Un numero solo, perché sono
+     * tre facce della stessa domanda — quanto ci si fida della nitidezza contro quanto ci si
+     * fida di «chi è più al centro del proprio fotogramma».
+     */
+    val focusStrength: Float = 1f,
+
+    /**
      * La deformazione locale che assorbe quello che la rotazione non può assorbire.
      *
      * Il gimbal non ruota attorno al centro ottico dell'obiettivo: fra un'inquadratura e

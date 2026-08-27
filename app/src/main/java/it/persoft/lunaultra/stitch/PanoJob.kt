@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.stitch
 
 import kotlinx.serialization.Serializable
+import kotlin.math.roundToInt
 
 /**
  * Una panoramica scattata e non ancora unita: il lavoro aspetta sul telefono.
@@ -59,6 +60,8 @@ data class PanoJob(
     val filesAreOurs: Boolean = true,
     /** Il fuoco per questo lavoro: -1 come dice l'impostazione generale, 0 spento, 1 acceso. */
     val focusSeamCode: Int = -1,
+    /** Quanto pesa il fuoco, in centesimi. -1 = come dice l'app. */
+    val focusStrengthPercent: Int = -1,
     /** Il rettangolo del ritaglio, in frazioni della tela. Zero-zero-uno-uno = tela intera. */
     val cropLeft: Float = 0f,
     val cropTop: Float = 0f,
@@ -83,6 +86,7 @@ data class PanoJob(
                     1 -> true
                     else -> null
                 },
+                focusStrength = focusStrengthPercent.takeIf { it >= 0 }?.let { it / 100f },
                 cropLeft = cropLeft,
                 cropTop = cropTop,
                 cropRight = cropRight,
@@ -102,6 +106,7 @@ data class PanoJob(
             true -> 1
             null -> -1
         },
+        focusStrengthPercent = view.focusStrength?.let { (it * 100).roundToInt() } ?: -1,
         cropLeft = view.cropLeft,
         cropTop = view.cropTop,
         cropRight = view.cropRight,

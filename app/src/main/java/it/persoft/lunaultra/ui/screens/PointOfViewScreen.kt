@@ -4,6 +4,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -99,6 +101,14 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
     // interruttore — è la stessa ragione per cui una matita e una gomma non sono lo stesso
     // oggetto.
     var cropping by remember { mutableStateOf(false) }
+
+    // Il fuoco, per questa panoramica sola.
+    //
+    // Tre stati e non due: «come dice l'app», «tienilo» e «lascia stare». Finché nessuno ha
+    // scelto, il lavoro segue l'impostazione generale — e deve poterlo continuare a fare,
+    // perché una casella toccata per sbaglio su una panoramica non deve diventare una scelta
+    // per tutte le altre.
+    val focusOn = view.focusSeam ?: settings.stitch.focusAwareSeam
 
     /**
      * L'ultima anteprima disegnata, letta **dentro** il gesto invece che dall'esterno.
@@ -408,185 +418,219 @@ fun PointOfViewScreen(viewModel: MainViewModel) {
             }
         }
 
-        // ---- Rollio: il primo comando sotto la foto, perché è quello che si corregge a occhio ----
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text("Rollio", style = MaterialTheme.typography.labelLarge, color = Luna.OnSurfaceDim)
-            Slider(
-                value = view.rollDegrees,
-                onValueChange = viewModel::setPointOfViewRoll,
-                valueRange = -10f..10f,
-                steps = 79,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                "%+.2f°".format(view.rollDegrees),
-                style = MaterialTheme.typography.labelLarge,
-                color = Color.White,
-            )
-        }
-
-        // ---- Proiezione e ritaglio: una riga per uno, senza titoli sopra ----
+        // La foto sta sopra e non scorre; i comandi stanno sotto e scorrono se non ci stanno.
         //
-        // I titoli mangiavano due righe per dire quello che i pulsanti dicono da soli, e ogni
-        // riga tolta e` spazio che va alla foto — che e` la sola cosa che qui serve guardare.
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        // Lo scorrimento **non** può prendersi tutta la pagina: sull'immagine il dito sposta il
+        // punto di fuga e tira il rettangolo del ritaglio, e un contenitore che scorre si
+        // prenderebbe quei trascinamenti verticali prima che arrivino a destinazione. Sotto
+        // invece non c'è niente da trascinare, e lì scorrere è gratis.
+        Column(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            ProjectionChip(null, view.projection, "Auto", Modifier.weight(1f), viewModel)
-            ProjectionChip(
-                StitchProjection.EQUIRECTANGULAR, view.projection,
-                "Sferica", Modifier.weight(1f), viewModel,
-            )
-            ProjectionChip(
-                StitchProjection.CYLINDRICAL, view.projection,
-                "Cilindrica", Modifier.weight(1f), viewModel,
-            )
-            ProjectionChip(
-                StitchProjection.MERCATOR, view.projection,
-                "Mercatore", Modifier.weight(1f), viewModel,
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            // Il fuoco, per questa panoramica sola.
+            // ---- Il peso del fuoco, quando il fuoco è acceso ----
             //
-            // Tre stati e non due: «come dice l'app», «tienilo» e «lascia stare». Finché
-            // nessuno ha scelto, il lavoro segue l'impostazione generale — e deve poterlo
-            // continuare a fare, perché una casella toccata per sbaglio su una panoramica non
-            // deve diventare una scelta per tutte le altre.
-            val focusOn = view.focusSeam ?: settings.stitch.focusAwareSeam
-            FilterChip(
-                selected = focusOn,
-                onClick = { viewModel.setPointOfViewFocus(!focusOn) },
-                label = {
-                    Text(
-                        "Fuoco",
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center,
+            // Un cursore e non una casella, perché non è una cosa che si decide una volta per
+            // tutte: dipende da quanto le due foto sono diverse, e quello lo vede solo chi
+            // guarda *questa* panoramica. A uno è la taratura di partenza; verso il basso il
+            // fuoco è un'opinione fra le altre e la geometria resta padrona; verso l'alto
+            // comanda lui, fino a prendersi quasi tutta la sovrapposizione quando una delle due
+            // è a fuoco e l'altra no.
+            if (focusOn) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Fuoco", style = MaterialTheme.typography.labelLarge, color = Luna.OnSurfaceDim)
+                    Slider(
+                        value = view.focusStrength ?: 1f,
+                        onValueChange = viewModel::setPointOfViewFocusStrength,
+                        valueRange = 0f..3f,
+                        steps = 29,
+                        modifier = Modifier.weight(1f),
                     )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = Luna.Photo.copy(alpha = 0.20f),
-                    selectedLabelColor = Luna.Photo,
-                ),
-                modifier = Modifier.weight(1.1f),
-            )
-            FilterChip(
-                selected = cropping,
-                onClick = {
-                    cropping = !cropping
-                    // Accendendolo la prima volta il rettangolo parte da tutta la tela: si
-                    // stringe da lì, che è il verso in cui si ragiona guardando una foto.
-                    if (cropping && !view.cropped) viewModel.setPointOfViewCrop(0f, 0f, 1f, 1f)
-                },
-                label = {
                     Text(
-                        "Taglia",
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center,
+                        "×%.1f".format(view.focusStrength ?: 1f),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White,
                     )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = Luna.Ok.copy(alpha = 0.20f),
-                    selectedLabelColor = Luna.Ok,
-                ),
-                modifier = Modifier.weight(1.1f),
-            )
-            // Sei pastiglie su una riga sola: i limiti della tela cedono un filo di larghezza
-            // alle due parole, che altrimenti finiscono con i puntini.
-            for (limit in intArrayOf(0, 55, 65, 75)) {
+                }
+            }
+
+            // ---- Rollio: il primo comando sotto la foto, perché è quello che si corregge a occhio ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Rollio", style = MaterialTheme.typography.labelLarge, color = Luna.OnSurfaceDim)
+                Slider(
+                    value = view.rollDegrees,
+                    onValueChange = viewModel::setPointOfViewRoll,
+                    valueRange = -10f..10f,
+                    steps = 79,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "%+.2f°".format(view.rollDegrees),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White,
+                )
+            }
+
+            // ---- Proiezione e ritaglio: una riga per uno, senza titoli sopra ----
+            //
+            // I titoli mangiavano due righe per dire quello che i pulsanti dicono da soli, e ogni
+            // riga tolta e` spazio che va alla foto — che e` la sola cosa che qui serve guardare.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                ProjectionChip(null, view.projection, "Auto", Modifier.weight(1f), viewModel)
+                ProjectionChip(
+                    StitchProjection.EQUIRECTANGULAR, view.projection,
+                    "Sferica", Modifier.weight(1f), viewModel,
+                )
+                ProjectionChip(
+                    StitchProjection.CYLINDRICAL, view.projection,
+                    "Cilindrica", Modifier.weight(1f), viewModel,
+                )
+                ProjectionChip(
+                    StitchProjection.MERCATOR, view.projection,
+                    "Mercatore", Modifier.weight(1f), viewModel,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 FilterChip(
-                    selected = view.verticalLimitDegrees.roundToInt() == limit,
-                    onClick = { viewModel.setPointOfViewLimit(limit.toFloat()) },
+                    selected = focusOn,
+                    onClick = { viewModel.setPointOfViewFocus(!focusOn) },
                     label = {
                         Text(
-                            if (limit == 0) "Tutta" else "$limit°",
+                            "Fuoco",
                             style = MaterialTheme.typography.labelMedium,
                             maxLines = 1,
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Center,
                         )
                     },
-                    modifier = Modifier.weight(0.95f),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Luna.Photo.copy(alpha = 0.20f),
+                        selectedLabelColor = Luna.Photo,
+                    ),
+                    modifier = Modifier.weight(1.1f),
                 )
-            }
-        }
-
-        // ---- I numeri: si leggono, non si toccano, e stanno sotto i comandi ----
-        Text(
-            buildString {
-                append("Tocca per centrare · pan %+.0f° · su/giù %+.0f°".format(view.panDegrees, view.tiltDegrees))
-                if (zoom > 1.01f) append(" · ingrandita ×%.1f".format(zoom))
-                view.focusSeam?.let { append(if (it) " · tiene il più a fuoco" else " · fuoco ignorato") }
-                if (view.cropped) {
-                    append(" · ritaglio %.0f%% × %.0f%%".format(
-                        (view.cropRight - view.cropLeft) * 100,
-                        (view.cropBottom - view.cropTop) * 100,
-                    ))
+                FilterChip(
+                    selected = cropping,
+                    onClick = {
+                        cropping = !cropping
+                        // Accendendolo la prima volta il rettangolo parte da tutta la tela: si
+                        // stringe da lì, che è il verso in cui si ragiona guardando una foto.
+                        if (cropping && !view.cropped) viewModel.setPointOfViewCrop(0f, 0f, 1f, 1f)
+                    },
+                    label = {
+                        Text(
+                            "Taglia",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center,
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Luna.Ok.copy(alpha = 0.20f),
+                        selectedLabelColor = Luna.Ok,
+                    ),
+                    modifier = Modifier.weight(1.1f),
+                )
+                // Sei pastiglie su una riga sola: i limiti della tela cedono un filo di larghezza
+                // alle due parole, che altrimenti finiscono con i puntini.
+                for (limit in intArrayOf(0, 55, 65, 75)) {
+                    FilterChip(
+                        selected = view.verticalLimitDegrees.roundToInt() == limit,
+                        onClick = { viewModel.setPointOfViewLimit(limit.toFloat()) },
+                        label = {
+                            Text(
+                                if (limit == 0) "Tutta" else "$limit°",
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
+                            )
+                        },
+                        modifier = Modifier.weight(0.95f),
+                    )
                 }
-                shape?.let {
-                    append(" · %s fino a %.0f° · cima ×%.1f↔ ×%.1f↕".format(
-                        shortName(it.projection), it.reachDegrees, it.horizontalStretch, it.verticalStretch,
-                    ))
-                }
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = if (zoom > 1.01f) Luna.Ok else Luna.OnSurfaceDim,
-            modifier = Modifier.clickable(enabled = zoom > 1.01f) {
-                // Tornare indietro deve costare un tocco: con due dita si arriva a ×4 in
-                // mezzo secondo, e uscirne a pizzichi e` sempre piu` lento che entrarci.
-                zoom = 1f
-                shift = Offset.Zero
-                viewModel.setPointOfViewZoom(1f, settled = true)
-            },
-        )
+            }
 
-        // ---- Le decisioni, su una riga sola: la seconda era spazio tolto alla foto ----
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            OutlinedButton(
-                onClick = viewModel::resetPointOfView,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                modifier = Modifier.weight(1f),
+            // ---- I numeri: si leggono, non si toccano, e stanno sotto i comandi ----
+            Text(
+                buildString {
+                    append("Tocca per centrare · pan %+.0f° · su/giù %+.0f°".format(view.panDegrees, view.tiltDegrees))
+                    if (zoom > 1.01f) append(" · ingrandita ×%.1f".format(zoom))
+                    view.focusSeam?.let { append(if (it) " · tiene il più a fuoco" else " · fuoco ignorato") }
+                    if (view.cropped) {
+                        append(" · ritaglio %.0f%% × %.0f%%".format(
+                            (view.cropRight - view.cropLeft) * 100,
+                            (view.cropBottom - view.cropTop) * 100,
+                        ))
+                    }
+                    shape?.let {
+                        append(" · %s fino a %.0f° · cima ×%.1f↔ ×%.1f↕".format(
+                            shortName(it.projection), it.reachDegrees, it.horizontalStretch, it.verticalStretch,
+                        ))
+                    }
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (zoom > 1.01f) Luna.Ok else Luna.OnSurfaceDim,
+                modifier = Modifier.clickable(enabled = zoom > 1.01f) {
+                    // Tornare indietro deve costare un tocco: con due dita si arriva a ×4 in
+                    // mezzo secondo, e uscirne a pizzichi e` sempre piu` lento che entrarci.
+                    zoom = 1f
+                    shift = Offset.Zero
+                    viewModel.setPointOfViewZoom(1f, settled = true)
+                },
+            )
+
+            // ---- Le decisioni, su una riga sola: la seconda era spazio tolto alla foto ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text("Com'era", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-            }
-            OutlinedButton(
-                onClick = viewModel::skipPointOfView,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                modifier = Modifier.weight(1f),
-            ) {
-                Text("Decidi tu", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-            }
-            if (forJob != null) {
-                Button(
-                    onClick = viewModel::savePointOfView,
+                OutlinedButton(
+                    onClick = viewModel::resetPointOfView,
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Salva", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    Text("Com'era", style = MaterialTheme.typography.labelMedium, maxLines = 1)
                 }
-            }
-            OutlinedButton(
-                onClick = viewModel::confirmPointOfView,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                modifier = Modifier.weight(1f),
-            ) {
-                Text("Cuci", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                OutlinedButton(
+                    onClick = viewModel::skipPointOfView,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Decidi tu", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+                if (forJob != null) {
+                    Button(
+                        onClick = viewModel::savePointOfView,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Salva", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
+                }
+                OutlinedButton(
+                    onClick = viewModel::confirmPointOfView,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Cuci", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
             }
         }
     }

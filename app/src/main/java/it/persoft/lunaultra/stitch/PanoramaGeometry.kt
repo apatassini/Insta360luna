@@ -847,6 +847,16 @@ data class PanoramaView(
      * sì, e chi guarda l'anteprima di *quel* lavoro è nella posizione giusta per dirlo.
      */
     val focusSeam: Boolean? = null,
+    /**
+     * Quanto pesa la messa a fuoco, per questa panoramica. Nullo = come dice l'app.
+     *
+     * Uno è la taratura di partenza. Sotto, il fuoco è un'opinione fra le altre e la
+     * geometria resta padrona; sopra, comanda lui — fino a prendersi quasi tutta la
+     * sovrapposizione quando una delle due foto è a fuoco e l'altra no. Non è un numero che
+     * si possa decidere una volta per tutte: dipende da quanto le due foto sono diverse, e
+     * quello lo vede solo chi guarda *quella* panoramica.
+     */
+    val focusStrength: Float? = null,
     val cropLeft: Float = 0f,
     val cropTop: Float = 0f,
     val cropRight: Float = 1f,

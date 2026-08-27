@@ -1094,6 +1094,7 @@ class PanoramaStitcher(
             // Il fuoco deciso per questa panoramica vince sull'impostazione generale: chi ha
             // guardato *questa* anteprima ne sa di più di una casella nelle impostazioni.
             focusAwareSeam = view.focusSeam ?: tuning.focusAwareSeam,
+            focusStrength = view.focusStrength ?: tuning.focusStrength,
         )
         notes += ("Punto di vista scelto a mano: pan %+.1f° · inclinazione %+.1f° · rollio %+.1f° · %s%s%s")
             .format(
@@ -1105,7 +1106,9 @@ class PanoramaStitcher(
                     ""
                 },
                 when (view.focusSeam) {
-                    true -> " · tiene la parte più a fuoco"
+                    true -> " · tiene la parte più a fuoco (peso ×%.1f)".format(
+                        view.focusStrength ?: tuning.focusStrength,
+                    )
                     false -> " · non guarda la messa a fuoco"
                     null -> ""
                 },
@@ -4559,14 +4562,15 @@ class PanoramaStitcher(
         fun focusBias(new: FloatArray?, old: FloatArray?, g: Int): Float {
             if (new == null || old == null) return 0f
             val local = if (focusScale > 0f) {
-                FOCUS_WEIGHT_BIAS * ((new[g] - old[g]) / focusScale).coerceIn(-1f, 1f)
+                FOCUS_WEIGHT_BIAS * tuning.focusStrength *
+                    ((new[g] - old[g]) / focusScale).coerceIn(-1f, 1f)
             } else {
                 0f
             }
             // Il vantaggio d'insieme conta solo se è netto: sotto la soglia le due foto sono
             // a fuoco allo stesso modo e il peso deve restare l'unica cosa che comanda.
             val overall = if (abs(focusAdvantage) >= FOCUS_CLEAR_ADVANTAGE) {
-                FOCUS_OVERALL_BIAS * focusAdvantage.coerceIn(-1f, 1f)
+                FOCUS_OVERALL_BIAS * tuning.focusStrength * focusAdvantage.coerceIn(-1f, 1f)
             } else {
                 0f
             }
@@ -5281,7 +5285,7 @@ class PanoramaStitcher(
                 // Le due grandezze non hanno la stessa unità: una è colore, l'altra contrasto.
                 // Si mettono in scala sui rispettivi valori medi, così il peso è un numero
                 // puro e vale lo stesso su una panoramica scura e su una in pieno sole.
-                val scale = FOCUS_SEAM_STRENGTH * meanDifference / meanPenalty
+                val scale = FOCUS_SEAM_STRENGTH * tuning.focusStrength * meanDifference / meanPenalty
                 // Due somme progressive per passo: quanto costa dare una cella al nuovo, e
                 // quanto costa darla alla tela. Il resto è una sottrazione per ogni possibile
                 // posizione del taglio.

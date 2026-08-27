@@ -1299,6 +1299,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Oltre lo zenit non si va: la panoramica si rovescerebbe. */
     private val POINT_OF_VIEW_MAX_TILT = 89f
 
+    /** Il massimo che il cursore del fuoco può chiedere: tre volte la taratura di partenza. */
+    private val POINT_OF_VIEW_MAX_FOCUS = 3f
+
     /**
      * Quanto grande si ridisegna l'anteprima quando la si ingrandisce, al massimo.
      *
@@ -1544,6 +1547,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun setPointOfViewFocus(on: Boolean?) {
         _pointOfView.value = _pointOfView.value.copy(focusSeam = on)
+    }
+
+    /**
+     * Quanto pesa il fuoco su questa panoramica.
+     *
+     * Non fa ridisegnare l'anteprima, come l'interruttore: il peso decide dove passa la
+     * giunzione nella cucitura vera, e l'anteprima le giunzioni non le fa.
+     */
+    fun setPointOfViewFocusStrength(value: Float) {
+        _pointOfView.value = _pointOfView.value.copy(
+            focusStrength = value.coerceIn(0f, POINT_OF_VIEW_MAX_FOCUS),
+            // Muovere il cursore vuol dire volerlo: l'interruttore si accende da solo,
+            // altrimenti si regola un peso che non ha effetto e non si capisce perché.
+            focusSeam = true,
+        )
     }
 
     /** Via il ritaglio: si torna alla tela intera. */

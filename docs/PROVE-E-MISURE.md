@@ -503,6 +503,34 @@ E la maschera della griglia ridotta legge adesso **lo stesso** vettore di sposta
 risoluzione, non un secondo calcolo che le somigliava: la correzione multibanda deve correggere
 il montaggio che si sta scrivendo, non uno che gli assomiglia.
 
+### 5.15 Il misuratore a tacche, e cosa può dire davvero della scheda
+
+Il pannello dell'unione mostrava tre numeri scritti — core, heap, memoria nativa — campionati
+ogni settecento millisecondi. Un numero che cambia più di una volta al secondo non si legge:
+lampeggia. Al suo posto due misuratori a tacche da banco da mixaggio, otto tacche, campionati
+ogni trecento millisecondi.
+
+Le otto tacche non sono decorazione. Sono i core del telefono, e il numero di fianco (`2,2/8`)
+è quello vero. La **punta** — il massimo recente, che scende di una tacca ogni mezzo secondo —
+dice una cosa che l'istante non dice: *due core mediamente occupati* può voler dire «due core
+sempre» oppure «otto core un quarto del tempo», e sono due mondi diversi quando si cerca dove
+parallelizzare. Punta ferma su due: il primo. Punta alta: il secondo.
+
+Sulla scheda grafica il numero delle tacche vuol dire un'altra cosa, e va detto: **quanti
+processori abbia una GPU, e quanti ne stia usando, non lo dice nessuna versione di OpenGL ES.**
+Si sa il nome della scheda, il limite delle texture, e — solo se il driver offre
+`GL_EXT_disjoint_timer_query` — quanto tempo ha passato a disegnare. Le tacche della GPU sono
+quindi ottavi di **tempo occupata**, non di unità di calcolo. Quando i cronometri non ci sono,
+restano spente con un trattino di fianco: «non lo so» e «ferma» sono due cose diverse, e
+mostrare uno zero al posto di un non-lo-so è il modo più veloce per farsi credere una volta e
+mai più.
+
+Il cronometro della scheda viveva dentro il renderer, che nasce e muore con la cucitura e si
+legge solo alla fine, quando si scrive il verdetto. Ora lo specchia in un contatore volatile
+(`GpuLoad`) che la sonda legge mentre la cucitura va avanti: un filo scrive, uno legge, nessuno
+dei due aspetta l'altro, e un campione preso un istante prima o dopo sposta una tacca e niente
+di più.
+
 ## 6. Memoria
 
 | | prima | dopo |

@@ -159,6 +159,8 @@ class GpuStitchRenderer private constructor(
             val out = IntArray(1)
             GLES30.glGetQueryObjectuiv(timerIds[0], GLES30.GL_QUERY_RESULT, out, 0)
             busyNanos += out[0].toLong() and 0xFFFFFFFFL
+            // Anche fuori, dove lo legge il misuratore mentre la cucitura va avanti.
+            GpuLoad.report(busyNanos)
         }
     }
 

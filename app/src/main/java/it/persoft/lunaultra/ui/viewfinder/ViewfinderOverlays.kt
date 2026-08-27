@@ -37,6 +37,8 @@ import it.persoft.lunaultra.stitch.StitchUiState
 import it.persoft.lunaultra.stitch.StitchVitals
 import it.persoft.lunaultra.ui.components.GlassPanel
 import it.persoft.lunaultra.ui.components.HudIconButton
+import it.persoft.lunaultra.ui.components.LoadMeter
+import it.persoft.lunaultra.ui.components.eighths
 import it.persoft.lunaultra.ui.italianLabel
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
@@ -120,12 +122,35 @@ fun StitchCard(
                     progress = { state.fraction },
                     modifier = Modifier.fillMaxWidth().height(6.dp),
                 )
-                // Il polso della macchina: core occupati, memoria, tempo. Un'unione dura
-                // minuti, e da fuori non si distingue una che macina da una impantanata.
+                // Il polso della macchina: core occupati, scheda grafica, memoria, tempo.
+                // Un'unione dura minuti, e da fuori non si distingue una che macina da una
+                // impantanata.
+                //
+                // I due misuratori a tacche stanno al posto dei numeri che c'erano prima per
+                // un motivo semplice: un numero che cambia dieci volte al secondo non si
+                // legge, lampeggia. Le tacche si guardano di sfuggita, e la punta che scende
+                // piano dice quello che l'istante non dice — se quella fase ha mai lavorato
+                // in parallelo o se è sempre stata un core solo.
                 vitals?.let { live ->
+                    LoadMeter(
+                        label = "CPU",
+                        filled = if (live.totalCores > 0) live.busyCores / live.totalCores else null,
+                        reading = "%.1f/%d".format(live.busyCores, live.totalCores),
+                        lit = Luna.Ok,
+                    )
+                    // La scheda non si misura in processori: quanti ne abbia, e quanti ne stia
+                    // usando, non lo dice nessuna versione di OpenGL ES. Quello che si sa è la
+                    // frazione di tempo in cui ha disegnato, e le tacche mostrano quella. Se il
+                    // driver non ha i cronometri restano spente con un trattino di fianco:
+                    // «non lo so» e «ferma» sono due cose diverse.
+                    LoadMeter(
+                        label = "GPU",
+                        filled = live.gpuBusyShare,
+                        reading = eighths(live.gpuBusyShare),
+                        lit = Luna.Multi,
+                    )
                     Text(
-                        text = "%.1f/%d core · heap %d/%d MB · nativa %d MB".format(
-                            live.busyCores, live.totalCores,
+                        text = "heap %d/%d MB · nativa %d MB".format(
                             live.heapUsedMb, live.heapMaxMb, live.nativeMb,
                         ),
                         style = MaterialTheme.typography.labelSmall,

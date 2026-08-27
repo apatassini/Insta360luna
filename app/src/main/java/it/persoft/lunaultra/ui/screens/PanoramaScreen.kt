@@ -45,6 +45,8 @@ import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
+import it.persoft.lunaultra.ui.components.LoadMeter
+import it.persoft.lunaultra.ui.components.eighths
 import it.persoft.lunaultra.ui.components.MetricRow
 import it.persoft.lunaultra.ui.components.StatusChip
 import it.persoft.lunaultra.ui.components.MetricTile
@@ -73,6 +75,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
     val connection by viewModel.connectionState.collectAsState()
     val run by viewModel.runState.collectAsState()
     val stitch by viewModel.stitchState.collectAsState()
+    val vitals by viewModel.stitchVitals.collectAsState()
     val connected = connection == ConnectionState.CONNECTED
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -373,6 +376,22 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                         progress = { state.fraction },
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    // Gli stessi due misuratori del pannello nel mirino: chi sta qui a guardare
+                    // si fa la stessa domanda, e merita la stessa risposta.
+                    vitals?.let { live ->
+                        LoadMeter(
+                            label = "CPU",
+                            filled = if (live.totalCores > 0) live.busyCores / live.totalCores else null,
+                            reading = "%.1f/%d".format(live.busyCores, live.totalCores),
+                            lit = Luna.Ok,
+                        )
+                        LoadMeter(
+                            label = "GPU",
+                            filled = live.gpuBusyShare,
+                            reading = eighths(live.gpuBusyShare),
+                            lit = Luna.Multi,
+                        )
+                    }
                     Hint("Ci vuole qualche minuto: lo scaricamento passa dal Wi-Fi della camera.")
                 }
 

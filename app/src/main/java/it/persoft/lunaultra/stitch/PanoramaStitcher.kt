@@ -3671,6 +3671,10 @@ class PanoramaStitcher(
      * contesto rifiutato, shader che non compila. Il log dice cosa è successo.
      */
     private suspend fun openGpu(): GpuSession? {
+        // Il contatore che legge il misuratore, azzerato **prima** di decidere se la scheda si
+        // usa: se non la si usa, il misuratore deve dire «non lo so», non il numero rimasto
+        // in canna dalla cucitura di prima.
+        GpuLoad.reset()
         if (!tuning.gpuRecognise && !tuning.gpuPaint) return null
         val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "cucitura-gpu")

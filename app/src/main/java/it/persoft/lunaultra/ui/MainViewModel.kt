@@ -3909,7 +3909,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         /** Ogni quanto si guardano CPU e memoria durante l'unione. */
-        const val VITALS_INTERVAL_MS = 700L
+        /**
+         * Ogni quanto si campiona il polso della macchina.
+         *
+         * Trecento millisecondi. Settecento andavano bene per tre numeri scritti: un
+         * misuratore a tacche invece deve **muoversi**, o smette di dire qualcosa e diventa un
+         * numero disegnato male. Sotto i duecento la lettura di `/proc/self/stat` comincia a
+         * pesare su quello che sta misurando, che è il modo più stupido di sbagliare una misura.
+         */
+        const val VITALS_INTERVAL_MS = 300L
 
         const val STATUS_POLL_MS = 3_000L
 

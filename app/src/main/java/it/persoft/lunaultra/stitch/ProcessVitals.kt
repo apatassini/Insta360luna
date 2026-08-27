@@ -23,6 +23,17 @@ data class StitchVitals(
     val nativeMb: Int,
     /** Da quanto sta lavorando questa unione. */
     val elapsedMs: Long,
+    /**
+     * La frazione di tempo in cui la scheda grafica ha disegnato, da zero a uno.
+     *
+     * `null` quando non è misurabile: o la scheda non è in uso, o il driver non offre i
+     * cronometri. Sono due cose diverse da «ferma», e mostrare uno zero al posto di un «non
+     * lo so» è il modo più veloce per farsi credere.
+     *
+     * Non sono processori. Quanti ne abbia una scheda, e quanti ne stia usando, non lo dice
+     * nessuna versione di OpenGL ES: si sa solo quanto tempo ha passato a disegnare.
+     */
+    val gpuBusyShare: Float?,
 ) {
     val heapFraction: Float get() = if (heapMaxMb > 0) heapUsedMb.toFloat() / heapMaxMb else 0f
 }
@@ -46,6 +57,8 @@ class ProcessVitals(private val startedAtMs: Long = System.currentTimeMillis()) 
 
     private var previousTicks = -1L
     private var previousAtMs = 0L
+    private var previousGpuNanos = -1L
+    private var previousGpuAtMs = 0L
 
     fun sample(): StitchVitals {
         val now = System.currentTimeMillis()
@@ -62,6 +75,22 @@ class ProcessVitals(private val startedAtMs: Long = System.currentTimeMillis()) 
             previousAtMs = now
         }
 
+        // La scheda: stessa aritmetica della CPU, su un contatore che cresce da solo. Quanto
+        // ha disegnato fra due campioni, diviso il tempo passato fra i due.
+        var gpuShare: Float? = null
+        val gpuNanos = GpuLoad.busy()
+        if (gpuNanos != null) {
+            if (previousGpuNanos >= 0) {
+                val elapsedSeconds = (now - previousGpuAtMs) / 1000f
+                if (elapsedSeconds > 0.05f) {
+                    gpuShare = (((gpuNanos - previousGpuNanos) / 1_000_000_000f) / elapsedSeconds)
+                        .coerceIn(0f, 1f)
+                }
+            }
+            previousGpuNanos = gpuNanos
+            previousGpuAtMs = now
+        }
+
         val runtime = Runtime.getRuntime()
         return StitchVitals(
             busyCores = busy.coerceIn(0f, cores.toFloat()),
@@ -70,6 +99,7 @@ class ProcessVitals(private val startedAtMs: Long = System.currentTimeMillis()) 
             heapMaxMb = (runtime.maxMemory() / MEGABYTE).toInt(),
             nativeMb = (Debug.getNativeHeapAllocatedSize() / MEGABYTE).toInt(),
             elapsedMs = now - startedAtMs,
+            gpuBusyShare = gpuShare,
         )
     }
 

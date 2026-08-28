@@ -543,6 +543,53 @@ legge solo alla fine, quando si scrive il verdetto. Ora lo specchia in un contat
 dei due aspetta l'altro, e un campione preso un istante prima o dopo sposta una tacca e niente
 di più.
 
+### 5.16 Il fuoco misura il fuoco: la controprova, e cosa resta
+
+Log `20260827-202047`, stesse nove foto, cursore a ×1, con tutte le correzioni di §5.11–§5.14.
+
+Il numero che mancava è quello nuovo, `% della sovrapposizione cambia padrone`. Prima era
+invisibile; ora dice che lo spostamento arriva davvero ai pixel:
+
+| foto | vantaggio | contrasti | cambia padrone |
+|---|---|---|---|
+| 4 | tela +27% | 0,009 / 0,012 | 0% |
+| 6 | pari (+1%) | 0,015 / 0,014 | 5% |
+| 2 | tela +36% | 0,026 / 0,040 | 51% |
+| 8 | pari (−11%) | 0,003 / 0,003 | 21% |
+| 3 | tela +45% | 0,026 / 0,047 | 26% |
+| 9 | **Foto 9 +38%** | 0,013 / 0,008 | **26%** |
+| 7 | Foto 7 +52% | 0,041 / 0,020 | 40% |
+| 1 | tela +45% | 0,028 / 0,051 | 28% |
+
+La Foto 9 — quella da cui è partita tutta la storia — è misurata più nitida della tela del 38%
+e si prende il 26% della sovrapposizione. Prima diceva +18% e non spostava un pixel.
+
+**La controprova sull'esposizione.** La correlazione fra il vantaggio di fuoco e il guadagno di
+esposizione è ancora 0,85, che a prima vista dice che non ho risolto niente. Ma dentro ogni fila
+di scatti sparisce:
+
+| fila | scatti |
+|---|---|
+| basso | Foto 1 g=0,81 → −45 · Foto 2 g=0,71 → −36 · Foto 3 g=0,62 → −45 |
+| mezzo | Foto 4 g=1,03 → −27 · Foto 6 g=1,19 → +1 |
+| alto | Foto 7 g=1,33 → +52 · Foto 8 g=1,22 → −11 · Foto 9 g=1,22 → +38 |
+
+Nella fila bassa il guadagno scende da 0,81 a 0,62 e il fuoco non segue; nella fila alta due
+scatti con lo **stesso** guadagno (1,22) danno −11 e +38. Il guadagno non comanda più niente:
+quello che resta è la fila, cioè cielo contro terra, che sono davvero due nitidezze diverse. La
+correlazione d'insieme è la fila travestita da guadagno.
+
+**Due difetti trovati proprio guardando questa tabella.**
+
+1. Le due contendenti si misuravano in **due scale di luce diverse**: la tela già corretta di
+   esposizione, il fotogramma nuovo grezzo. Il rapporto salto-su-luce sarebbe invariante per un
+   fattore, ma il pavimento di sedici livelli al denominatore no — non si moltiplica insieme
+   alla luce, e sballa di più dove la scena è scura. Ora sono corretti tutti e due.
+2. Foto 8: contrasto 0,003 contro 0,003 — cielo liscio, cioè rumore — e il 21% della
+   sovrapposizione che cambia padrone lo stesso. Il termine locale divide per la differenza
+   media e su quel rumore satura. Sotto cinque millesimi di contrasto medio il fuoco ora tace e
+   comanda il peso: dove non c'è dettaglio, «quale delle due è più a fuoco» non ha risposta.
+
 ## 6. Memoria
 
 | | prima | dopo |

@@ -4495,13 +4495,11 @@ class PanoramaStitcher(
                 baseColor[g] = old
                 oldWeightGrid[g] = oldWeight
                 var newWeight = 0f
-                var newRawLuma = -1f
                 if (present) {
                     projector.project(lonSin[sx0 + bx], lonCos[sx0 + bx])
                     if (projector.inside) {
                         newWeight = featherWeight(projector.x, projector.y, frame.width, frame.height)
                         val color = sampleColor(frame, source, projector.x, projector.y)
-                        newRawLuma = luma(color)
                         val factor = correction.factorAt(projector.x, projector.y)
                         val r = (factor * ((color shr 16) and 0xFF)).roundToInt().coerceIn(0, 255)
                         val gch = (factor * ((color shr 8) and 0xFF)).roundToInt().coerceIn(0, 255)
@@ -4520,7 +4518,7 @@ class PanoramaStitcher(
                 } else {
                     newColor[g] = old
                 }
-                if (focusNewRaw != null && focusOldRaw != null && bothPresent[g] && newRawLuma >= 0f) {
+                if (focusNewRaw != null && focusOldRaw != null && bothPresent[g]) {
                     // Chi è a fuoco si vede **fra due pixel vicini di tela**, non fra due
                     // celle della griglia ridotta. La sfocatura di messa a fuoco vive su due o
                     // tre pixel; confrontare campioni distanti s — fino a otto — la cancella
@@ -4535,17 +4533,28 @@ class PanoramaStitcher(
                     // ordinava le foto per luminosità, non per fuoco, e i numeri del log lo
                     // dicevano apertamente (guadagno 0,62 → «la tela più nitida del 30%»,
                     // guadagno 1,33 → «Foto 7 più nitida del 29%»). Il rapporto non cambia
-                    // quando si moltiplica tutto per un fattore, e per lo stesso motivo qui si
-                    // usa la luce **prima** della correzione di esposizione.
+                    // quando si moltiplica tutto per un fattore.
+                    //
+                    // E le due si misurano **nella stessa scala di luce**. La tela arriva già
+                    // corretta di esposizione, il fotogramma nuovo no: prendere la sua luce
+                    // grezza voleva dire dividere per un denominatore di un'altra scala,
+                    // perché il pavimento di sedici livelli **non** si moltiplica insieme alla
+                    // luce — è lui a rompere l'invarianza che il rapporto avrebbe da solo, e
+                    // la rompe di più dove la scena è scura. Corretti tutti e due, il
+                    // pavimento vuol dire la stessa cosa da una parte e dall'altra: che poi è
+                    // il mestiere della correzione di esposizione, rendere confrontabili due
+                    // scatti dello stesso posto.
                     val bxNext = min(bx + 1, sbw - 1)
                     val colNext = columns[sx0 + bxNext]
                     val hereOld = luma(old)
                     val thereOld = luma(rowPixels[colNext] and 0xFFFFFF)
                     focusOldRaw[g] = abs(hereOld - thereOld) / (hereOld + FOCUS_LIGHT_FLOOR)
+                    val hereNew = luma(newColor[g])
                     projector.project(lonSin[sx0 + bxNext], lonCos[sx0 + bxNext])
                     if (projector.inside) {
-                        val thereNew = luma(sampleColor(frame, source, projector.x, projector.y))
-                        focusNewRaw[g] = abs(newRawLuma - thereNew) / (newRawLuma + FOCUS_LIGHT_FLOOR)
+                        val near = sampleColor(frame, source, projector.x, projector.y)
+                        val thereNew = correction.factorAt(projector.x, projector.y) * luma(near)
+                        focusNewRaw[g] = abs(hereNew - thereNew) / (hereNew + FOCUS_LIGHT_FLOOR)
                     } else {
                         focusNewRaw[g] = focusOldRaw[g]
                     }
@@ -4613,6 +4622,19 @@ class PanoramaStitcher(
                 val louder = max(meanNewFocus, meanOldFocus)
                 // Da meno uno a uno: quanto la nuova è più nitida della tela, in proporzione.
                 focusAdvantage = if (louder > 0f) (meanNewFocus - meanOldFocus) / louder else 0f
+                // Dove non c'è dettaglio, «quale delle due è più a fuoco» non ha risposta.
+                //
+                // Sopra un cielo liscio le due contendenti misurano tre millesimi di contrasto
+                // tutte e due — cioè rumore — e il termine locale, che divide per la
+                // differenza media, satura su quel rumore e sposta il confine per niente. Nel
+                // log delle nove foto succedeva alla Foto 8: «nitide uguale (-11%)» e il
+                // ventuno per cento della sovrapposizione che cambiava padrone lo stesso.
+                // Sotto la soglia il fuoco tace e comanda il peso, che è la regola giusta
+                // quando non c'è niente da difendere.
+                if (louder < FOCUS_MIN_CONTRAST) {
+                    focusScale = 0f
+                    focusAdvantage = 0f
+                }
             }
         }
 
@@ -5114,6 +5136,10 @@ class PanoramaStitcher(
         }
         val fuoco = if (!tuning.focusAwareSeam) {
             ""
+        } else if (max(meanNewFocus, meanOldFocus) < FOCUS_MIN_CONTRAST) {
+            " · fuoco: niente da misurare (contrasto %.3f e %.3f, serve %.3f)".format(
+                meanNewFocus, meanOldFocus, FOCUS_MIN_CONTRAST,
+            )
         } else if (abs(focusAdvantage) < FOCUS_CLEAR_ADVANTAGE) {
             " · fuoco: nitide uguale (%+.0f%%, serve %.0f%%; contrasto %.3f contro %.3f)%s".format(
                 focusAdvantage * 100, FOCUS_CLEAR_ADVANTAGE * 100,
@@ -6728,6 +6754,15 @@ class PanoramaStitcher(
          * telefono a ISO alti — sotto quella soglia non c'è dettaglio da difendere.
          */
         const val FOCUS_LIGHT_FLOOR = 16f
+
+        /**
+         * Sotto questo contrasto medio non c'è dettaglio da difendere, e il fuoco tace.
+         *
+         * Cinque millesimi: mezzo punto percentuale di salto di luce fra due pixel vicini, che
+         * su un cielo è il rumore del sensore e nient'altro. Misurato sulle nove foto della
+         * spiaggia: il cielo dà tre millesimi, il mare e la sabbia da nove a cinquantuno.
+         */
+        const val FOCUS_MIN_CONTRAST = 0.005f
 
         /**
          * Quante volte si stende lo spostamento del confine prima di usarlo.

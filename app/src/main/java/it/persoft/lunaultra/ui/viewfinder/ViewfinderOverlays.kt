@@ -38,7 +38,7 @@ import it.persoft.lunaultra.stitch.StitchVitals
 import it.persoft.lunaultra.ui.components.GlassPanel
 import it.persoft.lunaultra.ui.components.HudIconButton
 import it.persoft.lunaultra.ui.components.LoadMeter
-import it.persoft.lunaultra.ui.components.eighths
+import it.persoft.lunaultra.ui.components.percent
 import it.persoft.lunaultra.ui.italianLabel
 import it.persoft.lunaultra.ui.theme.Luna
 import it.persoft.lunaultra.ui.theme.LunaIcons
@@ -143,10 +143,16 @@ fun StitchCard(
                     // frazione di tempo in cui ha disegnato, e le tacche mostrano quella. Se il
                     // driver non ha i cronometri restano spente con un trattino di fianco:
                     // «non lo so» e «ferma» sono due cose diverse.
+                    //
+                    // Il numero è in **percentuale** e non in ottavi. Gli ottavi sono la lettura
+                    // giusta per i core, che sono otto davvero; per la scheda no: qui lavora
+                    // quattro decimi di secondo su trenta, e in ottavi si scrive `0/8` — lo
+                    // stesso `0/8` di una scheda spenta. `1%` è poco, ma è un numero, e cambia
+                    // quando cambia il lavoro.
                     LoadMeter(
                         label = "GPU",
                         filled = live.gpuBusyShare,
-                        reading = eighths(live.gpuBusyShare),
+                        reading = percent(live.gpuBusyShare),
                         lit = Luna.Multi,
                     )
                     Text(

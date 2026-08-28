@@ -46,7 +46,7 @@ import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
 import it.persoft.lunaultra.ui.components.LabeledValue
 import it.persoft.lunaultra.ui.components.LoadMeter
-import it.persoft.lunaultra.ui.components.eighths
+import it.persoft.lunaultra.ui.components.percent
 import it.persoft.lunaultra.ui.components.MetricRow
 import it.persoft.lunaultra.ui.components.StatusChip
 import it.persoft.lunaultra.ui.components.MetricTile
@@ -388,7 +388,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                         LoadMeter(
                             label = "GPU",
                             filled = live.gpuBusyShare,
-                            reading = eighths(live.gpuBusyShare),
+                            reading = percent(live.gpuBusyShare),
                             lit = Luna.Multi,
                         )
                     }

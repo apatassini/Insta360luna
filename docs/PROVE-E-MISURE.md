@@ -525,6 +525,18 @@ restano spente con un trattino di fianco: «non lo so» e «ferma» sono due cos
 mostrare uno zero al posto di un non-lo-so è il modo più veloce per farsi credere una volta e
 mai più.
 
+E il numero della scheda è in **percentuale**, non in ottavi. Gli ottavi sono la lettura giusta
+per i core, che sono otto davvero. Per la scheda no: qui lavora quattro decimi di secondo su
+trenta, e in ottavi si scrive `0/8` — arrotondato bene, e identico allo `0/8` di una scheda
+spenta. Tre stati diversi con lo stesso disegno. Ora una tacca si accende appena c'è qualsiasi
+lavoro, e il numero dice `1%`: poco, ma è un numero, e cambia quando cambia il lavoro.
+
+Che poi l'uno per cento sia la verità è il risultato, non il difetto del misuratore. Ogni fascia
+è: disegna (microsecondi), rileggi con `glReadPixels` (blocca), travasa i pixel in CPU
+(millisecondi), avanti la prossima. La scheda passa la vita ad aspettare noi. Finché la
+rilettura resta sincrona, quella barra non può salire — ed è questo che il misuratore serve a
+far vedere.
+
 Il cronometro della scheda viveva dentro il renderer, che nasce e muore con la cucitura e si
 legge solo alla fine, quando si scrive il verdetto. Ora lo specchia in un contatore volatile
 (`GpuLoad`) che la sonda legge mentre la cucitura va avanti: un filo scrive, uno legge, nessuno

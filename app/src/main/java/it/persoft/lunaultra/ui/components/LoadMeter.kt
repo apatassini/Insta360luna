@@ -68,9 +68,17 @@ fun LoadMeter(
     }
 
     val level = (filled ?: 0f).coerceIn(0f, 1f)
-    // Per eccesso: mezza tacca accesa vuol dire che qualcosa sta succedendo, e spegnerla
-    // direbbe il contrario.
-    val on = if (filled == null) 0 else (level * SEGMENTS).roundToInt().coerceIn(0, SEGMENTS)
+    // Una tacca accesa appena c'è qualcosa, anche pochissimo.
+    //
+    // Senza, tre stati diversi si vedevano identici: «non misurabile», «ferma davvero» e
+    // «lavora l'uno per cento». Il terzo è il caso della scheda grafica in questa
+    // applicazione, e vedere la barra spenta faceva pensare a un misuratore rotto invece che a
+    // una scheda poco usata — che è esattamente l'informazione che il misuratore doveva dare.
+    val on = when {
+        filled == null -> 0
+        level > 0f -> max(1, (level * SEGMENTS).roundToInt()).coerceAtMost(SEGMENTS)
+        else -> 0
+    }
     val peakAt = if (filled == null) -1 else ((peak * SEGMENTS).roundToInt() - 1).coerceIn(-1, SEGMENTS - 1)
 
     Row(
@@ -82,7 +90,7 @@ fun LoadMeter(
             text = label,
             style = MaterialTheme.typography.labelSmall,
             color = Luna.OnSurfaceDim,
-            modifier = Modifier.width(30.dp),
+            modifier = Modifier.width(32.dp),
         )
         Row(
             modifier = Modifier.weight(1f),
@@ -107,13 +115,21 @@ fun LoadMeter(
             style = MaterialTheme.typography.labelSmall,
             color = if (filled == null) Luna.OnSurfaceDim else Color.White,
             textAlign = TextAlign.End,
-            modifier = Modifier.width(30.dp),
+            modifier = Modifier.width(36.dp),
         )
     }
 }
 
-/** Il numero di fianco al misuratore, nella forma che si legge a colpo d'occhio: `3/8`. */
-fun eighths(value: Float?, outOf: Int = SEGMENTS): String {
-    if (value == null) return "–/$outOf"
-    return "${(value.coerceIn(0f, 1f) * outOf).roundToInt()}/$outOf"
+/**
+ * La stessa cosa in percentuale, per chi vive sotto un ottavo.
+ *
+ * Gli ottavi sono la lettura giusta per i core: sono otto, e «due su otto» è una frase vera. Per
+ * la scheda grafica no. In questa applicazione la scheda lavora per lo zero virgola quattro di
+ * secondi su trenta, e in ottavi quello si scrive `0/8` — che è arrotondato bene e non dice
+ * niente, perché è lo stesso `0/8` di una scheda spenta. In percentuale si legge `1%`, che è
+ * poco ma è un numero, e cambia quando cambia il lavoro.
+ */
+fun percent(value: Float?): String {
+    if (value == null) return "–"
+    return "${(value.coerceIn(0f, 1f) * 100).roundToInt()}%"
 }

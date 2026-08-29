@@ -1237,6 +1237,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 panLimits = profile.panLimits,
                 tiltLimits = profile.tiltLimits,
                 frameCropFactor = profile.frameCropFactor,
+                // Lo scatto sferico si spinge fino ai poli: la fila piu' bassa sul fine corsa,
+                // quella di cima sulla verticale esatta. Non e' un di piu': senza, il terreno
+                // sotto i piedi non veniva fotografato ma inventato.
+                fillPoles = seq.panoramaSpherical,
             ).getOrThrow()
         }
     }

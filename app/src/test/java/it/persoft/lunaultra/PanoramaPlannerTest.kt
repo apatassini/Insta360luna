@@ -222,6 +222,45 @@ class PanoramaPlannerTest {
         assertTrue("i centri restano dentro la corsa", plan.waypoints.all { it.pan in -57f..235f })
     }
 
+    /**
+     * Lo scatto sferico usa tutta la corsa del tilt, e chiude col naso all'insu'.
+     *
+     * Per coprire 180° verticali bastano 114° di centri, e il pianificatore si fermava li':
+     * file da -25,5° a +88,5°, con la piu' bassa che arrivava a -56° e trentatre gradi di
+     * terreno riempiti estendendo l'ultimo anello — cioe' inventati. Ma il gimbal a -57° ci
+     * arriva: quei gradi c'erano e non venivano usati.
+     */
+    @Test
+    fun `lo sferico scende al fine corsa e sale alla verticale esatta`() {
+        val tiltLimits = limits(-57f, 120f, 31f)
+        val plan = PanoramaPlanner.plan(
+            centerPan = 89f,
+            centerTilt = 31.5f,
+            horizontalCoverage = 360f,
+            verticalCoverage = 180f,
+            overlapPercent = 20,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = limits(-57f, 235f, 48f),
+            tiltLimits = tiltLimits,
+            frameCropFactor = 0.9214f,
+            fillPoles = true,
+        ).getOrThrow()
+
+        val tilts = plan.waypoints.map { it.tilt }.distinct().sorted()
+        assertEquals("la fila piu' bassa sta sul fine corsa", tiltLimits.minimumDeg, tilts.first(), 0.01f)
+        assertEquals("quella di cima guarda la verticale pura", 90f, tilts.last(), 0.01f)
+        assertEquals("una sola foto allo zenit", 1, plan.waypoints.count { it.tilt == tilts.last() })
+
+        // Il buco sotto: quanto resta davvero non fotografato.
+        val fov = LunaOptics.fieldOfView(1, PhotoFrameAspect.FOUR_THREE, 0.9214f)
+        val piuBasso = tilts.first() - fov.verticalDegrees / 2f
+        assertTrue(
+            "Sotto restano ancora %.1f° da inventare".format(-90f - piuBasso),
+            piuBasso < -85f,
+        )
+    }
+
     private fun limits(min: Float, max: Float, seconds: Float) = GimbalAxisLimits(
         minimumDeg = min,
         maximumDeg = max,

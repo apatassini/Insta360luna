@@ -143,6 +143,22 @@ object PanoramaPlanner {
         tiltLimits: GimbalAxisLimits,
         /** Il ritaglio del fotogramma misurato dall'unione: 1 finché nessuna l'ha misurato. */
         frameCropFactor: Float = 1f,
+        /**
+         * Spingersi fino ai poli invece di fermarsi alla copertura richiesta.
+         *
+         * Serve allo scatto sferico, e cambia le cose. Per coprire 180° verticali bastano 114°
+         * di centri, e il pianificatore si fermava lì: file da -25,5° a +88,5°, con il
+         * fotogramma più basso che arrivava a -56° e tutto il resto — trentatré gradi di terreno
+         * sotto i piedi — riempito estendendo l'ultimo anello, cioè inventato.
+         *
+         * Ma il gimbal arriva a -57°, non a -25,5°: quei gradi c'erano e non venivano usati.
+         * Con tutta la corsa la fila più bassa scende a -57° e fotografa fin quasi al nadir, e
+         * quella di cima cade **esattamente sulla verticale** invece che tre gradi prima.
+         *
+         * In alto ci si ferma comunque a 90°: oltre il polo non c'è niente di nuovo da
+         * fotografare, si rifà l'altro lato a testa in giù.
+         */
+        fillPoles: Boolean = false,
     ): Result<PanoramaPlan> {
         require(panLimits.isValid && tiltLimits.isValid) { "Esegui prima la calibrazione completa dei fine corsa" }
         val fov = LunaOptics.fieldOfView(zoomScale, aspect, frameCropFactor)
@@ -172,13 +188,17 @@ object PanoramaPlanner {
             minimumSpan = seamSpan,
             maxCoverage = FULL_TURN_DEGREES,
         )
-        val tilt = fitAxis(
-            desiredCenter = centerTilt,
-            requestedCoverage = requestedVertical,
-            fovDegrees = fov.verticalDegrees,
-            limits = tiltLimits,
-            maxCoverage = HALF_TURN_DEGREES,
-        )
+        val tilt = if (fillPoles) {
+            poleToPole(tiltLimits, fov.verticalDegrees)
+        } else {
+            fitAxis(
+                desiredCenter = centerTilt,
+                requestedCoverage = requestedVertical,
+                fovDegrees = fov.verticalDegrees,
+                limits = tiltLimits,
+                maxCoverage = HALF_TURN_DEGREES,
+            )
+        }
 
         val horizontalCenterSpan = pan.centerSpan
         val verticalCenterSpan = tilt.centerSpan
@@ -203,7 +223,13 @@ object PanoramaPlanner {
         }.takeIf { it.isNotEmpty() }?.joinToString("; ")
 
         val columns = shotsOverSpan(horizontalCenterSpan, fov.horizontalDegrees, overlap, pan.coverage)
-        val rows = if (tilt.coverage <= 0f) 1 else shotCount(tilt.coverage, fov.verticalDegrees, overlap)
+        val rows = when {
+            tilt.coverage <= 0f -> 1
+            // Fino ai poli le file tappezzano l'arco dei centri, che è tutta la corsa: il conto
+            // sulla copertura darebbe una fila in meno e lascerebbe scoperta una fascia.
+            fillPoles -> rowsUpToTheZenith(verticalCenterSpan, fov, overlap)
+            else -> shotCount(tilt.coverage, fov.verticalDegrees, overlap)
+        }
         val tilts = positions(startTilt, endTilt, rows)
         val columnsPerRow = worstLatitudes(tilts, fov.verticalDegrees).map { latitude ->
             columnsForRow(latitude, horizontalCenterSpan, fov.horizontalDegrees, overlap, pan.coverage)
@@ -246,6 +272,61 @@ object PanoramaPlanner {
                 warning = warning,
                 columnsPerRow = columnsPerRow,
             ),
+        )
+    }
+
+    /**
+     * Quante file servono per chiudere il cielo con **un solo** scatto allo zenit.
+     *
+     * Lo scatto verticale è uno e deve restare uno: a novanta gradi il fotogramma guarda il
+     * polo, e affiancargliene altri due significa fotografare tre volte lo stesso cielo. Ma uno
+     * basta solo se la fila sotto arriva abbastanza in alto — precisamente fino alla latitudine
+     * da cui un fotogramma abbraccia già tutto il giro, cioè dove `campo / cos(lat)` raggiunge i
+     * 360°. Sopra i 77,6° con l'obiettivo a 1× succede; sotto no, e resta una fascia scoperta.
+     *
+     * Con quattro file la penultima si ferma a 72° e mancano cinque gradi: da qui la fila in
+     * più, che è esattamente lo scatto che mancava guardando verso l'alto.
+     */
+    private fun rowsUpToTheZenith(centerSpan: Float, fov: LensFieldOfView, overlap: Float): Int {
+        var rows = shotsOverSpan(centerSpan, fov.verticalDegrees, overlap, centerSpan + fov.verticalDegrees)
+        if (centerSpan <= 0f) return rows
+        val fullRing = degreesOfAcos((fov.horizontalDegrees / FULL_TURN_DEGREES).coerceIn(0f, 1f))
+        // Il bordo alto della penultima fila, che è quella che deve consegnare il cielo allo
+        // scatto verticale. Le file sono equidistanti sull'arco, quindi basta contarle.
+        while (rows < MAX_ROWS) {
+            val penultimateTop = if (rows < 2) {
+                -HALF_TURN_DEGREES
+            } else {
+                ZENITH_DEGREES - centerSpan / (rows - 1) + fov.verticalDegrees / 2f
+            }
+            if (penultimateTop >= fullRing) break
+            rows++
+        }
+        return rows
+    }
+
+    private fun degreesOfAcos(value: Float): Float =
+        (kotlin.math.acos(value.toDouble()) * 180.0 / PI).toFloat()
+
+    /** Oltre questo la griglia non è più una panoramica, è un guasto del conto. */
+    private const val MAX_ROWS = 24
+
+    /**
+     * Il tilt che va dal fine corsa basso alla verticale esatta, usando tutta la corsa.
+     *
+     * L'ultima fila cade su 90° per costruzione, non per caso: è lo scatto che chiude il cielo,
+     * ed è quello che fa anche l'app della camera. La prima cade sul fine corsa basso, che è
+     * quanto di più vicino al nadir questo gimbal sappia guardare.
+     */
+    private fun poleToPole(limits: GimbalAxisLimits, fovDegrees: Float): AxisFit {
+        val bottom = limits.minimumDeg
+        val top = minOf(limits.maximumDeg, ZENITH_DEGREES)
+        val span = (top - bottom).coerceAtLeast(0f)
+        return AxisFit(
+            center = (top + bottom) / 2f,
+            centerSpan = span,
+            coverage = (span + fovDegrees).coerceAtMost(HALF_TURN_DEGREES),
+            reduced = false,
         )
     }
 
@@ -429,6 +510,9 @@ object PanoramaPlanner {
 
     private const val FULL_TURN_DEGREES = 360f
     private const val HALF_TURN_DEGREES = 180f
+
+    /** La verticale pura: oltre di lì si rifotografa l'altro lato a testa in giù. */
+    private const val ZENITH_DEGREES = 90f
 
     private fun positions(start: Float, end: Float, count: Int): List<Float> {
         if (count <= 1) return listOf((start + end) / 2f)

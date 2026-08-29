@@ -464,6 +464,8 @@ class GimbalCalibrator(
     ): PulseCurve {
         val panAxis = axis == GimbalCalibrationSample.AXIS_PAN
         val measured = mutableListOf<Pair<Int, Float>>()
+        /** Le intensita' a cui il gimbal non si e' mosso: la zona morta, misurata. */
+        val inerti = mutableListOf<Int>()
         log.info(
             "CALIBRAZIONE · CURVA GIROSCOPICA ${axisLabel(axis).uppercase()}",
             "Ogni intensità viene registrata nel proxy LRV: riposo, andata, pausa e ritorno. " +
@@ -493,14 +495,26 @@ class GimbalCalibrator(
                 verificationLabel = "GIROSCOPIO 1 kHz · LRV",
             )
 
-            val result = gyroMeter.misura(panAxis, intensity, durationMs).getOrElse {
-                throw IllegalStateException(
-                    "Misura giroscopica $intensity% ${axisLabel(axis)} non riuscita: ${it.message}",
-                    it,
+            // Un'intensita' che non muove il gimbal non e' un guasto della misura: e' la zona
+            // morta del motore, ed e' essa stessa un dato. Buttare via nove minuti di misure
+            // buone perche' l'1% non parte sarebbe il modo piu' rapido di non avere mai una
+            // calibrazione: il punto si registra come non utilizzabile e si prosegue.
+            val esito = gyroMeter.misura(panAxis, intensity, durationMs)
+            val result = esito.getOrNull()
+            if (result == null || result.gradiSecondo <= 0f) {
+                val motivo = esito.exceptionOrNull()?.message ?: "nessuna rotazione misurabile"
+                inerti += intensity
+                addFinding(
+                    "$intensity% ${axisLabel(axis)}",
+                    "nessun movimento: $motivo",
+                    FindingKind.WARN,
                 )
-            }
-            if (result.gradiSecondo <= 0f) {
-                throw IllegalStateException("Il giroscopio non ha rilevato il movimento al $intensity%")
+                log.warn(
+                    "CALIBRAZIONE · $intensity% ${axisLabel(axis).uppercase()} NON MUOVE",
+                    "$motivo\nSotto una certa intensita' il gimbal non parte proprio. Il punto " +
+                        "viene saltato e la curva prosegue: la zona morta finisce nel referto.",
+                )
+                return@forEachIndexed
             }
             measured += intensity to result.gradiSecondo
             _state.value = _state.value.copy(
@@ -521,6 +535,22 @@ class GimbalCalibrator(
                     result.scartoChiusuraGradi,
                 ),
                 if (result.scartoChiusuraGradi <= GYRO_GOOD_CLOSURE_DEG) FindingKind.GOOD else FindingKind.WARN,
+            )
+        }
+        if (inerti.isNotEmpty()) {
+            log.info(
+                "CALIBRAZIONE · ZONA MORTA ${axisLabel(axis).uppercase()}",
+                "Il gimbal non si muove a ${inerti.joinToString("%, ")}%. " +
+                    "Sono ${inerti.size} punti su ${INTENSITY_PERCENTAGES.size}: la curva usa " +
+                    "gli altri, e sotto il ${(inerti.maxOrNull() ?: 0) + 1}% non c'e' niente da " +
+                    "chiedere a questo motore.",
+            )
+        }
+        if (measured.size < MIN_GYRO_POINTS) {
+            throw IllegalStateException(
+                "Il giroscopio ha misurato solo ${measured.size} intensita' su " +
+                    "${INTENSITY_PERCENTAGES.size} sull'asse ${axisLabel(axis)}: troppo poche per " +
+                    "una curva. Non si e' mosso a ${inerti.joinToString("%, ")}%.",
             )
         }
         return PulseCurve(points = measured, zero = ZeroPulseCheck.NONE)
@@ -1977,6 +2007,16 @@ class GimbalCalibrator(
         const val MAX_FINDINGS = 24
 
         const val SLOW_INTENSITY_THRESHOLD = 10
+
+        /**
+         * Quante intensita' devono muovere davvero perche' la curva significhi qualcosa.
+         *
+         * Sotto questo numero non e' piu' una curva ma due punti e una speranza. Il profilo ha
+         * poi le sue regole di validita' — servono anche un punto sotto il 10% e uno al 100% —
+         * ma questa soglia serve a fermarsi subito, invece di scoprire alla fine che non c'era
+         * abbastanza materiale.
+         */
+        const val MIN_GYRO_POINTS = 6
         const val REFERENCE_INTENSITY_PERCENT = 40
         /**
          * Il ricentraggio parte dal fine corsa vicino, cioè da 57° dallo zero: va aspettato.

@@ -892,7 +892,7 @@ class PanoramaStitchJob(
                     "alla posizione ipotizzata: lì la panoramica è incollata a secco.",
             )
         }
-        val name = save(outcome.bitmap, shotAtMs, sources = shots.map { it.file })
+        val name = save(outcome.bitmap, shotAtMs, sources = shots.map { it.file }, report = outcome.report)
         outcome.bitmap.recycle()
 
         log.info(
@@ -971,6 +971,7 @@ class PanoramaStitchJob(
                     shotAtMs,
                     name = "Panorama_TEST_${variant.letter}_$stamp.jpg",
                     sources = trio.map { it.file },
+                    report = out.report,
                 )
                 out.bitmap.recycle()
                 saved++
@@ -1109,11 +1110,26 @@ class PanoramaStitchJob(
         runCatching { androidx.exifinterface.media.ExifInterface(file).dateTimeOriginal }.getOrNull()
     }
 
+    /**
+     * Scrive la panoramica nella galleria, con dentro tutto quello che la descrive.
+     *
+     * Il file passa da un temporaneo, e non è un capriccio. Su una panoramica servono due cose
+     * che nessuna libreria scrive insieme: l'EXIF — data, posizione, passaporto degli scatti —
+     * che lo mette `ExifInterface` riscrivendo il file, e l'XMP `GPano`, che è il solo modo di
+     * dire a un visore che questa è una sferica. Se l'XMP si scrivesse per primo, la riscrittura
+     * dell'EXIF potrebbe portarselo via; scritto per ultimo, sopravvive di sicuro. Il
+     * temporaneo è il posto dove l'EXIF finisce di fare i suoi giri prima che il file diventi
+     * definitivo.
+     *
+     * Se il temporaneo non si può scrivere — spazio finito, di solito — si salva come si è
+     * sempre fatto, senza XMP: meglio una panoramica piatta che nessuna panoramica.
+     */
     private fun save(
         bitmap: Bitmap,
         shotAtMs: Long,
         name: String? = null,
         sources: List<File> = emptyList(),
+        report: StitchReport? = null,
     ): String {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ITALY).format(Date())
         @Suppress("NAME_SHADOWING")
@@ -1122,12 +1138,81 @@ class PanoramaStitchJob(
         // Il momento vero della panoramica: quello scritto negli scatti se c'è, altrimenti
         // quello che il job si porta dietro.
         val takenAtMs = passportTimeMs(sources) ?: shotAtMs
+        val xmp = report?.let { GPanoXmp.build(it, bitmap.width, bitmap.height) }
+
+        val staging = if (xmp == null) null else runCatching {
+            File(context.cacheDir, "panorama-in-uscita.jpg").also { temp ->
+                FileOutputStream(temp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
+                runCatching {
+                    val exif = androidx.exifinterface.media.ExifInterface(temp)
+                    var touched = applyPassport(exif, passport)
+                    if (exif.latLong == null && locations?.stamp(exif, takenAtMs) == true) touched = true
+                    if (touched) exif.saveAttributes()
+                }
+            }
+        }.getOrNull()
+
+        if (staging != null && xmp != null) {
+            val written = runCatching { publish(name, staging, xmp, takenAtMs) }.getOrElse { errore ->
+                log.warn("Panoramica sferica: XMP non scritto (${errore.message}), salvo senza")
+                -1
+            }
+            staging.delete()
+            if (written >= 0) {
+                log.info(
+                    "PANORAMICA SFERICA DICHIARATA",
+                    "Scritto l'XMP GPano ($written byte): i visori la aprono come sferica invece " +
+                        "che come una foto lunga. Copertura verticale %.0f° su 180 — la parte che " +
+                        "manca resta vuota nella sfera, non stirata."
+                        .format(report.coverageVerticalDegrees),
+                )
+                return name
+            }
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             saveToMediaStore(name, bitmap, takenAtMs, passport)
         } else {
             saveToPublicDirectory(name, bitmap, takenAtMs, passport)
         }
         return name
+    }
+
+    /** Copia il file già pronto nella galleria, infilandoci l'XMP mentre passa. */
+    private fun publish(name: String, staging: File, xmp: String, takenAtMs: Long): Int {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, GALLERY_RELATIVE_PATH)
+                put(MediaStore.Images.Media.DATE_TAKEN, takenAtMs)
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("La galleria del telefono non ha accettato il file")
+            val written = staging.inputStream().buffered().use { input ->
+                resolver.openOutputStream(uri).use { output ->
+                    requireNotNull(output) { "Non riesco a scrivere nella galleria" }
+                    GPanoXmp.copyInserting(input, output.buffered(), xmp)
+                }
+            }
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            return written
+        }
+        val root = Environment.getExternalStoragePublicDirectory(GALLERY_ROOT)
+        val directory = File(root, GALLERY_FOLDER).apply { mkdirs() }
+        val target = File(directory, name)
+        val written = staging.inputStream().buffered().use { input ->
+            FileOutputStream(target).buffered().use { output ->
+                GPanoXmp.copyInserting(input, output, xmp)
+            }
+        }
+        runCatching { target.setLastModified(takenAtMs) }
+        MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), arrayOf("image/jpeg"), null)
+        return written
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)

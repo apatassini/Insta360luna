@@ -55,6 +55,17 @@ data class StitchReport(
     /** Righe inventate in fondo per chiudere il buco sotto: zero se non ce n'era bisogno. */
     val nadirPatchRows: Int = 0,
     /**
+     * Dove sta il centro della tela in verticale, e con che proiezione è stata disegnata.
+     *
+     * Servono a una cosa sola: dire ai visori che questa è una sferica, e **dove** guarda. Una
+     * panoramica che copre 149° verticali su 180 va collocata dentro la sfera intera, e senza
+     * il centro non si sa a che altezza. La proiezione decide se ci sia qualcosa da dichiarare:
+     * solo l'equirettangolare è una sferica per chi la guarda.
+     */
+    val centerTiltDegrees: Float = 0f,
+    val pixelsPerDegree: Float = 0f,
+    val projection: StitchProjection = StitchProjection.EQUIRECTANGULAR,
+    /**
      * Le poche righe che dicono se l'unione è andata bene *davvero*, da mostrare in app.
      *
      * Il log completo è la sede della verità, ma si legge su un telefono e nessuno lo apre
@@ -975,6 +986,9 @@ class PanoramaStitcher(
                     refinements = notes,
                     worstCorrectionDegrees = refinement.worstCorrection,
                     nadirPatchRows = patchedRows,
+                    centerTiltDegrees = canvas.centerTiltDegrees,
+                    pixelsPerDegree = canvas.pixelsPerDegree,
+                    projection = canvas.projection,
                     verdict = verdict,
                     // Quello che esce di qui riscrive il profilo del gimbal, e un profilo si
                     // riscrive solo su una misura che vale. La correzione di *questa*

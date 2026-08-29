@@ -23,6 +23,36 @@ val gitSha = System.getenv("GITHUB_SHA") ?: "local"
  */
 val gitBranch = System.getenv("GITHUB_REF_NAME") ?: "local"
 
+/**
+ * La chiave di firma Persoft, quando c'è.
+ *
+ * Si prende da due posti, e nessuno dei due sta nel repository. In CI dai segreti del progetto,
+ * che il workflow trasforma in un file e in tre variabili d'ambiente; su una macchina di lavoro
+ * da un `keystore.properties` accanto al progetto, che il `.gitignore` tiene fuori. Se non c'è
+ * nessuno dei due la build di release esce firmata con la chiave di sviluppo qui sotto: meglio
+ * un APK che si installa e lo dice, che una compilazione che fallisce su chi clona il progetto
+ * e non ha nessuna chiave.
+ *
+ * Le password non stanno **mai** in un file versionato, e nemmeno il `.jks`: chi ha quei quattro
+ * pezzi può firmare aggiornamenti che il telefono installa sopra l'app vera senza chiedere
+ * niente a nessuno, ed è esattamente la ragione per cui Android si fida della firma.
+ */
+val keystoreProperties = java.util.Properties().apply {
+    val local = rootProject.file("keystore.properties")
+    if (local.isFile) local.inputStream().use { load(it) }
+}
+
+fun signingSetting(property: String, variable: String): String? =
+    (keystoreProperties.getProperty(property) ?: System.getenv(variable))?.takeIf { it.isNotBlank() }
+
+val persoftStore = file(signingSetting("storeFile", "SIGNING_KEYSTORE_FILE") ?: "persoft-release.jks")
+    .takeIf { it.isFile }
+val persoftStorePassword = signingSetting("storePassword", "SIGNING_KEYSTORE_PASSWORD")
+val persoftKeyAlias = signingSetting("keyAlias", "SIGNING_KEY_ALIAS")
+val persoftKeyPassword = signingSetting("keyPassword", "SIGNING_KEY_PASSWORD")
+val signedByPersoft = persoftStore != null && persoftStorePassword != null &&
+    persoftKeyAlias != null && persoftKeyPassword != null
+
 android {
     namespace = "it.persoft.lunaultra"
     compileSdk = 35
@@ -37,6 +67,9 @@ android {
         buildConfigField("String", "GIT_BRANCH", "\"$gitBranch\"")
         // L'ora della compilazione: nelle schermate si legge questa, non il commit.
         buildConfigField("long", "BUILT_AT_MS", "${System.currentTimeMillis()}L")
+        // Con che chiave è uscito questo APK. Dal telefono non si vede in nessun altro modo, e
+        // quando un aggiornamento viene rifiutato la prima domanda è proprio questa.
+        buildConfigField("boolean", "SIGNED_BY_PERSOFT", "$signedByPersoft")
     }
 
     /**
@@ -58,6 +91,22 @@ android {
             keyAlias = "luna"
             keyPassword = "android"
         }
+        // La chiave vera, creata solo se i quattro pezzi ci sono davvero.
+        if (signedByPersoft) {
+            create("persoft") {
+                storeFile = persoftStore
+                storePassword = persoftStorePassword
+                keyAlias = persoftKeyAlias
+                keyPassword = persoftKeyPassword
+                // Firma v1 più v2 più v3: la v1 serve ad Android 6 e precedenti, che qui non
+                // ci sono (minSdk 26), ma costa niente e toglie di mezzo gli installer che la
+                // cercano lo stesso. La v3 è quella che permetterà, un giorno, di cambiare
+                // chiave senza disinstallare.
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
     }
 
     buildTypes {
@@ -70,7 +119,21 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        // Questa è la build che si distribuisce da quando c'è la chiave Persoft.
+        //
+        // La differenza con la debug non è il nome: una build di debug porta
+        // `android:debuggable`, e con quel bit acceso il telefono la tratta da programma in
+        // prova — chiunque abbia il cavo può attaccarsi al processo, il sistema toglie certe
+        // ottimizzazioni, e Play Protect ci mette il naso a ogni installazione. Una release
+        // firmata con una chiave vera è un'app come le altre.
         release {
+            signingConfig = if (signedByPersoft) {
+                signingConfigs.getByName("persoft")
+            } else {
+                // Senza chiave si firma con quella di sviluppo. L'APK si installa lo stesso, e
+                // `SIGNED_BY_PERSOFT` dice la verità a chi lo guarda dal telefono.
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

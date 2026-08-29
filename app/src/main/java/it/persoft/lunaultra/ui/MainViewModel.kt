@@ -463,9 +463,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateJob = viewModelScope.launch {
             val branch = settings.value.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
             _update.value = UpdateUiState.Checking(branch)
+            // Con che chiave e' firmata questa build sta nel log, in cima, perche' dal telefono
+            // non si vede in nessun altro modo — e quando un aggiornamento viene rifiutato con
+            // «il pacchetto e' in conflitto» la prima cosa da sapere e' se le due build hanno la
+            // stessa firma o no.
+            val firma = if (BuildConfig.SIGNED_BY_PERSOFT) "firma Persoft" else "firma di sviluppo"
             container.log.info(
                 "AGGIORNAMENTI",
-                "Cerco la release del branch \"$branch\" (build corrente: ${BuildConfig.GIT_SHA.take(12)}).",
+                "Cerco la release del branch \"$branch\" " +
+                    "(build corrente: ${BuildConfig.GIT_SHA.take(12)}, $firma).",
             )
             updateManager.downloadIfAvailable(BuildConfig.GIT_SHA, branch) { downloaded, total ->
                 _update.value = UpdateUiState.Downloading(branch, downloaded, total)

@@ -36,14 +36,37 @@ jobs:
       - name: Test unitari
         run: ./gradlew testDebugUnitTest --no-daemon
 
-      - name: Compila APK di debug
-        run: ./gradlew assembleDebug --no-daemon
+      # La chiave Persoft arriva dai segreti del progetto e vive solo dentro il run.
+      #
+      # Il `.jks` e' un file binario e in un segreto ci sta in base64. Si scrive nella cartella
+      # dell'app, dove il build.gradle.kts lo cerca, e la cartella e' quella di un runner
+      # usa-e-getta: finito il run, sparisce con lui. Se il segreto non c'e' - un fork, un
+      # clone di prova - non succede niente e la release esce firmata con la chiave di
+      # sviluppo, che si installa lo stesso.
+      - name: Prepara la firma Persoft
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > app/persoft-release.jks
+            echo "Chiave Persoft in posizione ($(stat -c%s app/persoft-release.jks) byte)."
+          else
+            echo "Nessun segreto SIGNING_KEYSTORE_BASE64: si firma con la chiave di sviluppo."
+          fi
+
+      - name: Compila l'APK
+        env:
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Pubblica l'APK come artefatto
         uses: actions/upload-artifact@v4
         with:
-          name: luna-timelapse-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: luna-ultra-apk
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
       # Gli artefatti delle Actions si scaricano solo da browser desktop e da
@@ -65,13 +88,16 @@ jobs:
           {
             echo "Build automatica del commit ${COMMIT}. Scarica l'APK qui sotto."
             echo
-            echo "E' una build di debug: sul telefono va consentita l'installazione da origini sconosciute."
+            echo "Sul telefono va consentita l'installazione da origini sconosciute: l'app non passa"
+            echo "dal Play Store."
             echo
             echo "Gli aggiornamenti si installano sopra la versione precedente, senza disinstallare."
-            echo "Dalla build che include l'updater, l'app controlla e scarica questa release all'avvio."
-            echo "Se compare «il pacchetto e' in conflitto con un pacchetto esistente» vieni da una"
-            echo "build vecchia, firmata con una chiave casuale: disinstalla l'app una volta sola e"
-            echo "da li in poi gli aggiornamenti si installano sopra."
+            echo "L'app controlla e scarica questa release all'avvio."
+            echo
+            echo "Se compare «il pacchetto e' in conflitto con un pacchetto esistente» vuol dire che"
+            echo "l'app installata e' firmata con un'altra chiave: disinstalla una volta sola e da li"
+            echo "in poi gli aggiornamenti tornano a installarsi sopra. Succede una volta, al"
+            echo "passaggio dalla firma di sviluppo a quella Persoft."
           } > release-notes.md
           # Il nome dell'allegato porta dentro il commit, e non e' un vezzo. Gli allegati
           # si scaricano da releases/download/<tag>/<nome>, un indirizzo che la rete di
@@ -82,11 +108,11 @@ jobs:
           # aggiornamento fermo. Con il commit nel nome l'indirizzo e' nuovo ogni volta e in
           # cache non ci puo' essere per definizione.
           APK="luna-${COMMIT:0:12}.apk"
-          cp app/build/outputs/apk/debug/app-debug.apk "$APK"
+          cp app/build/outputs/apk/release/app-release.apk "$APK"
           gh release delete "$TAG" --yes --cleanup-tag || true
           gh release create "$TAG" \
             --target "$COMMIT" \
-            --title "APK di debug - $BRANCH" \
+            --title "APK - $BRANCH" \
             --notes-file release-notes.md \
             --prerelease \
             "$APK"

@@ -9,3 +9,8 @@
 .cxx
 local.properties
 app/build/
+
+# La firma vera non entra nel repository, ne' il file ne' le password.
+keystore.properties
+*.jks
+app/persoft-release.jks

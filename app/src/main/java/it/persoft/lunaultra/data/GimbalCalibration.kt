@@ -37,11 +37,8 @@ data class GimbalCalibrationSample(
 /**
  * Un punto della curva: quanti gradi al secondo produce un'intensità, su ogni asse.
  *
- * I gradi al secondo sono la misura buona, e vengono dal cronometro contro i fine corsa: la
- * camera annuncia il limite, la corsa fino a lì è nota, il tempo di comando si conta. Non
- * serve riconoscere niente nell'inquadratura — ed è il punto, perché intorno alla camera non
- * sempre c'è qualcosa di riconoscibile, e su una parete uniforme o a motivo ripetuto ogni
- * misura basata sulle immagini è una scommessa.
+ * I gradi al secondo sono la misura buona e vengono dal giroscopio a 1 kHz scritto nei proxy
+ * LRV. Non dipendono dalla corsa di catalogo né da cosa c'è nell'inquadratura.
  *
  * I pixel al secondo restano perché servono alla correzione visiva dei waypoint, dove il
  * confronto ha senso: là si confronta la stessa posizione con sé stessa.
@@ -53,7 +50,7 @@ data class GimbalResponsePoint(
     val tiltImagePixelsPerSecond: Float,
     val validPanSamples: Int,
     val validTiltSamples: Int,
-    /** Gradi al secondo misurati col cronometro sul fine corsa. Zero = non misurato. */
+    /** Gradi al secondo misurati dal giroscopio della camera. Zero = non misurato. */
     val panDegreesPerSecond: Float = 0f,
     val tiltDegreesPerSecond: Float = 0f,
 ) {
@@ -108,16 +105,12 @@ data class GimbalCalibrationProfile(
     /**
      * Di quanto la scala in gradi di questo profilo è sbagliata. 1 significa giusta.
      *
-     * Questo campo esisteva già, ma valeva solo per i profili vecchi — quelli dedotti dalle
-     * immagini — e sui profili misurati a cronometro veniva ignorato. Ignorarlo era un errore,
-     * e qui sotto c'è perché.
+     * Questo campo resta per le rifiniture misurate dall'unione delle panoramiche. Una nuova
+     * calibrazione giroscopica lo riporta a uno perché la scala nasce già da angoli reali.
      *
-     * La calibrazione misura due cose oneste: **quanti secondi** e **quanti impulsi** ci vogliono
-     * per attraversare un asse da un fine corsa all'altro. Poi divide per la corsa in gradi per
-     * ottenere i gradi al secondo — e quella corsa in gradi non la misura nessuno: sono i −57°…
-     * +235° del catalogo, scritti come costanti. Siccome il gimbal naviga a stima, integrando
-     * velocità per tempo senza nessun ritorno di posizione, un errore su quel numero finisce
-     * identico e proporzionale su **ogni** spostamento comandato.
+     * Nei profili precedenti la calibrazione divideva la corsa di catalogo per gli impulsi
+     * contati fra i fine corsa. Siccome quei gradi non erano misurati, l'errore finiva identico
+     * e proporzionale su ogni spostamento comandato.
      *
      * Su un esemplare vero è successo: le nove foto di una panoramica, misurate una contro
      * l'altra riconoscendo i dettagli, dicevano che a 32° chiesti ne corrispondevano 42. Il
@@ -227,8 +220,8 @@ data class GimbalCalibrationProfile(
      * Velocità misurata a una data intensità, in gradi se ci sono, in pixel per i profili vecchi.
      *
      * È il numero con cui si risponde a «quanto muove questo comando»: la curva in gradi viene
-     * da un conteggio di impulsi contro un fine corsa, quella in pixel da come si spostava
-     * l'immagine. La prima è una misura, la seconda una deduzione, quindi vince la prima.
+     * dal giroscopio, quella in pixel da come si spostava l'immagine. La prima è una misura,
+     * la seconda una deduzione, quindi vince la prima.
      */
     fun responseRateAt(intensityPercent: Float, panAxis: Boolean): Float {
         val degrees = degreesRateAt(intensityPercent, panAxis)
@@ -238,10 +231,7 @@ data class GimbalCalibrationProfile(
     /**
      * Il comando più veloce della curva. Non è detto che sia il 100%.
      *
-     * Misurato sulla Luna Ultra: il comando 100 muove circa 11 °/s su entrambi gli assi, mentre
-     * il 90 ne fa 57 in orizzontale e 41 in verticale. Il 100 non è il massimo, è un valore che
-     * il firmware tratta a modo suo — e chiedere «vai al massimo» mandando 100 vuol dire andare
-     * quattro volte più piano credendo di andare al massimo.
+     * Non si assume che sia il 100%: si sceglie il punto più rapido della curva misurata.
      */
     fun fastestCommandPercent(panAxis: Boolean): Int =
         responsePoints
@@ -282,12 +272,12 @@ data class GimbalCalibrationProfile(
         return found
     }
 
-    /** Velocità angolare assoluta ricavata dal tempo di attraversamento dei fine corsa. */
+    /** Velocità angolare assoluta ricavata dalla curva misurata. */
     fun angularRateAt(intensityPercent: Float, panAxis: Boolean): Float {
         if (!isValid || intensityPercent <= 0f) return 0f
         val limits = if (panAxis) panLimits else tiltLimits
-        // Se la curva è stata misurata in gradi, si usa quella: è un cronometro contro un
-        // fine corsa, cioè due fatti. La strada dei pixel resta per i profili vecchi.
+        // Se la curva è stata misurata in gradi, si usa quella. La strada dei pixel resta per
+        // i profili vecchi.
         val measured = degreesRateAt(intensityPercent, panAxis)
         if (measured > 0f) return measured
 
@@ -299,7 +289,7 @@ data class GimbalCalibrationProfile(
     }
 
     /**
-     * Gradi al secondo interpolati fra i punti misurati col cronometro; 0 se non ce ne sono.
+     * Gradi al secondo interpolati fra i punti misurati dal giroscopio; 0 se non ce ne sono.
      *
      * La correzione di scala si applica **qui**, che è il punto in cui i gradi nascono. Prima
      * valeva solo per la strada vecchia, quella dedotta dalle immagini, e i profili nuovi — che
@@ -388,10 +378,9 @@ data class GimbalCalibrationProfile(
         if (panAxis) point.panImagePixelsPerSecond else point.tiltImagePixelsPerSecond
 
     companion object {
-        // 5: la curva è in gradi al secondo, misurata col cronometro contro i fine corsa
-        // invece che dedotta dallo spostamento delle immagini. I profili precedenti nascevano
-        // da una misura che dipendeva da cosa c'era davanti all'obiettivo.
-        const val CURRENT_SCHEMA = 5
+        // 6: la curva è in gradi al secondo misurati dal giroscopio a 1 kHz nei proxy LRV.
+        // La versione 5 usava ancora la corsa di catalogo come righello e non è equivalente.
+        const val CURRENT_SCHEMA = 6
 
         /**
          * La correzione da applicare al profilo, resa ripetibile.
@@ -426,12 +415,10 @@ data class GimbalCalibrationProfile(
 object GimbalCalibrationBuilder {
 
     /**
-     * Costruisce il profilo dalle misure a cronometro: intensità → gradi al secondo.
+     * Costruisce il profilo dalle misure giroscopiche: intensità → gradi al secondo.
      *
-     * Non c'è niente da mediare né da filtrare: ogni punto è un cronometro contro un fine
-     * corsa, e un cronometro o c'è o non c'è. I pixel al secondo restano a zero — servono solo
-     * alla correzione visiva dei waypoint, che li ricava per conto suo quando le miniature ci
-     * sono; qui non si finge di averli misurati.
+     * Ogni punto è già la media dell'andata e del ritorno integrati dalla traccia a 1 kHz. I
+     * pixel al secondo restano a zero: qui non si finge di averli misurati.
      */
     fun buildFromDegrees(
         panCurve: List<Pair<Int, Float>>,

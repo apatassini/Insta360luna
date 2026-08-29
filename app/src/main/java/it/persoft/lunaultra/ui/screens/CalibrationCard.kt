@@ -193,7 +193,7 @@ private fun LiveCurve(state: GimbalCalibrationState) {
         ) {
             Text("CURVA MISURATA", style = MaterialTheme.typography.labelSmall, color = Luna.OnSurfaceDim)
             Text(
-                "%.2f° per impulso all'ultima misura".format(latest.degreesPerPulse),
+                "ultima misura · %.2f °/s".format(latest.degreesPerSecond),
                 style = MaterialTheme.typography.labelSmall,
                 color = Luna.Accent,
             )
@@ -206,7 +206,7 @@ private fun LiveCurve(state: GimbalCalibrationState) {
             Text("Verticale · ${tilt.size}/12", style = MaterialTheme.typography.bodySmall, color = Luna.OnSurfaceDim)
             CurveBars(tilt.map { it.intensityPercent to it.degreesPerSecond }, color = Luna.Pano)
         }
-        Hint("Altezza = gradi al secondo · sotto, l'intensità comandata. Una curva sana sale sempre.")
+        Hint("Altezza = gradi al secondo letti dal giroscopio · sotto, l'intensità comandata.")
     }
 }
 

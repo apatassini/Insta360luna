@@ -24,13 +24,21 @@ Cercare per correlazione, per giunta, è pericoloso: dentro un'anteprima JPEG da
 sempre *qualcosa* che assomiglia a una serie crescente, e ci si convince di aver trovato un
 formato.
 
-**Cosa si fa invece.** Il pan si misura **a posteriori**, dalle foto: giunzioni orizzontali
-della panoramica, o chiusura del giro contro i fine corsa. Vedi
-[GIMBAL-E-TARATURA.md §5](GIMBAL-E-TARATURA.md#5-le-due-strade-per-misurare-la-scala).
+**Cosa si fa invece.** La posizione assoluta continua a non esserci, ma lo spostamento si
+misura integrando il giroscopio continuo di un breve video. Le foto restano un controllo a
+posteriori. Vedi [GIMBAL-E-TARATURA.md §5](GIMBAL-E-TARATURA.md#5-le-strade-per-misurare-la-scala).
 
-**Quello che resta da provare**, l'unico filo non tirato: su un **video `.insv`** la traccia
-giroscopica potrebbe essere continua invece che 0,4 s attorno allo scatto. Se lo fosse, si
-integra e si ottiene il pan. Basterebbero dieci secondi di ripresa mentre il gimbal gira.
+**La strada che ha funzionato (29 agosto 2026).** Su un video `.mp4` della Luna la traccia
+giroscopica è continua: 8.387 campioni in 8,386 secondi, quindi 1 kHz come sulle foto. Il fondo
+scala `±2000 °/s` è scritto nei metadati (`gyro_cfg_info`, campo 65) e consente di convertire i
+conteggi senza una costante indovinata. Integrando i tre assi durante un pan comandato per due
+secondi sono usciti **+32,76°** all'andata e **−32,38°** al ritorno, con 0,38° di scarto.
+
+Il pan non vive quindi come posizione assoluta dentro ogni foto, ma si misura davvero dalla
+traccia continua di un breve video. `InstaTrailer.readGyroTrack` legge la traccia e la integra
+come quaternione, così funziona anche quando l'inclinazione proietta il pan su due assi locali.
+Il proxy LRV contiene la stessa traccia del video principale e pesa molto meno: la taratura
+scarica quello, misura andata e ritorno, poi elimina soltanto il clip temporaneo creato da lei.
 
 ---
 
@@ -44,8 +52,8 @@ progetti di reverse engineering pubblici lo ha fatto: la documentazione del buco
 di `Ripwords/insta360-luna-ultra-desktop` è esattamente il documento che dice che quei numeri
 non sono pubblici.
 
-**Cosa si fa invece.** Navigazione a stima, e la scala si corregge misurando le panoramiche.
-Tutto l'impianto della taratura esiste per questo.
+**Cosa si fa invece.** Navigazione a stima, con la curva di velocità misurata direttamente dal
+giroscopio; le panoramiche possono ancora rifinirla a posteriori.
 
 ---
 

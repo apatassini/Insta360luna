@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.gimbal
 
 import android.graphics.BitmapFactory
+import it.persoft.lunaultra.camera.CameraMode
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
 import it.persoft.lunaultra.data.GimbalAxisLimits
 import it.persoft.lunaultra.protocol.ProtoField
@@ -61,9 +62,8 @@ data class GimbalCalibrationState(
     val verificationLabel: String = "In attesa della prima misura",
     val annotatedJpeg: ByteArray? = null,
 
-    // Cosa sta rilevando adesso. Fino a ieri il pannello mostrava punti di controllo e
-    // percentuali di somiglianza fra immagini, che erano il metodo di prima: adesso la curva si
-    // conta a impulsi contro un segnale hardware, e quello che si guarda deve essere quello.
+    // Cosa sta rilevando adesso. I fine corsa continuano a usare il segnale hardware 8302;
+    // durante la curva il pannello mostra invece le misure giroscopiche appena integrate.
     /** Vero mentre si sta correndo verso un fine corsa aspettando il segnale 8302. */
     val seekingEndstop: Boolean = false,
     /** Vero nell'istante in cui il limite si è fatto sentire. */
@@ -194,6 +194,7 @@ class GimbalCalibrator(
     private val gimbal: GimbalController,
     private val limitMonitor: GimbalLimitMonitor,
     private val preview: PreviewController,
+    private val gyroMeter: GimbalGyroMeter,
     private val store: JsonFileStore<GimbalCalibrationProfile>,
     private val log: EventLog,
     private val scope: CoroutineScope,
@@ -233,9 +234,16 @@ class GimbalCalibrator(
 
     /** Zoom in uso: il campo visivo dipende da quello, e da lì i pixel diventano gradi. */
     private var cameraZoomScale: Int = 1
+    private var cameraModeBeforeCalibration: CameraMode = CameraMode.VIDEO
 
-    fun start(cameraModel: String, firmware: String, zoomScale: Int = 1) {
+    fun start(
+        cameraModel: String,
+        firmware: String,
+        zoomScale: Int = 1,
+        cameraMode: CameraMode = CameraMode.VIDEO,
+    ) {
         cameraZoomScale = zoomScale
+        cameraModeBeforeCalibration = cameraMode
         if (job?.isActive == true) return
         job = scope.launch {
             runCalibration(cameraModel, firmware)
@@ -316,30 +324,24 @@ class GimbalCalibrator(
                 message = "Fine corsa trovati · conto gli impulsi che servono per arrivarci",
             )
 
-            // La curva si misura contando gli impulsi contro i fine corsa, non con le immagini
-            // e non col cronometro: l'impulso dura sempre uguale, quindi non c'è nessun tempo
-            // da leggere. Due fatti — il limite che la camera annuncia e i gradi che lo
-            // separano dallo zero — invece di una scommessa su cosa c'è davanti all'obiettivo.
-            val panCurve = measureCurveByPulses(
+            // La curva nasce dalla traccia giroscopica a 1 kHz scritta nei proxy LRV. Per ogni
+            // intensità si registrano andata e ritorno: l'angolo è quindi misurato direttamente
+            // dalla camera e non dipende né dalla corsa dichiarata né dal campo visivo.
+            val panCurve = measureCurveByGyroscope(
                 axis = GimbalCalibrationSample.AXIS_PAN,
-                limits = panLimits,
                 phaseStartPercent = 30,
                 phaseEndPercent = 60,
             )
-            val tiltCurve = measureCurveByPulses(
+            val tiltCurve = measureCurveByGyroscope(
                 axis = GimbalCalibrationSample.AXIS_TILT,
-                limits = tiltLimits,
                 phaseStartPercent = 60,
                 phaseEndPercent = 88,
             )
             returnHome("Ritorno all'inquadratura di partenza dopo la curva", 88, 90)
 
-            // La correzione di scala sopravvive alla ricalibrazione, e deve.
-            //
-            // Una calibrazione nuova rimisura tempi e impulsi — che erano già giusti — e li
-            // divide di nuovo per la corsa di catalogo, che è il numero sbagliato. Rifare la
-            // calibrazione quindi non ripara la scala: la ricostruisce identica. Buttare via la
-            // correzione qui vorrebbe dire tornare al 31% di errore ogni volta che si ritara.
+            // Il giroscopio fornisce già una scala assoluta: conservare la vecchia correzione
+            // moltiplicativa significherebbe applicarla due volte. Resta invece il ritaglio del
+            // fotogramma, che è una proprietà ottica indipendente dal gimbal.
             val previous = store.state.value
             val profile = GimbalCalibrationBuilder.buildFromDegrees(
                 panCurve = panCurve.points,
@@ -348,7 +350,7 @@ class GimbalCalibrator(
                 firmware = firmware,
                 panLimits = panLimits,
                 tiltLimits = tiltLimits,
-            ).withAngularScale(previous.panAngularScale, previous.tiltAngularScale)
+            ).copy(frameCropFactor = previous.frameCropFactor)
             if (!profile.isValid) {
                 throw IllegalStateException(
                     "${profile.invalidReason ?: "profilo incompleto"} " +
@@ -376,7 +378,7 @@ class GimbalCalibrator(
             log.info(
                 "CALIBRAZIONE GIMBAL · COMPLETATA",
                 buildString {
-                    appendLine("Curva misurata contando gli impulsi sui fine corsa, senza immagini e senza cronometro.")
+                    appendLine("Curva misurata dal giroscopio a 1 kHz nei proxy LRV, con andata e ritorno.")
                     appendLine(zeroCheckSummary("orizzontale", panCurve.zero))
                     appendLine(zeroCheckSummary("verticale", tiltCurve.zero))
                     corrected.responsePoints.forEach { point ->
@@ -442,9 +444,86 @@ class GimbalCalibrator(
         } finally {
             withContext(NonCancellable) {
                 runCatching { gimbal.stop() }
+                gyroMeter.ripristinaModalita(cameraModeBeforeCalibration)
             }
             job = null
         }
+    }
+
+    /**
+     * Curva intensità → gradi al secondo misurata dalla traccia inerziale della camera.
+     *
+     * Le intensità 1–10% durano due secondi perché il loro segnale è piccolo; le altre uno.
+     * Ogni registrazione contiene due movimenti opposti e la loro media elimina quasi tutto
+     * l'errore di frenata. Le prove sulla Luna reale hanno chiuso entro 0,42° a 20/50/80%.
+     */
+    private suspend fun measureCurveByGyroscope(
+        axis: String,
+        phaseStartPercent: Int,
+        phaseEndPercent: Int,
+    ): PulseCurve {
+        val panAxis = axis == GimbalCalibrationSample.AXIS_PAN
+        val measured = mutableListOf<Pair<Int, Float>>()
+        log.info(
+            "CALIBRAZIONE · CURVA GIROSCOPICA ${axisLabel(axis).uppercase()}",
+            "Ogni intensità viene registrata nel proxy LRV: riposo, andata, pausa e ritorno. " +
+                "La traccia a 1 kHz fornisce direttamente i gradi percorsi.",
+        )
+
+        INTENSITY_PERCENTAGES.forEachIndexed { index, intensity ->
+            val durationMs = if (intensity <= SLOW_INTENSITY_THRESHOLD) {
+                GYRO_SLOW_MOVEMENT_MS
+            } else {
+                GYRO_MOVEMENT_MS
+            }
+            _state.value = _state.value.copy(
+                phaseLabel = "Curva giroscopica · ${axisLabel(axis)}",
+                overallPercent = phaseStartPercent +
+                    (phaseEndPercent - phaseStartPercent) * (index + 1) / INTENSITY_PERCENTAGES.size,
+                axisLabel = axisLabel(axis),
+                directionLabel = "andata e ritorno",
+                intensityPercent = intensity,
+                pulseMs = durationMs,
+                seekingEndstop = false,
+                endstopReached = false,
+                pulsesInRun = 0,
+                maxPulsesInRun = 0,
+                usesImages = false,
+                message = "$intensity% · registro e integro il giroscopio",
+                verificationLabel = "GIROSCOPIO 1 kHz · LRV",
+            )
+
+            val result = gyroMeter.misura(panAxis, intensity, durationMs).getOrElse {
+                throw IllegalStateException(
+                    "Misura giroscopica $intensity% ${axisLabel(axis)} non riuscita: ${it.message}",
+                    it,
+                )
+            }
+            if (result.gradiSecondo <= 0f) {
+                throw IllegalStateException("Il giroscopio non ha rilevato il movimento al $intensity%")
+            }
+            measured += intensity to result.gradiSecondo
+            _state.value = _state.value.copy(
+                curve = _state.value.curve + CurveReading(
+                    intensityPercent = intensity,
+                    panAxis = panAxis,
+                    degreesPerSecond = result.gradiSecondo,
+                    degreesPerPulse = result.gradiSecondo * CURVE_PULSE_MS / 1_000f,
+                    pulses = 0,
+                ),
+            )
+            addFinding(
+                "$intensity% ${axisLabel(axis)}",
+                "%.2f °/s · %.2f° andata · %.2f° ritorno · scarto %.2f°".format(
+                    result.gradiSecondo,
+                    result.gradiAndata,
+                    result.gradiRitorno,
+                    result.scartoChiusuraGradi,
+                ),
+                if (result.scartoChiusuraGradi <= GYRO_GOOD_CLOSURE_DEG) FindingKind.GOOD else FindingKind.WARN,
+            )
+        }
+        return PulseCurve(points = measured, zero = ZeroPulseCheck.NONE)
     }
 
     /**
@@ -1867,6 +1946,13 @@ class GimbalCalibrator(
         // Curva misurata contando gli impulsi sul fine corsa. L'impulso dura sempre uguale:
         // è l'unità di misura, non un tempo da cronometrare.
         const val CURVE_PULSE_MS = 400L
+
+        /** Durata dei due versi registrati nella misura giroscopica. */
+        const val GYRO_MOVEMENT_MS = 1_000L
+        const val GYRO_SLOW_MOVEMENT_MS = 2_000L
+
+        /** Scarto andata/ritorno sotto cui la misura reale è considerata ben chiusa. */
+        const val GYRO_GOOD_CLOSURE_DEG = 0.6f
 
         /** Tetto di sicurezza: oltre questi impulsi il fine corsa non sta arrivando. */
         const val MAX_CURVE_PULSES = 130

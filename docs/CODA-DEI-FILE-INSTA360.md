@@ -152,8 +152,25 @@ Cercato e non trovato, con il metodo descritto in
 
 Il giroscopio c'è (tre assi per campione) ma su una **foto** copre 0,4 s attorno allo scatto:
 non è una traccia continua fra uno scatto e l'altro, quindi non si può integrare per ricavare
-di quanto la camera ha girato. Su un **video** `.insv` la traccia potrebbe essere continua —
-è l'unica strada rimasta per misurare il pan dai file, e non è ancora stata provata.
+di quanto la camera ha girato.
+
+Su un **video** `.mp4` della Luna, invece, il blocco `0x0300` copre l'intera registrazione a
+1 kHz. La prova reale del 29 agosto 2026 ha misurato +32,76° e −32,38° sui due versi dello stesso
+pan. Il fondo scala è dichiarato nei metadati (`ExtraMetadata.gyro_cfg_info`: ±2000 °/s), e
+`InstaTrailer.readGyroTrack` converte e integra i tre assi senza ipotizzare una scala.
+
+Il proxy **LRV contiene la stessa coda e la stessa traccia** del video principale, ma pesa circa
+un decimo. La nuova taratura scarica quindi soltanto l'LRV. Tre clip reali, comandati per un
+secondo in ciascun verso, hanno dato:
+
+| intensità pan | andata | ritorno | media usata dalla curva | scarto |
+|---:|---:|---:|---:|---:|
+| 20% | 12,80° | 12,92° | 12,86 °/s | 0,12° |
+| 50% | 32,35° | 31,93° | 32,14 °/s | 0,42° |
+| 80% | 51,31° | 51,29° | 51,30 °/s | 0,02° |
+
+Perché la registrazione esista, il live stream deve essere già avviato: senza di esso la Luna
+risponde al comando ma manda subito `CAMERA_NOTIFICATION_CAPTURE_STOPPED` (8201), errore 2.
 
 ---
 

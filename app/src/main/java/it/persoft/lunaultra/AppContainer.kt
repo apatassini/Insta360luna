@@ -9,6 +9,7 @@ import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.data.JsonFileStore
 import it.persoft.lunaultra.gimbal.GimbalController
 import it.persoft.lunaultra.gimbal.GimbalCalibrator
+import it.persoft.lunaultra.gimbal.GimbalGyroMeter
 import it.persoft.lunaultra.gimbal.GimbalLimitMonitor
 import it.persoft.lunaultra.media.Favorites
 import it.persoft.lunaultra.media.CameraWriteProbe
@@ -70,8 +71,6 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val preview = PreviewController(session, commands, settingsStore.state, wifiBinder, log, scope)
     val gimbal = GimbalController(commands, settingsStore.state, calibrationStore.state, log, scope)
     val gimbalLimits = GimbalLimitMonitor(session.notifications, scope)
-    val calibrator = GimbalCalibrator(gimbal, gimbalLimits, preview, calibrationStore, log, scope)
-    val engine = TimelapseEngine(commands, gimbal, preview, settingsStore.state, calibrationStore.state, log, scope)
 
     /** Dove stava il telefono e quando: le coordinate da scrivere negli EXIF delle copie. */
     val positionStore = JsonFileStore(
@@ -83,6 +82,17 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
     val locationDiary = LocationDiary(appContext, positionStore, log)
 
     val media = MediaRepository(appContext, commands, settingsStore.state, wifiBinder, log, locationDiary)
+    val gyroMeter = GimbalGyroMeter(commands, preview, media, gimbal, log)
+    val calibrator = GimbalCalibrator(
+        gimbal,
+        gimbalLimits,
+        preview,
+        gyroMeter,
+        calibrationStore,
+        log,
+        scope,
+    )
+    val engine = TimelapseEngine(commands, gimbal, preview, settingsStore.state, calibrationStore.state, log, scope)
 
     /** Risponde alla domanda «si può scrivere sulla scheda della camera?» provandoci. */
     val writeProbe = CameraWriteProbe(wifiBinder, log)

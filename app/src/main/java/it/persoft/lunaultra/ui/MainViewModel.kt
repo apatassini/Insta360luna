@@ -868,6 +868,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             cameraModel = status.value.model.orEmpty(),
             firmware = status.value.firmware.orEmpty(),
             zoomScale = settings.value.photo.zoomScale,
+            cameraMode = _captureMode.value.cameraMode,
         )
         showMessage("Calibrazione avviata · non muovere camera o scena")
     }

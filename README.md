@@ -734,8 +734,7 @@ La calibrazione misura due cose diverse, e conviene tenerle separate perché fal
 motivi diversi:
 
 1. **la curva di risposta** — quanti gradi al secondo produce ogni intensità dall'1% al 100%.
-   Si misura sugli *spostamenti* fra un fotogramma e il successivo, a pochi secondi di
-   distanza l'uno dall'altro;
+   Si misura registrando andata e ritorno nel proxy LRV e integrando il giroscopio a 1 kHz;
 2. **la ripetibilità dello zero** — se dopo un ricentraggio l'inquadratura torna dov'era.
    Si misura confrontando due immagini prese a **minuti** di distanza.
 
@@ -805,32 +804,23 @@ Il log riporta, per ogni tappa, di quanti gradi il ritorno ha mancato il punto. 
 modello torna dove dice di tornare; sopra, quello scarto è esattamente l'errore che avranno i
 waypoint.
 
-### La scala in gradi viene dai fine corsa, non dal cronometro
+### La scala in gradi viene dal giroscopio continuo
 
-Le immagini danno la **forma** della curva — quanto è più veloce il 100% del 10% — ma non la sua
-scala in gradi. Quella nasceva dal tempo impiegato a percorrere la corsa, misurato contando gli
-impulsi «in cui si è visto un movimento». Ed è lì che si rompeva: al 40% con impulsi da 650 ms
-due fotogrammi consecutivi non si sovrappongono abbastanza perché il confronto funzioni, così un
-impulso che ha mosso eccome finiva contato come fermo. **Un solo impulso perso su quindici sposta
-la scala del 7%**, e su una corsa da 235° sono 16° — abbastanza da mancare il fine corsa e far
-fallire la validazione dopo nove minuti di misure buone.
+Il vecchio conto contro i fine corsa aveva ancora un numero non misurato: la corsa in gradi di
+catalogo. Ora ogni punto della curva è una breve registrazione: riposo per il bias, movimento
+positivo, pausa e movimento negativo. Il proxy LRV contiene la stessa traccia inerziale del
+video principale e pesa molto meno; `InstaTrailer` integra i tre assi come quaternione e la
+media dei due versi diventa direttamente la velocità del profilo.
 
-Due correzioni:
+Tre prove reali sul pan hanno dato 12,86 °/s al 20%, 32,14 °/s al 50% e 51,30 °/s all'80%; gli
+scarti fra andata e ritorno sono stati rispettivamente 0,12°, 0,42° e 0,02°.
 
-1. il tempo di corsa si misura **contando i comandi inviati**, che sono un fatto, invece degli
-   impulsi visivamente confermati, che a quella velocità sono una deduzione sbagliata;
-2. la validazione non boccia più: **misura**. Il fine corsa è verità assoluta — la camera lo
-   annuncia — quindi si spinge il modello fino a toccarlo, si contano i gradi che *credeva* di
-   aver percorso, e il rapporto con i gradi veri diventa la correzione di scala del profilo
-   (`panAngularScale`, `tiltAngularScale`). Due misure per asse, una per verso, mediate: così un
-   eventuale scostamento dello zero hardware si annulla invece di sommarsi.
+Il live stream viene avviato prima della registrazione: sulla Luna non è facoltativo, perché
+senza stream `START_CAPTURE` viene fermato subito con la notifica 8201/errore 2. Dopo una misura
+valida l'app elimina solo il video temporaneo appena creato e il suo LRV. I fine corsa restano
+per stabilire i limiti raggiungibili, non per costruire la scala.
 
-Si fallisce solo se il fine corsa non arriva neanche cercandolo molto oltre la corsa prevista, o
-se la correzione esce da un intervallo ragionevole: quello non è più taratura, è un sintomo —
-gimbal ostacolato, segnale di limite sbagliato, corsa diversa da quella dichiarata.
-
-I profili con `schemaVersion` 3 sono sistematicamente troppo veloci e vengono rifiutati: vanno
-rifatti una volta.
+I profili precedenti a `schemaVersion` 6 vengono rifiutati e vanno rifatti una volta.
 
 L'interpolazione fra due waypoint segue le formule della specifica:
 

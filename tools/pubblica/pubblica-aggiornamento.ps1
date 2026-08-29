@@ -26,6 +26,13 @@
 .PARAMETER SoloSito
     Non tocca GitHub: pubblica solo sul sito.
 
+.PARAMETER SaltaBuild
+    Non ricompila e non rifirma: pubblica l'APK gia' in distpp-release-persoft.apk.
+
+    Serve quando una delle due destinazioni non era disponibile al primo giro. Ricompilare
+    produrrebbe byte diversi con lo stesso numero di versione — e due APK diversi che si
+    chiamano uguale sono il modo piu' rapido per non capire piu' cosa c'e' sul telefono.
+
 .EXAMPLE
     .\tools\pubblica\pubblica-aggiornamento.ps1 -Note "Unione panoramiche piu' veloce."
 #>
@@ -34,7 +41,8 @@ param(
     [string]$Note = "Miglioramenti e correzioni di Luna Timelapse.",
     [string]$Destinazione = "J:\lunaultra",
     [int]$BuildNumber = 0,
-    [switch]$SoloSito
+    [switch]$SoloSito,
+    [switch]$SaltaBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,7 +75,7 @@ function Native {
 # ---------------------------------------------------------------- numero di build
 # versionCode = 1 + BuildNumber. Deve superare tutto cio' che e' gia' in giro, altrimenti
 # Android rifiuta l'aggiornamento senza tante spiegazioni.
-if ($BuildNumber -le 0) {
+if ($BuildNumber -le 0 -and -not $SaltaBuild) {
     $daSito = 0
     try {
         # Niente `Get-Date -UFormat %s`: su una macchina italiana torna "1788024700,88734" e il
@@ -87,15 +95,17 @@ if ($BuildNumber -le 0) {
     }
     $BuildNumber = ([Math]::Max($daSito, $daCi)) + 1
 }
-Step "Build numero $BuildNumber (versionCode $(1 + $BuildNumber))"
-
 # ---------------------------------------------------------------- compila e firma
-Step "Compilo e firmo col token Certum"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass `
-    -File (Join-Path $repo 'tools\firma\firma-apk.ps1') -BuildNumber $BuildNumber
-if ($LASTEXITCODE -ne 0) { Fail "Compilazione o firma non riuscita." }
-
 $apk = Join-Path $repo 'dist\app-release-persoft.apk'
+if ($SaltaBuild) {
+    Step "Pubblico l'APK gia' firmata, senza ricompilare"
+} else {
+    Step "Build numero $BuildNumber (versionCode $(1 + $BuildNumber))"
+    Step "Compilo e firmo col token Certum"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $repo 'tools\firma\firma-apk.ps1') -BuildNumber $BuildNumber
+    if ($LASTEXITCODE -ne 0) { Fail "Compilazione o firma non riuscita." }
+}
 if (-not (Test-Path -LiteralPath $apk)) { Fail "APK firmata non trovata: $apk" }
 
 # ---------------------------------------------------------------- strumenti
@@ -127,7 +137,10 @@ $badging = & $aapt dump badging $apk 2>&1 | Select-String "^package: name=" | Se
 if (-not $badging) { Fail "Non riesco a leggere la versione dell'APK." }
 $versioneCodice = [int]([regex]::Match($badging.ToString(), "versionCode='(\d+)'").Groups[1].Value)
 $versioneNome = [regex]::Match($badging.ToString(), "versionName='([^']+)'").Groups[1].Value
-if ($versioneCodice -ne (1 + $BuildNumber)) {
+if ($SaltaBuild) {
+    $BuildNumber = $versioneCodice - 1
+    Step "L'APK gia' firmata dichiara la versione $versioneNome (versionCode $versioneCodice)"
+} elseif ($versioneCodice -ne (1 + $BuildNumber)) {
     Fail "L'APK ha versionCode $versioneCodice invece di $(1 + $BuildNumber): la build non ha visto LUNA_BUILD_NUMBER."
 }
 
@@ -141,10 +154,19 @@ $manifestNuovo = [ordered]@{
 }
 
 # ---------------------------------------------------------------- sito
+# Una destinazione che manca non deve buttare via una build gia' firmata: il sito e la
+# release GitHub sono due strade per lo stesso file, e se una e' chiusa si prende l'altra.
+# Alla fine si dice con chiarezza cosa e' andato dove, e si fallisce solo se non e' andato
+# da nessuna parte.
 $radice = Split-Path -Qualifier $Destinazione
-if (-not (Test-Path -LiteralPath "$radice\")) {
-    Fail "Il disco $radice non e' disponibile: monta la webroot di persoft.it prima di pubblicare."
+$sitoDisponibile = Test-Path -LiteralPath "$radice\"
+$sitoFatto = $false
+if (-not $sitoDisponibile) {
+    Write-Host ("ATTENZIONE: il disco {0} non e' montato, salto il sito e pubblico solo su GitHub." -f $radice) -ForegroundColor Yellow
+    Write-Host "           Quando il disco torna, pubblica quella gia' firmata senza ricompilare:" -ForegroundColor Yellow
+    Write-Host "           .\tools\pubblica\pubblica-aggiornamento.ps1 -SaltaBuild -SoloSito" -ForegroundColor Yellow
 }
+if ($sitoDisponibile) {
 if (-not (Test-Path -LiteralPath $Destinazione)) {
     New-Item -ItemType Directory -Path $Destinazione -Force | Out-Null
 }
@@ -161,8 +183,11 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'pagina-aggiornamenti.html') `
     -Destination (Join-Path $Destinazione 'index.html') -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'htaccess-lunaultra') `
     -Destination (Join-Path $Destinazione '.htaccess') -Force
+$sitoFatto = $true
+}
 
 # ---------------------------------------------------------------- GitHub
+$gitHubFatto = $false
 if (-not $SoloSito) {
     Step "Pubblico la release '$tagRelease' su GitHub"
     # Tag a se' stante, separato dagli `apk-<branch>` della CI: quelle sono build di sviluppo
@@ -186,14 +211,29 @@ da sola da li': questa release serve a chi vuole scaricarla a mano.
         gh release create $tagRelease --repo $repoGitHub `
             --title "Luna Timelapse $versioneNome (Persoft)" --notes $note $copia
     }
-    if ($esito -ne 0) { Fail "Pubblicazione della release GitHub non riuscita (exit $esito)." }
+    if ($esito -ne 0) {
+        if (-not $sitoFatto) { Fail "Pubblicazione della release GitHub non riuscita (exit $esito)." }
+        Write-Host "ATTENZIONE: la release GitHub non e' riuscita (exit $esito), ma il sito e' aggiornato." -ForegroundColor Yellow
+    } else {
+        $gitHubFatto = $true
+    }
     Remove-Item -LiteralPath $copia -Force -ErrorAction SilentlyContinue
+}
+
+if (-not $sitoFatto -and -not $gitHubFatto) {
+    Fail "Nessuna delle due destinazioni ha accettato la build. L'APK firmata resta in $apk."
 }
 
 Write-Host ""
 Write-Host "Pubblicata Luna Timelapse $versioneNome (versionCode $versioneCodice)" -ForegroundColor Green
 Write-Host "SHA-256: $hash" -ForegroundColor Cyan
-Write-Host "Sito   : $urlBase/" -ForegroundColor Cyan
-if (-not $SoloSito) {
+if ($sitoFatto) {
+    Write-Host "Sito   : $urlBase/" -ForegroundColor Cyan
+} else {
+    Write-Host "Sito   : NON pubblicato (disco non montato)" -ForegroundColor Yellow
+}
+if ($gitHubFatto) {
     Write-Host "GitHub : https://github.com/$repoGitHub/releases/tag/$tagRelease" -ForegroundColor Cyan
+} elseif (-not $SoloSito) {
+    Write-Host "GitHub : NON pubblicato" -ForegroundColor Yellow
 }

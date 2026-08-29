@@ -1,3 +1,9 @@
+// Esplicito, e non `java.util.Properties` scritto per intero più sotto: dentro uno script Gradle
+// `java` è anche il nome dell'estensione del plugin Java, e a seconda di come vengono generati
+// gli accessori quel nome vince sul package — con un «Unresolved reference: util» che non dice
+// niente. In CI passava, su questa macchina no.
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -10,7 +16,8 @@ plugins {
  * Android rifiuta di installare sopra una versione uguale o più recente, e con un numero fisso
  * ogni aggiornamento sarebbe un reinstall a mano.
  */
-val buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toIntOrNull() ?: 0
+val buildNumber = (System.getenv("LUNA_BUILD_NUMBER") ?: System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+    .toIntOrNull() ?: 0
 val gitSha = System.getenv("GITHUB_SHA") ?: "local"
 
 /**
@@ -37,7 +44,7 @@ val gitBranch = System.getenv("GITHUB_REF_NAME") ?: "local"
  * pezzi può firmare aggiornamenti che il telefono installa sopra l'app vera senza chiedere
  * niente a nessuno, ed è esattamente la ragione per cui Android si fida della firma.
  */
-val keystoreProperties = java.util.Properties().apply {
+val keystoreProperties = Properties().apply {
     val local = rootProject.file("keystore.properties")
     if (local.isFile) local.inputStream().use { load(it) }
 }
@@ -52,6 +59,17 @@ val persoftKeyAlias = signingSetting("keyAlias", "SIGNING_KEY_ALIAS")
 val persoftKeyPassword = signingSetting("keyPassword", "SIGNING_KEY_PASSWORD")
 val signedByPersoft = persoftStore != null && persoftStorePassword != null &&
     persoftKeyAlias != null && persoftKeyPassword != null
+
+/**
+ * La firma la mette qualcun altro, dopo.
+ *
+ * La chiave Persoft di questo progetto vive su un token hardware Certum e non è esportabile:
+ * Gradle non può usarla, perché non esiste nessun file da dargli. Con questa variabile la build
+ * di release esce **non firmata** e ci pensa `tools\firma\firma-apk.ps1`, che parla col token via
+ * PKCS#11. Farla uscire firmata di debug e poi rifirmarla sopra sarebbe un modo per dimenticarsi,
+ * un giorno, di aver distribuito quella di debug.
+ */
+val firmaEsterna = !System.getenv("LUNA_FIRMA_ESTERNA").isNullOrBlank()
 
 android {
     namespace = "it.persoft.lunaultra"
@@ -69,7 +87,7 @@ android {
         buildConfigField("long", "BUILT_AT_MS", "${System.currentTimeMillis()}L")
         // Con che chiave è uscito questo APK. Dal telefono non si vede in nessun altro modo, e
         // quando un aggiornamento viene rifiutato la prima domanda è proprio questa.
-        buildConfigField("boolean", "SIGNED_BY_PERSOFT", "$signedByPersoft")
+        buildConfigField("boolean", "SIGNED_BY_PERSOFT", "${signedByPersoft || firmaEsterna}")
     }
 
     /**
@@ -127,12 +145,14 @@ android {
         // ottimizzazioni, e Play Protect ci mette il naso a ogni installazione. Una release
         // firmata con una chiave vera è un'app come le altre.
         release {
-            signingConfig = if (signedByPersoft) {
-                signingConfigs.getByName("persoft")
-            } else {
+            signingConfig = when {
+                // Con LUNA_FIRMA_ESTERNA l'APK esce nudo: la firma la mette il token Certum
+                // subito dopo, e l'output si chiama app-release-unsigned.apk.
+                firmaEsterna -> null
+                signedByPersoft -> signingConfigs.getByName("persoft")
                 // Senza chiave si firma con quella di sviluppo. L'APK si installa lo stesso, e
                 // `SIGNED_BY_PERSOFT` dice la verità a chi lo guarda dal telefono.
-                signingConfigs.getByName("debug")
+                else -> signingConfigs.getByName("debug")
             }
             isMinifyEnabled = true
             isShrinkResources = true

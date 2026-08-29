@@ -41,6 +41,7 @@ import it.persoft.lunaultra.protocol.LunaProtocolCodes
 import it.persoft.lunaultra.BuildConfig
 import it.persoft.lunaultra.ui.MainViewModel
 import it.persoft.lunaultra.ui.UpdateUiState
+import it.persoft.lunaultra.update.UpdateChannel
 import it.persoft.lunaultra.ui.buildDateLabel
 import it.persoft.lunaultra.ui.components.ButtonLabel
 import it.persoft.lunaultra.ui.components.Hint
@@ -874,15 +875,44 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 // La data dice tutto quello che serve: «di stamattina» o «di tre giorni fa».
                 // Il commit resta nel log per chi sviluppa.
                 LabeledValue("Build installata", buildDateLabel(BuildConfig.BUILT_AT_MS))
-                LabeledValue("Branch controllato", effective)
-                OutlinedTextField(
-                    value = branch,
-                    onValueChange = { branch = it; viewModel.setUpdateBranch(it) },
-                    label = { Text("Branch degli aggiornamenti") },
-                    placeholder = { Text(BuildConfig.GIT_BRANCH) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                LabeledValue("Versione", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                LabeledValue(
+                    "Firma",
+                    if (BuildConfig.SIGNED_BY_PERSOFT) "Persoft" else "sviluppo",
+                    valueColor = if (BuildConfig.SIGNED_BY_PERSOFT) Luna.Ok else Luna.Warn,
                 )
+
+                // I due canali non sono intercambiabili sullo stesso telefono: hanno firme
+                // diverse, e Android non installa l'una sopra l'altra. Il selettore sta qui
+                // perché la scelta si fa una volta, non a ogni controllo.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    val canale = settings.updateChannel
+                    UpdateChannel.entries.forEach { scelta ->
+                        if (scelta == canale) {
+                            Button(onClick = {}, modifier = Modifier.weight(1f)) { Text(scelta.etichetta) }
+                        } else {
+                            OutlinedButton(
+                                onClick = { viewModel.setUpdateChannel(scelta) },
+                                modifier = Modifier.weight(1f),
+                            ) { Text(scelta.etichetta) }
+                        }
+                    }
+                }
+
+                if (settings.updateChannel == UpdateChannel.GITHUB) {
+                    LabeledValue("Branch controllato", effective)
+                    OutlinedTextField(
+                        value = branch,
+                        onValueChange = { branch = it; viewModel.setUpdateBranch(it) },
+                        label = { Text("Branch degli aggiornamenti") },
+                        placeholder = { Text(BuildConfig.GIT_BRANCH) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 val updateState by viewModel.update.collectAsState()
                 Button(
                     onClick = viewModel::checkForUpdateNow,
@@ -893,7 +923,7 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                 }
                 when (val state = updateState) {
                     is UpdateUiState.Checking -> {
-                        LabeledValue("Stato", "controllo la release di ${state.branch}…")
+                        LabeledValue("Stato", "controllo su ${state.branch}…")
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     }
                     is UpdateUiState.Downloading -> {
@@ -919,18 +949,27 @@ fun SettingsScreen(viewModel: MainViewModel, onOpenDiagnostics: () -> Unit) {
                     is UpdateUiState.ReadyToInstall ->
                         LabeledValue(
                             "Stato",
-                            state.publishedAtMs?.let { "scaricata la build del ${buildDateLabel(it)} · conferma l'installazione" }
-                                ?: "scaricata la build più recente · conferma l'installazione",
+                            state.publishedAtMs?.let { "scaricata la build del ${buildDateLabel(it)} · installazione in corso" }
+                                ?: "scaricata la build più recente · installazione in corso",
                         )
                     is UpdateUiState.UpToDate -> LabeledValue("Stato", "già all'ultima build")
                     is UpdateUiState.Failed -> LabeledValue("Stato", state.reason, valueColor = Luna.Warn)
                     UpdateUiState.Idle -> Unit
                 }
                 Hint(
-                    "Vuoto significa il branch che ha prodotto questo APK. All'avvio l'app legge " +
-                        "la release di quel branch e propone l'aggiornamento se il commit è " +
-                        "cambiato: cambiando questo campo si passa al lavoro di un altro ramo " +
-                        "senza reinstallare l'APK a mano.",
+                    if (settings.updateChannel == UpdateChannel.PERSOFT) {
+                        "Il sito è il canale della versione distribuita, firmata col certificato " +
+                            "Persoft: all'avvio l'app legge il manifest, confronta il numero di " +
+                            "build e scarica solo se ce n'è una più recente. Da Android 12 " +
+                            "l'installazione chiede conferma finché non è stata l'app stessa a " +
+                            "installare la versione precedente; dopo, passa in silenzio."
+                    } else {
+                        "La release GitHub è il canale di sviluppo: vuoto significa il branch che " +
+                            "ha prodotto questo APK, e cambiando il campo si passa al lavoro di un " +
+                            "altro ramo senza reinstallare a mano. È firmata con la chiave di " +
+                            "sviluppo, non con quella Persoft: per tornare al canale del sito " +
+                            "servirà disinstallare una volta."
+                    },
                 )
             }
         }

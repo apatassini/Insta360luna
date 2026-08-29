@@ -55,6 +55,8 @@ import it.persoft.lunaultra.timelapse.ShootingMode
 import it.persoft.lunaultra.timelapse.ShotAngle
 import it.persoft.lunaultra.timelapse.TimelapseSequence
 import it.persoft.lunaultra.timelapse.Waypoint
+import it.persoft.lunaultra.update.ApkInstaller
+import it.persoft.lunaultra.update.UpdateChannel
 import it.persoft.lunaultra.update.UpdateManager
 import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlin.math.abs
@@ -444,6 +446,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (updateCheckStarted) return
         updateCheckStarted = true
         installUpdate = onReadyToInstall
+        // L'esito dell'installazione arriva da un ricevitore, fuori da questa catena: qui lo si
+        // riporta nel log e sullo schermo, che sono i due posti dove lo si va a cercare.
+        viewModelScope.launch {
+            ApkInstaller.esiti.collect { esito ->
+                container.log.info("AGGIORNAMENTI · INSTALLAZIONE", esito)
+                showMessage(esito)
+            }
+        }
         runUpdateCheck(onReadyToInstall)
     }
 
@@ -461,8 +471,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun runUpdateCheck(onReadyToInstall: (File) -> Unit, attempt: Int = 1) {
         updateJob?.cancel()
         updateJob = viewModelScope.launch {
+            val channel = settings.value.updateChannel
             val branch = settings.value.updateBranch.ifBlank { BuildConfig.GIT_BRANCH }
-            _update.value = UpdateUiState.Checking(branch)
+            // Quello che si legge a schermo: col canale del sito il nome del ramo non vuol dire
+            // niente, perché lì sopra c'è una versione sola.
+            val sorgente = if (channel == UpdateChannel.PERSOFT) channel.etichetta else branch
+            _update.value = UpdateUiState.Checking(sorgente)
             // Con che chiave e' firmata questa build sta nel log, in cima, perche' dal telefono
             // non si vede in nessun altro modo — e quando un aggiornamento viene rifiutato con
             // «il pacchetto e' in conflitto» la prima cosa da sapere e' se le due build hanno la
@@ -470,23 +484,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val firma = if (BuildConfig.SIGNED_BY_PERSOFT) "firma Persoft" else "firma di sviluppo"
             container.log.info(
                 "AGGIORNAMENTI",
-                "Cerco la release del branch \"$branch\" " +
-                    "(build corrente: ${BuildConfig.GIT_SHA.take(12)}, $firma).",
+                "Cerco aggiornamenti su $sorgente " +
+                    "(build corrente: ${BuildConfig.VERSION_CODE}, ${BuildConfig.GIT_SHA.take(12)}, $firma).",
             )
-            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA, branch) { downloaded, total ->
-                _update.value = UpdateUiState.Downloading(branch, downloaded, total)
+            updateManager.downloadIfAvailable(BuildConfig.GIT_SHA, branch, channel) { downloaded, total ->
+                _update.value = UpdateUiState.Downloading(sorgente, downloaded, total)
             }
                 .onSuccess { update ->
                     if (update != null) {
-                        _update.value = UpdateUiState.ReadyToInstall(branch, update.commitSha, update.publishedAtMs)
+                        _update.value = UpdateUiState.ReadyToInstall(sorgente, update.commitSha, update.publishedAtMs)
                         container.log.info(
                             "AGGIORNAMENTI · SCARICATO",
-                            "Commit ${update.commitSha.take(12)} · ${update.apk.length() / 1024} KB. " +
-                                "Android chiede comunque conferma per installare.",
+                            "${update.commitSha.take(12)} · ${update.apk.length() / 1024} KB. " +
+                                "Da Android 12 la conferma compare solo finché non siamo noi ad " +
+                                "aver installato la versione precedente.",
                         )
                         onReadyToInstall(update.apk)
                     } else {
-                        _update.value = UpdateUiState.UpToDate(branch)
+                        _update.value = UpdateUiState.UpToDate(sorgente)
                     }
                 }
                 .onFailure { error ->
@@ -498,18 +513,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (transient && attempt < UPDATE_RETRY_ATTEMPTS) {
                         container.log.info(
                             "AGGIORNAMENTI",
-                            "La release di \"$branch\" è in ripubblicazione: riprovo fra ${UPDATE_RETRY_DELAY_MS / 1000} secondi.",
+                            "L'aggiornamento su $sorgente è in ripubblicazione: riprovo fra ${UPDATE_RETRY_DELAY_MS / 1000} secondi.",
                         )
-                        _update.value = UpdateUiState.Checking(branch)
+                        _update.value = UpdateUiState.Checking(sorgente)
                         delay(UPDATE_RETRY_DELAY_MS)
                         runUpdateCheck(onReadyToInstall, attempt + 1)
                         return@launch
                     }
                     container.log.warn("Controllo aggiornamenti non riuscito: ${error.message}")
                     _update.value = UpdateUiState.Failed(
-                        branch,
+                        sorgente,
                         if (transient) {
-                            "la release è in ripubblicazione: riprova fra un minuto"
+                            "la pubblicazione è in corso: riprova fra un minuto"
                         } else {
                             error.message ?: "motivo sconosciuto"
                         },
@@ -978,6 +993,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Cambia il ramo di cui cercare gli aggiornamenti; vuoto = quello che ha prodotto l'APK. */
     fun setUpdateBranch(branch: String) {
         container.settingsStore.update { it.copy(updateBranch = branch.trim()) }
+    }
+
+    fun setUpdateChannel(channel: UpdateChannel) {
+        container.settingsStore.update { it.copy(updateChannel = channel) }
     }
 
     /** Scrive il codice dell'azione selfie trovata con la prova qui sopra. */

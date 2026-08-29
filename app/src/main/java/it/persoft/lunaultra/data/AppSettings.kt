@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.data
 
 import it.persoft.lunaultra.protocol.LunaProtocolCodes
+import it.persoft.lunaultra.update.UpdateChannel
 import kotlinx.serialization.Serializable
 
 /**
@@ -234,6 +235,15 @@ data class AppSettings(
      * esattamente quello che toccava fare quando il ramo era scritto nel codice.
      */
     val updateBranch: String = "",
+
+    /**
+     * Da dove arrivano gli aggiornamenti: il sito Persoft o la release del branch su GitHub.
+     *
+     * Di serie il sito, che è il canale della versione firmata e distribuita. La release GitHub
+     * resta a portata per provare un ramo prima che diventi una versione, ma è firmata con la
+     * chiave di sviluppo: passare da un canale all'altro costa una disinstallazione.
+     */
+    val updateChannel: UpdateChannel = UpdateChannel.PERSOFT,
 
     /**
      * A unione riuscita, cancellare gli scatti temporanei e il job? Spento di serie: con le

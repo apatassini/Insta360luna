@@ -13,7 +13,7 @@ dice da dove viene** — «catalogo» vuol dire scritto nelle specifiche e mai v
 | [UNIONE-PANORAMICHE.md](UNIONE-PANORAMICHE.md) | la matematica: proiezioni, allineamento, fotometria, cucitura, fusione multibanda |
 | [PROVE-E-MISURE.md](PROVE-E-MISURE.md) | i tempi misurati build per build, gli autocontrolli GPU, la memoria, i prossimi bersagli |
 | [VICOLI-CIECHI.md](VICOLI-CIECHI.md) | le strade provate che non portavano da nessuna parte, e cosa si è fatto invece |
-| [FIRMA-E-PUBBLICAZIONE.md](FIRMA-E-PUBBLICAZIONE.md) | come si firma l'APK, dove stanno le chiavi, e perché il passaggio costa una disinstallazione |
+| [FIRMA-E-PUBBLICAZIONE.md](FIRMA-E-PUBBLICAZIONE.md) | la firma col token Certum, i due canali di aggiornamento, l'installazione senza conferma, e perché il passaggio costa una disinstallazione |
 
 Il protocollo di controllo (framing UCD2, comandi, codici, galleria, aggiornamenti) sta nel
 [README principale](../README.md).

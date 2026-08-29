@@ -1,0 +1,13 @@
+Options -Indexes
+AddDefaultCharset UTF-8
+
+<Files "aggiornamento.txt">
+    ForceType application/json
+    Header set Cache-Control "no-store, no-cache, must-revalidate"
+</Files>
+
+<Files "LunaTimelapse.apk">
+    ForceType application/vnd.android.package-archive
+    Header set Content-Disposition "attachment; filename=LunaTimelapse.apk"
+    Header set Cache-Control "no-cache"
+</Files>

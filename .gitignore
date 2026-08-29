@@ -14,3 +14,16 @@ app/build/
 keystore.properties
 *.jks
 app/persoft-release.jks
+
+# File di lavoro locali (anteprime, probe, script usa-e-getta)
+_temp/
+
+# PIN del token, mai nel repo
+.tokenpin
+
+# Firma incrementale v4: serve solo ad adb install --incremental
+*.idsig
+
+# La release firmata Persoft si distribuisce dal sito e dalla release GitHub:
+# tenerne una copia da 2 MB nel repo a ogni pubblicazione non serve a nessuno.
+dist/app-release-persoft.apk

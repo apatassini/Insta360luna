@@ -18,7 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
+import it.persoft.lunaultra.update.ApkInstaller
 import androidx.lifecycle.viewmodel.compose.viewModel
 import it.persoft.lunaultra.ui.theme.LunaTheme
 import java.io.File
@@ -65,16 +65,17 @@ class MainActivity : ComponentActivity() {
         openInstaller(apk)
     }
 
+    /**
+     * L'installazione passa da una sessione del `PackageInstaller`, non da `ACTION_VIEW`.
+     *
+     * È l'unica strada che permette ad Android 12 e successivi di installare l'aggiornamento
+     * senza chiedere conferma: vedi [ApkInstaller]. Quando il sistema la conferma la vuole
+     * comunque — la prima volta, sempre — arriva al ricevitore, che apre la schermata.
+     */
     private fun openInstaller(apk: File) {
-        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        ApkInstaller.installa(this, apk)?.let { motivo ->
+            Toast.makeText(this, "Installazione non disponibile: $motivo", Toast.LENGTH_LONG).show()
         }
-        runCatching { startActivity(intent) }
-            .onFailure {
-                Toast.makeText(this, "Installazione non disponibile: ${it.message}", Toast.LENGTH_LONG).show()
-            }
     }
 }
 

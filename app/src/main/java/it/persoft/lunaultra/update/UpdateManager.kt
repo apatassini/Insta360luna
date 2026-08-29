@@ -50,12 +50,25 @@ class UpdateManager(context: Context) {
     suspend fun downloadIfAvailable(
         currentCommit: String = BuildConfig.GIT_SHA,
         branch: String = BuildConfig.GIT_BRANCH,
+        channel: UpdateChannel = UpdateChannel.PERSOFT,
         progress: DownloadProgress? = null,
     ): Result<DownloadedUpdate?> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val release = parseRelease(readText(releaseApi(branch)))
-                if (sameCommit(release.commitSha, currentCommit)) return@runCatching null
+                val release = when (channel) {
+                    // Il manifest del sito non va mai in cache per contratto (`.htaccess` dice
+                    // no-store), ma la coda mai vista costa nulla ed elimina anche le cache dei
+                    // proxy mobili, che quel contratto non lo hanno firmato.
+                    UpdateChannel.PERSOFT -> parsePersoftManifest(readText(cacheBusted(PERSOFT_MANIFEST)))
+                    UpdateChannel.GITHUB -> parseRelease(readText(releaseApi(branch)))
+                }
+                val giaAggiornato = when (channel) {
+                    // Il sito dichiara la versione, non il commit: il confronto è fra numeri di
+                    // build, lo stesso che farà Android al momento di installare.
+                    UpdateChannel.PERSOFT -> (release.versionCode ?: 0L) <= installedVersionCode()
+                    UpdateChannel.GITHUB -> sameCommit(release.commitSha, currentCommit)
+                }
+                if (giaAggiornato) return@runCatching null
 
                 val directory = File(appContext.cacheDir, "updates").apply { mkdirs() }
                 val target = File(directory, "luna-${release.commitSha.take(12)}.apk")
@@ -259,13 +272,63 @@ class UpdateManager(context: Context) {
         val downloadUrl: String,
         val sha256: String?,
         val publishedAtMs: Long? = null,
+        /** Solo per il canale Persoft: il manifest del sito dichiara la versione, non il commit. */
+        val versionCode: Long? = null,
+        val versionName: String? = null,
+        val note: String? = null,
     )
+
+    @Suppress("DEPRECATION")
+    private fun installedVersionCode(): Long {
+        val info = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            info.versionCode.toLong()
+        }
+    }
 
     companion object {
         private val JSON = Json { ignoreUnknownKeys = true }
 
         private const val RELEASES_BY_TAG =
             "https://api.github.com/repos/apatassini/Insta360luna/releases/tags/"
+
+        /**
+         * Il canale di distribuzione: una cartella sul sito con l'APK e un manifest che ne
+         * dichiara versione e impronta. È lo stesso modello di ViewerImage per Android.
+         */
+        const val PERSOFT_MANIFEST = "https://www.persoft.it/lunaultra/aggiornamento.txt"
+
+        /**
+         * Il manifest del sito, negli stessi cinque campi di ViewerImage.
+         *
+         * Il commit qui non c'è e non serve: a dire se una build è più recente basta il
+         * `versionCode`, che è anche il solo numero che Android guarda quando decide se
+         * installare sopra. Si tiene comunque un `commitSha` sintetico perché è quello che dà
+         * il nome al file scaricato, e due versioni diverse devono avere due nomi diversi.
+         */
+        internal fun parsePersoftManifest(body: String): ReleaseInfo {
+            val root = JSON.parseToJsonElement(body).jsonObject
+            val versionCode = root["versionCode"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                ?.takeIf { it > 0 }
+                ?: error("Il manifest non dichiara la versione")
+            val url = root["apkUrl"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.startsWith("https://") }
+                ?: error("Link APK non valido")
+            val versionName = root["versionName"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            val digest = root["sha256"]?.jsonPrimitive?.contentOrNull?.takeIf { it.length == 64 }
+                ?: error("Il manifest non dichiara l'impronta SHA-256")
+            val note = root["note"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            return ReleaseInfo(
+                commitSha = "persoft-$versionCode",
+                downloadUrl = url,
+                sha256 = digest,
+                versionCode = versionCode,
+                versionName = versionName,
+                note = note,
+            )
+        }
 
         /**
          * Branch usato quando l'APK non sa da dove viene: compilazione locale, o impostazione

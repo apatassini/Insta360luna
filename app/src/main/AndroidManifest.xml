@@ -43,7 +43,7 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Necessario per consegnare ad Android l'APK scaricato dalla release GitHub. -->
+    <!-- Necessario per installare l'APK scaricato dal canale di aggiornamento. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
@@ -92,6 +92,20 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!--
+            L'esito della sessione di installazione. Arriva qui anche la richiesta di conferma,
+            quando il sistema non se la sente di installare da solo: la prima volta capita
+            sempre, perché finché non siamo noi ad aver installato la versione precedente
+            Android non ci considera installer di questa app.
+        -->
+        <receiver
+            android:name=".update.EsitoInstallazione"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="it.persoft.lunaultra.ESITO_INSTALLAZIONE" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

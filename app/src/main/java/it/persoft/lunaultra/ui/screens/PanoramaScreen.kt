@@ -118,7 +118,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                 onCheckedChange = viewModel::setPanoramaSpherical,
             )
             if (sequence.panoramaSpherical && calibration.isValid) {
-                val fov = LunaOptics.fieldOfView(settings.photo.zoomScale, sequence.panoramaAspect)
+                val fov = LunaOptics.fieldOfView(settings.photo.zoomScale, sequence.panoramaAspect, calibration.frameCropFactor)
                 val coverage = sphericalCoverage(
                     panMinimumDeg = calibration.panLimits.minimumDeg,
                     panMaximumDeg = calibration.panLimits.maximumDeg,
@@ -247,7 +247,7 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                     )
                 }
             }
-            val fov = LunaOptics.fieldOfView(settings.photo.zoomScale, sequence.panoramaAspect)
+            val fov = LunaOptics.fieldOfView(settings.photo.zoomScale, sequence.panoramaAspect, calibration.frameCropFactor)
             LabeledValue("Campo visivo", "%.0f° × %.0f° · %s".format(fov.horizontalDegrees, fov.verticalDegrees, fov.lensLabel))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                 Text("Sovrapposizione", style = MaterialTheme.typography.labelSmall, color = Luna.OnSurfaceDim)

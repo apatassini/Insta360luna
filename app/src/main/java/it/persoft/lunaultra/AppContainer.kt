@@ -122,6 +122,19 @@ class AppContainer(context: Context, private val scope: CoroutineScope) {
                 )
             }
         },
+        onFrameCrop = { crop ->
+            // Si sostituisce invece di comporsi: la misura e' sempre riferita al campo visivo
+            // di catalogo, quindi ogni unione ne produce lo stesso valore assoluto.
+            if (kotlin.math.abs(calibrationStore.state.value.frameCropFactor - crop) > 0.005f) {
+                calibrationStore.update { it.withFrameCrop(crop) }
+                log.info(
+                    "RITAGLIO DEL FOTOGRAMMA AGGIORNATO",
+                    "La camera consegna il %.1f%% del fotogramma dichiarato: e' il numero su cui "
+                        .format(crop * 100f) +
+                        "il pianificatore distanziera' gli scatti d'ora in avanti.",
+                )
+            }
+        },
         gimbalScaleNow = {
             val profile = calibrationStore.state.value
             profile.panAngularScale to profile.tiltAngularScale

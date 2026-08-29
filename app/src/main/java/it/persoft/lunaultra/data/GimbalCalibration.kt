@@ -131,6 +131,25 @@ data class GimbalCalibrationProfile(
      */
     val panAngularScale: Float = 1f,
     val tiltAngularScale: Float = 1f,
+
+    /**
+     * Quanta parte del fotogramma dichiarato finisce davvero nel file. 1 significa tutta.
+     *
+     * La focale di catalogo descrive la **lente**, e non è in discussione. Quello che è in
+     * discussione è quanto ne arriva nel JPEG: sull'esemplare vero l'unione misura 77,17° di
+     * campo orizzontale invece degli 81,74° che il conto ottico produce — un ritaglio dell'8%,
+     * che è il margine tenuto per la stabilizzazione.
+     *
+     * Non è un dettaglio da referto: il pianificatore distanzia gli scatti sul campo visivo, e
+     * crederli larghi il 6% più del vero vuol dire togliere il 6% a ogni sovrapposizione. Sulle
+     * file dell'equatore, che si sovrappongono del 20%, non si vede; sulle file inclinate e
+     * sulla cucitura del giro, dove il margine era già poco, diventa una fessura senza foto.
+     *
+     * Si misura in **tangente**, non in gradi, perché così è indipendente dallo zoom: il
+     * rapporto fra le tangenti dei semicampi è la frazione di sensore che la camera consegna, e
+     * vale uguale a 1× come a 12×.
+     */
+    val frameCropFactor: Float = 1f,
 ) {
     val isValid: Boolean
         get() = schemaVersion == CURRENT_SCHEMA && calibratedAtMs > 0L &&
@@ -331,6 +350,16 @@ data class GimbalCalibrationProfile(
         tiltAngularScale = (tiltAngularScale * tiltFactor).coerceIn(MIN_ANGULAR_SCALE, MAX_ANGULAR_SCALE),
     )
 
+    /**
+     * Registra il ritaglio del fotogramma misurato dall'unione.
+     *
+     * Si **sostituisce**, non si compone come la scala del gimbal: la misura è sempre riferita
+     * al campo visivo di catalogo, quindi ogni unione produce lo stesso numero assoluto e
+     * moltiplicarli fra loro lo farebbe scivolare via a ogni panoramica.
+     */
+    fun withFrameCrop(factor: Float): GimbalCalibrationProfile =
+        copy(frameCropFactor = factor.coerceIn(MIN_CROP_FACTOR, 1f))
+
     /** Inversa della curva: trasforma la velocità richiesta nell'intensità da inviare. */
     fun commandForMotionFraction(desiredFraction: Float, panAxis: Boolean): Float {
         if (!isValid || desiredFraction == 0f) return desiredFraction.coerceIn(-1f, 1f)
@@ -384,6 +413,9 @@ data class GimbalCalibrationProfile(
         /** Oltre questi limiti la correzione non è una taratura, è un sintomo. */
         const val MIN_ANGULAR_SCALE = 0.4f
         const val MAX_ANGULAR_SCALE = 2.5f
+
+        /** Sotto questo il "ritaglio" non sarebbe piu un ritaglio ma una misura sbagliata. */
+        const val MIN_CROP_FACTOR = 0.5f
         const val DEFAULT_SETTLE_MS = 260L
         const val MIN_SAMPLES_PER_AXIS = 2
         const val MIN_VALID_POINTS = 8

@@ -134,6 +134,94 @@ class PanoramaPlannerTest {
         assertTrue(pans.all { it >= pan.minimumDeg - 0.01f && it <= pan.maximumDeg + 0.01f })
     }
 
+    /**
+     * La prova che conta su una sferica: che la sfera sia coperta davvero.
+     *
+     * Non guarda come il pianificatore ha deciso — quello cambierebbe il test insieme al codice
+     * — ma campiona la fascia coperta e chiede, per ogni punto, se almeno un fotogramma ci
+     * arriva. Il modello del fotogramma e' quello del pianificatore stesso: copre le latitudini
+     * del proprio campo verticale, e a ogni latitudine copre `campo / cos(lat)` gradi di
+     * longitudine, perche' i meridiani si stringono verso il polo.
+     *
+     * Con i numeri veri del 29 agosto — corsa -57..235 e -57..120, zoom 1x, ritaglio misurato
+     * 0,921 — questo campionamento trovava scoperti i meridiani appena sopra i 40 gradi: la
+     * fila a 50 gradi aveva quattro scatti distanti 93 dove ne copriva 85.
+     */
+    @Test
+    fun `la sfera risulta coperta davvero, campionandola`() {
+        val crop = 0.9214f
+        val plan = PanoramaPlanner.plan(
+            centerPan = 89f,
+            centerTilt = 31.5f,
+            horizontalCoverage = 360f,
+            verticalCoverage = 180f,
+            overlapPercent = 20,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = limits(-57f, 235f, 48f),
+            tiltLimits = limits(-57f, 120f, 31f),
+            frameCropFactor = crop,
+        ).getOrThrow()
+
+        val fov = LunaOptics.fieldOfView(1, PhotoFrameAspect.FOUR_THREE, crop)
+        val bottom = plan.centerTilt - plan.verticalCoverage / 2f
+        val top = plan.centerTilt + plan.verticalCoverage / 2f
+        val scoperti = mutableListOf<String>()
+
+        var lat = bottom + 1f
+        while (lat <= top - 1f) {
+            var lon = 0f
+            while (lon < 360f) {
+                val coperto = plan.waypoints.any { w ->
+                    val dLat = kotlin.math.abs(lat - w.tilt)
+                    if (dLat > fov.verticalDegrees / 2f) return@any false
+                    val cos = kotlin.math.cos(Math.toRadians(lat.toDouble())).toFloat()
+                        .coerceAtLeast(0.02f)
+                    val mezzaLarghezza = (fov.horizontalDegrees / 2f) / cos
+                    val dLon = kotlin.math.abs(((lon - w.pan) % 360f + 540f) % 360f - 180f)
+                    dLon <= mezzaLarghezza
+                }
+                if (!coperto) scoperti += "lat %.0f lon %.0f".format(lat, lon)
+                lon += 2f
+            }
+            lat += 2f
+        }
+
+        assertTrue(
+            "Restano ${scoperti.size} punti senza foto, per esempio ${scoperti.take(5)}",
+            scoperti.isEmpty(),
+        )
+    }
+
+    /**
+     * La cucitura del giro e' una giunzione come le altre e vuole la sua sovrapposizione.
+     *
+     * Con l'arco dei centri pari a `360 - campo`, il primo e l'ultimo scatto si sfioravano: zero
+     * sovrapposizione, e su un'equirettangolare la fessura si vede ai due bordi dell'immagine.
+     */
+    @Test
+    fun `la cucitura del giro nasce con sovrapposizione, non a filo`() {
+        val plan = PanoramaPlanner.plan(
+            centerPan = 89f,
+            centerTilt = 31.5f,
+            horizontalCoverage = 360f,
+            verticalCoverage = 180f,
+            overlapPercent = 20,
+            zoomScale = 1,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = limits(-57f, 235f, 48f),
+            tiltLimits = limits(-57f, 120f, 31f),
+        ).getOrThrow()
+
+        val fov = LunaOptics.fieldOfView(1, PhotoFrameAspect.FOUR_THREE)
+        val fessura = 360f - plan.horizontalCenterSpan
+        assertTrue(
+            "La cucitura resta larga %.1f° contro un fotogramma da %.1f°".format(fessura, fov.horizontalDegrees),
+            fessura < fov.horizontalDegrees - 5f,
+        )
+        assertTrue("i centri restano dentro la corsa", plan.waypoints.all { it.pan in -57f..235f })
+    }
+
     private fun limits(min: Float, max: Float, seconds: Float) = GimbalAxisLimits(
         minimumDeg = min,
         maximumDeg = max,

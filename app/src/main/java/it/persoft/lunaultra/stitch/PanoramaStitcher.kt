@@ -64,6 +64,15 @@ data class StitchReport(
      */
     val centerTiltDegrees: Float = 0f,
     val pixelsPerDegree: Float = 0f,
+    /**
+     * Quanta parte del fotogramma dichiarato la camera consegna davvero, misurata qui.
+     *
+     * Nullo quando le foto non portavano l'inclinazione dalla gravita' e non c'era righello con
+     * cui misurare. Chi riceve questo referto lo scrive nel profilo, come gia' fa con la scala
+     * del gimbal: e' l'unico modo perche' la panoramica dopo nasca con le sovrapposizioni che
+     * le sono state chieste.
+     */
+    val measuredFrameCropFactor: Float? = null,
     val projection: StitchProjection = StitchProjection.EQUIRECTANGULAR,
     /**
      * Le poche righe che dicono se l'unione è andata bene *davvero*, da mostrare in app.
@@ -384,6 +393,13 @@ class PanoramaStitcher(
                 PinholeLens(first.width, first.height, measuredFov)
             } else {
                 declaredLens
+            }
+            // Il ritaglio, in tangente: e' la frazione di fotogramma che la camera consegna, ed
+            // e' quello che serve al pianificatore per distanziare gli scatti su una larghezza
+            // vera invece che su una dichiarata. In gradi non si potrebbe riusare a zoom
+            // diversi; in tangente si', perche' e' una frazione di sensore.
+            val measuredCrop = measuredFov?.let {
+                (tan(it.toRadians() / 2f) / tan(horizontalFovDegrees.toRadians() / 2f)).toFloat()
             }
 
             // La taratura del gimbal, prima di tutto il resto.
@@ -986,6 +1002,7 @@ class PanoramaStitcher(
                     refinements = notes,
                     worstCorrectionDegrees = refinement.worstCorrection,
                     nadirPatchRows = patchedRows,
+                    measuredFrameCropFactor = measuredCrop,
                     centerTiltDegrees = canvas.centerTiltDegrees,
                     pixelsPerDegree = canvas.pixelsPerDegree,
                     projection = canvas.projection,

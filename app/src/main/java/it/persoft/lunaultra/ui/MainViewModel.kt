@@ -1202,7 +1202,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // dalla calibrazione, e il centro è il centro della corsa invece dell'inquadratura
         // attuale — una sfera non ha un davanti, e partire da dove si guarda adesso
         // sprecherebbe metà della corsa da un lato.
-        val fov = LunaOptics.fieldOfView(zoom, seq.panoramaAspect)
+        // Il campo visivo vero, non quello di catalogo: se una panoramica l'ha gia' misurato,
+        // il ritaglio sta nel profilo e da qui in avanti la griglia si distanzia su quello.
+        val fov = LunaOptics.fieldOfView(zoom, seq.panoramaAspect, profile.frameCropFactor)
         val spherical = sphericalCoverage(
             panMinimumDeg = profile.panLimits.minimumDeg,
             panMaximumDeg = profile.panLimits.maximumDeg,
@@ -1234,6 +1236,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 aspect = seq.panoramaAspect,
                 panLimits = profile.panLimits,
                 tiltLimits = profile.tiltLimits,
+                frameCropFactor = profile.frameCropFactor,
             ).getOrThrow()
         }
     }
@@ -2150,6 +2153,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!seq.autoStitchPanorama || shots.size < 2) return
         if (!seq.waypoints.all { it.generatedByPanoramaPlanner }) return
         if (stitchJob?.isActive == true) return
+        // Qui resta il campo visivo **di catalogo**, di proposito: e' il riferimento contro
+        // cui l'unione misura il ritaglio, e passarle un valore gia' corretto renderebbe la
+        // misura relativa a se stessa, scivolando via a ogni panoramica.
         val fov = LunaOptics.fieldOfView(settings.value.photo.zoomScale, seq.panoramaAspect)
         val before = filesBeforePanorama
         val spherical = seq.panoramaSpherical

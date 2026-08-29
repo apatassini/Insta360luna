@@ -30,7 +30,16 @@ data class LensFieldOfView(
 object LunaOptics {
     val zoomStops = listOf(1, 2, 3, 6, 12)
 
-    fun fieldOfView(zoomScale: Int, aspect: PhotoFrameAspect): LensFieldOfView {
+    /**
+     * @param cropFactor quanta parte del fotogramma dichiarato la camera consegna davvero,
+     *   misurata dall'unione e conservata nel profilo del gimbal. Uno significa tutta, ed è il
+     *   valore finché nessuna panoramica l'ha ancora misurato.
+     */
+    fun fieldOfView(
+        zoomScale: Int,
+        aspect: PhotoFrameAspect,
+        cropFactor: Float = 1f,
+    ): LensFieldOfView {
         val zoom = zoomScale.takeIf { it in zoomStops } ?: 1
         val equivalentFocal = CATALOGUE_EQUIVALENT_FOCAL_MM * zoom
         // La focale equivalente è riferita alla diagonale full-frame (43,27 mm). Ricaviamo
@@ -38,8 +47,11 @@ object LunaOptics {
         val ratio = aspect.width / aspect.height
         val equivalentHeight = FULL_FRAME_DIAGONAL_MM / sqrt(ratio * ratio + 1f)
         val equivalentWidth = equivalentHeight * ratio
-        val horizontal = degrees(2.0 * atan(equivalentWidth / (2.0 * equivalentFocal)))
-        val vertical = degrees(2.0 * atan(equivalentHeight / (2.0 * equivalentFocal)))
+        // Il ritaglio si applica in tangente, non in gradi: è una frazione di sensore, e in
+        // gradi non sarebbe la stessa cosa a zoom diversi.
+        val crop = cropFactor.coerceIn(0.5f, 1f)
+        val horizontal = degrees(2.0 * atan(crop * equivalentWidth / (2.0 * equivalentFocal)))
+        val vertical = degrees(2.0 * atan(crop * equivalentHeight / (2.0 * equivalentFocal)))
         return LensFieldOfView(
             zoomScale = zoom,
             equivalentFocalMm = equivalentFocal,
@@ -129,9 +141,11 @@ object PanoramaPlanner {
         aspect: PhotoFrameAspect,
         panLimits: GimbalAxisLimits,
         tiltLimits: GimbalAxisLimits,
+        /** Il ritaglio del fotogramma misurato dall'unione: 1 finché nessuna l'ha misurato. */
+        frameCropFactor: Float = 1f,
     ): Result<PanoramaPlan> {
         require(panLimits.isValid && tiltLimits.isValid) { "Esegui prima la calibrazione completa dei fine corsa" }
-        val fov = LunaOptics.fieldOfView(zoomScale, aspect)
+        val fov = LunaOptics.fieldOfView(zoomScale, aspect, frameCropFactor)
         val overlap = overlapPercent.coerceIn(10, 60) / 100f
         val requestedHorizontal = horizontalCoverage.coerceIn(1f, 360f)
         val requestedVertical = verticalCoverage.coerceIn(0f, 180f)
@@ -141,8 +155,30 @@ object PanoramaPlanner {
         // corsa — e su una sferica quel punto non è nemmeno una cosa che si possa guardare. Qui
         // la posizione attuale è il *desiderio*, e la griglia scivola dentro la corsa restando
         // il più vicino possibile a quel desiderio.
-        val pan = fitAxis(centerPan, requestedHorizontal, fov.horizontalDegrees, panLimits)
-        val tilt = fitAxis(centerTilt, requestedVertical, fov.verticalDegrees, tiltLimits)
+        // Quando la copertura chiesta è il giro intero, la cucitura fra l'ultimo scatto e il
+        // primo è una giunzione come le altre e va trattata come tale: se la corsa lo consente,
+        // i centri si allargano fino a darle la stessa sovrapposizione.
+        val closesTheCircle = requestedHorizontal >= FULL_TURN_DEGREES - CENTER_SPAN_TOLERANCE
+        val seamSpan = if (closesTheCircle) {
+            FULL_TURN_DEGREES - fov.horizontalDegrees * (1f - overlap)
+        } else {
+            0f
+        }
+        val pan = fitAxis(
+            desiredCenter = centerPan,
+            requestedCoverage = requestedHorizontal,
+            fovDegrees = fov.horizontalDegrees,
+            limits = panLimits,
+            minimumSpan = seamSpan,
+            maxCoverage = FULL_TURN_DEGREES,
+        )
+        val tilt = fitAxis(
+            desiredCenter = centerTilt,
+            requestedCoverage = requestedVertical,
+            fovDegrees = fov.verticalDegrees,
+            limits = tiltLimits,
+            maxCoverage = HALF_TURN_DEGREES,
+        )
 
         val horizontalCenterSpan = pan.centerSpan
         val verticalCenterSpan = tilt.centerSpan
@@ -166,11 +202,12 @@ object PanoramaPlanner {
             }
         }.takeIf { it.isNotEmpty() }?.joinToString("; ")
 
-        val columns = shotCount(pan.coverage, fov.horizontalDegrees, overlap)
+        val columns = shotsOverSpan(horizontalCenterSpan, fov.horizontalDegrees, overlap, pan.coverage)
         val rows = if (tilt.coverage <= 0f) 1 else shotCount(tilt.coverage, fov.verticalDegrees, overlap)
         val tilts = positions(startTilt, endTilt, rows)
-        val columnsPerRow = tilts.map { rowTilt ->
-            columnsForRow(rowTilt, pan.coverage, fov.horizontalDegrees, overlap).coerceAtMost(columns)
+        val columnsPerRow = worstLatitudes(tilts, fov.verticalDegrees).map { latitude ->
+            columnsForRow(latitude, horizontalCenterSpan, fov.horizontalDegrees, overlap, pan.coverage)
+                .coerceAtMost(columns)
         }
         val points = buildList {
             tilts.forEachIndexed { row, tilt ->
@@ -240,17 +277,31 @@ object PanoramaPlanner {
         requestedCoverage: Float,
         fovDegrees: Float,
         limits: GimbalAxisLimits,
+        /**
+         * L'arco minimo da usare comunque, se la corsa lo consente.
+         *
+         * Serve al giro che si chiude. Con l'arco dei centri pari a `360° − campo visivo`, il
+         * primo e l'ultimo scatto si sfiorano e basta: la cucitura del giro nasce con
+         * sovrapposizione zero, e qualunque errore del gimbal la trasforma in una fessura — che
+         * su un'equirettangolare si vede ai due bordi dell'immagine, come se mancassero due
+         * pezzi opposti. Allargando i centri fin dove la corsa arriva, quella fessura diventa
+         * una sovrapposizione come le altre.
+         */
+        minimumSpan: Float = 0f,
+        maxCoverage: Float = FULL_TURN_DEGREES,
     ): AxisFit {
         val requestedSpan = (requestedCoverage - fovDegrees).coerceAtLeast(0f)
         val travel = (limits.maximumDeg - limits.minimumDeg).coerceAtLeast(0f)
-        val span = requestedSpan.coerceAtMost(travel)
+        val span = maxOf(requestedSpan, minimumSpan).coerceAtMost(travel)
         val low = limits.minimumDeg + span / 2f
         val high = limits.maximumDeg - span / 2f
         val center = if (low > high) (limits.minimumDeg + limits.maximumDeg) / 2f else desiredCenter.coerceIn(low, high)
         return AxisFit(
             center = center,
             centerSpan = span,
-            coverage = span + fovDegrees,
+            // Il giro non si copre due volte: l'arco allargato serve alla sovrapposizione della
+            // cucitura, non ad annunciare 374° di panoramica.
+            coverage = (span + fovDegrees).coerceAtMost(maxCoverage),
             reduced = requestedSpan - span > CENTER_SPAN_TOLERANCE,
         )
     }
@@ -289,18 +340,85 @@ object PanoramaPlanner {
      * inquadravano quasi la stessa cosa: un minuto buttato per sei volte lo stesso cielo, con
      * l'aggravante che una sovrapposizione al 99% non aiuta l'unione, la confonde.
      *
-     * Il coseno è limitato al minimo: allo zenit esatto varrebbe zero e la divisione non
-     * esisterebbe, mentre uno scatto solo lì basta e avanza.
+     * **Il coseno da usare non è quello del centro della fila.** Un fotogramma non è una riga:
+     * copre mezzo campo verticale sopra e mezzo sotto il proprio centro, e la sua larghezza in
+     * longitudine è la più stretta dove il coseno è più grande — cioè al bordo rivolto verso
+     * l'equatore. Prendere il coseno del centro fa credere il fotogramma più largo di quanto sia
+     * proprio dove è più stretto, e lì restano i buchi: nella panoramica del 29 agosto la fila a
+     * 50,5° ha avuto quattro scatti distanti 92,8° quando al bordo basso ne coprivano 85,7 —
+     * sette gradi di niente, ripetuti tre volte. La fila di cima ne ha avuto uno solo dove ne
+     * servivano tre, ed è il cielo che non si chiude.
+     *
+     * Se la fila scavalca l'equatore il bordo più stretto è l'equatore stesso, dove il coseno
+     * vale uno e la larghezza è il campo visivo puro.
      */
     private fun columnsForRow(
-        tiltDegrees: Float,
-        coverage: Float,
+        worstLatitude: Float,
+        centerSpan: Float,
         frameFov: Float,
         overlap: Float,
+        coverage: Float,
     ): Int {
-        val cosine = cos(abs(tiltDegrees) * PI / 180.0).toFloat().coerceAtLeast(MIN_ROW_COSINE)
+        val cosine = cos(worstLatitude * PI / 180.0).toFloat().coerceAtLeast(MIN_ROW_COSINE)
         val panWidth = (frameFov / cosine).coerceAtMost(FULL_TURN_DEGREES)
-        return shotCount(coverage, panWidth, overlap)
+        return shotsOverSpan(centerSpan, panWidth, overlap, coverage)
+    }
+
+    /**
+     * Quanti scatti servono a percorrere un arco di **centri** lungo [centerSpan].
+     *
+     * È il conto che mancava. `shotCount` ragiona sulla copertura — quanto si vuole vedere — e
+     * ricava l'arco dei centri sottraendo un fotogramma; ma le file inclinate hanno un
+     * fotogramma più largo in longitudine e un arco di centri che resta quello dell'equatore,
+     * perché tutte le file partono e arrivano agli stessi gradi di pan. Chiedere a `shotCount`
+     * quanti scatti servono «per 360° con fotogrammi da 128°» dava una risposta giusta per una
+     * fila che si allargasse, e sbagliata per una che non si allarga: quattro scatti distribuiti
+     * su 278° stanno a 93° l'uno dall'altro, non a 102 come il conto supponeva.
+     *
+     * Qui il vincolo è diretto: il passo fra due centri non deve superare il fotogramma meno la
+     * sovrapposizione voluta.
+     */
+    private fun shotsOverSpan(
+        centerSpan: Float,
+        frameWidth: Float,
+        overlap: Float,
+        coverage: Float,
+    ): Int {
+        // Vicino al polo un fotogramma solo abbraccia tutto il giro: gli altri sarebbero copie
+        // dello stesso cielo, e una sovrapposizione al 99% l'unione la confonde, non la aiuta.
+        if (frameWidth >= coverage) return 1
+        if (centerSpan <= 0f) return 1
+        val step = frameWidth * (1f - overlap)
+        if (step <= 0f) return 1
+        return 1 + ceil(centerSpan / step - RESIDUAL_TOLERANCE).toInt().coerceAtLeast(0)
+    }
+
+    /**
+     * Fin dove ogni fila deve arrivare da sola, in latitudine.
+     *
+     * Le file non lavorano da sole: i fotogrammi si sovrappongono anche in verticale, quindi la
+     * fila a 50° non deve coprire il giro fino al proprio bordo basso — lì sotto ci pensa già la
+     * fila a 12°. Deve coprirlo **da dove la vicina smette**, cioè dal bordo alto del fotogramma
+     * di quella. È il punto in cui i meridiani sono più larghi fra quelli di sua competenza, e
+     * quindi quello che decide quanti scatti servono.
+     *
+     * Prendere il centro della fila, come si faceva, la fa credere più larga di quanto sia
+     * proprio dove è più stretta. Prendere il proprio bordo basso è l'errore opposto: la fila di
+     * cima ne uscirebbe con tre scatti invece di uno, e sarebbero due scatti dello stesso cielo.
+     *
+     * Le file che scavalcano l'equatore rispondono dell'equatore, dove il coseno vale uno.
+     */
+    private fun worstLatitudes(tilts: List<Float>, verticalFov: Float): List<Float> {
+        val half = verticalFov / 2f
+        return tilts.map { tilt ->
+            if (abs(tilt) <= half) return@map 0f          // il fotogramma contiene l'equatore
+            // La vicina verso l'equatore: stessa metà del cielo, inclinazione minore.
+            val neighbour = tilts
+                .filter { it != tilt && (it >= 0f) == (tilt >= 0f) && abs(it) < abs(tilt) }
+                .maxByOrNull { abs(it) }
+            val boundary = if (neighbour != null) abs(neighbour) + half else abs(tilt) - half
+            boundary.coerceIn(abs(tilt) - half, abs(tilt) + half).coerceAtLeast(0f)
+        }
     }
 
     /** Un resto sotto questa frazione di passo non vale uno scatto in più. */
@@ -310,6 +428,7 @@ object PanoramaPlanner {
     private const val MIN_ROW_COSINE = 0.02f
 
     private const val FULL_TURN_DEGREES = 360f
+    private const val HALF_TURN_DEGREES = 180f
 
     private fun positions(start: Float, end: Float, count: Int): List<Float> {
         if (count <= 1) return listOf((start + end) / 2f)

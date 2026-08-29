@@ -107,6 +107,15 @@ class PanoramaStitchJob(
      * gimbal con un profilo salvato: lui misura e lo dice, decide chi lo ha chiamato.
      */
     private val onGimbalScale: (pan: Float, tilt: Float) -> Unit = { _, _ -> },
+    /**
+     * Il ritaglio del fotogramma misurato qui, da scrivere nel profilo.
+     *
+     * Va nella stessa direzione della scala del gimbal: una misura fatta sulle foto che rende
+     * migliore la panoramica successiva. Senza, il pianificatore continua a distanziare gli
+     * scatti su un fotogramma piu' largo di quello vero, e la sovrapposizione chiesta non e'
+     * quella che si ottiene.
+     */
+    private val onFrameCrop: (Float) -> Unit = { },
     /** La taratura del gimbal in vigore adesso: si scrive nei tag e serve a non correggere due volte. */
     private val gimbalScaleNow: () -> Pair<Float, Float> = { 1f to 1f },
 ) {
@@ -882,6 +891,16 @@ class PanoramaStitchJob(
                 tiltScale?.let {
                     GimbalCalibrationProfile.repeatableCorrection(it, scaleAtShot.second, tiltNow)
                 } ?: 1f,
+            )
+        }
+        outcome.report.measuredFrameCropFactor?.let { crop ->
+            onFrameCrop(crop)
+            log.info(
+                "FOTOGRAMMA MISURATO",
+                "La camera consegna il %.1f%% del fotogramma dichiarato. Da adesso il "
+                    .format(crop * 100f) +
+                    "pianificatore distanzia gli scatti su questa larghezza: la sovrapposizione " +
+                    "chiesta diventa quella ottenuta.",
             )
         }
         val unaligned = outcome.report.refinements.count { it.contains("resta dov'era") }

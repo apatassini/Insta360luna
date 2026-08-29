@@ -327,13 +327,15 @@ class GimbalCalibrator(
             // La curva nasce dalla traccia giroscopica a 1 kHz scritta nei proxy LRV. Per ogni
             // intensità si registrano andata e ritorno: l'angolo è quindi misurato direttamente
             // dalla camera e non dipende né dalla corsa dichiarata né dal campo visivo.
-            val panCurve = measureCurveByGyroscope(
+            val panCurve = curvaConRipiego(
                 axis = GimbalCalibrationSample.AXIS_PAN,
+                limits = panLimits,
                 phaseStartPercent = 30,
                 phaseEndPercent = 60,
             )
-            val tiltCurve = measureCurveByGyroscope(
+            val tiltCurve = curvaConRipiego(
                 axis = GimbalCalibrationSample.AXIS_TILT,
+                limits = tiltLimits,
                 phaseStartPercent = 60,
                 phaseEndPercent = 88,
             )
@@ -457,8 +459,47 @@ class GimbalCalibrator(
      * Ogni registrazione contiene due movimenti opposti e la loro media elimina quasi tutto
      * l'errore di frenata. Le prove sulla Luna reale hanno chiuso entro 0,42° a 20/50/80%.
      */
+    /**
+     * La curva col giroscopio, e se non riesce quella contando gli impulsi.
+     *
+     * Il giroscopio da' la scala assoluta senza dipendere da nessun numero di catalogo, ed e'
+     * la strada buona. Ma dipende da una catena lunga — registrare un video, scaricarne il
+     * proxy, ritrovare la traccia, riconoscere due movimenti — e ogni anello puo' rompersi per
+     * conto suo. Quando si rompe, il vecchio conto degli impulsi fra i due fine corsa e'
+     * ancora li' e funziona: e' meno preciso, perche' porta dentro la corsa in gradi di
+     * catalogo, ma una calibrazione un po' storta batte nove minuti buttati.
+     */
+    private suspend fun curvaConRipiego(
+        axis: String,
+        limits: GimbalAxisLimits,
+        phaseStartPercent: Int,
+        phaseEndPercent: Int,
+    ): PulseCurve {
+        val giroscopio = runCatching {
+            measureCurveByGyroscope(axis, limits, phaseStartPercent, phaseEndPercent)
+        }
+        giroscopio.getOrNull()?.let { return it }
+        val motivo = giroscopio.exceptionOrNull()
+        if (motivo is CancellationException) throw motivo
+        log.warn(
+            "CALIBRAZIONE * RIPIEGO ${axisLabel(axis).uppercase()}",
+            "${motivo?.message}\n\n" +
+                "Il giroscopio non ha dato una curva utilizzabile su questo asse: passo al conto " +
+                "degli impulsi fra i due fine corsa, che e' il metodo di prima. Meno preciso, " +
+                "perche' usa la corsa in gradi di catalogo invece di misurarla, ma porta a casa " +
+                "una calibrazione invece di lasciarti senza.",
+        )
+        addFinding(
+            "curva ${axisLabel(axis)}",
+            "ripiego: conto degli impulsi, il giroscopio non ce l'ha fatta",
+            FindingKind.WARN,
+        )
+        return measureCurveByPulses(axis, limits, phaseStartPercent, phaseEndPercent)
+    }
+
     private suspend fun measureCurveByGyroscope(
         axis: String,
+        limits: GimbalAxisLimits,
         phaseStartPercent: Int,
         phaseEndPercent: Int,
     ): PulseCurve {
@@ -473,10 +514,36 @@ class GimbalCalibrator(
         )
 
         INTENSITY_PERCENTAGES.forEachIndexed { index, intensity ->
-            val durationMs = if (intensity <= SLOW_INTENSITY_THRESHOLD) {
-                GYRO_SLOW_MOVEMENT_MS
-            } else {
-                GYRO_MOVEMENT_MS
+            // La durata non e' fissa: si punta a un arco di una ventina di gradi, stimandolo
+            // dalla velocita' gia' misurata a un'intensita' piu' bassa. Con un secondo fisso, al
+            // 100% l'escursione supera i cinquanta gradi e finisce contro il fine corsa; con un
+            // arco costante ci sta a qualunque velocita'.
+            val stimaGradiSecondo = measured.lastOrNull()?.let { (intensitaNota, gradiSecondo) ->
+                if (intensitaNota > 0) gradiSecondo * intensity / intensitaNota else null
+            }
+            val durationMs = when {
+                stimaGradiSecondo == null || stimaGradiSecondo <= 0f ->
+                    if (intensity <= SLOW_INTENSITY_THRESHOLD) GYRO_SLOW_MOVEMENT_MS else GYRO_MOVEMENT_MS
+                else -> (1_000f * GYRO_TARGET_DEGREES / stimaGradiSecondo).toLong()
+                    .coerceIn(GYRO_MIN_MOVEMENT_MS, GYRO_SLOW_MOVEMENT_MS)
+            }
+
+            // Prima di ogni misura si torna in mezzo alla corsa. Senza, l'asse deriva: ogni
+            // andata-e-ritorno lascia un residuo, e dopo qualche intensita' il movimento parte
+            // gia' appoggiato al fine corsa, dove il gimbal non si muove e il giroscopio,
+            // giustamente, non vede niente. E' quello che e' successo all'80, 90 e 100%.
+            val centro = (limits.minimumDeg + limits.maximumDeg) / 2f
+            val dovEra = gimbal.position.value
+            gimbal.moveToPosition(
+                targetPan = if (panAxis) centro else dovEra.pan,
+                targetTilt = if (panAxis) dovEra.tilt else centro,
+                minimumSeconds = 0f,
+            ).onFailure {
+                log.warn(
+                    "CALIBRAZIONE * ${axisLabel(axis).uppercase()} NON RICENTRATO",
+                    "Non sono riuscito a riportare l'asse in mezzo alla corsa prima della misura " +
+                        "al $intensity%: ${it.message}. Provo lo stesso.",
+                )
             }
             _state.value = _state.value.copy(
                 phaseLabel = "Curva giroscopica · ${axisLabel(axis)}",
@@ -1980,6 +2047,18 @@ class GimbalCalibrator(
         /** Durata dei due versi registrati nella misura giroscopica. */
         const val GYRO_MOVEMENT_MS = 1_000L
         const val GYRO_SLOW_MOVEMENT_MS = 2_000L
+
+        /**
+         * Quanti gradi deve coprire ogni movimento della misura.
+         *
+         * Abbastanza da uscire dal rumore del sensore, abbastanza pochi da starci dentro la
+         * corsa anche partendo dal centro: la meta' della corsa verticale e' 88 gradi, quindi
+         * venti lasciano margine per l'andata, il ritorno e l'errore di ritorno.
+         */
+        const val GYRO_TARGET_DEGREES = 20f
+
+        /** Sotto mezzo secondo il movimento e' tutto accelerazione e frenata. */
+        const val GYRO_MIN_MOVEMENT_MS = 500L
 
         /** Scarto andata/ritorno sotto cui la misura reale è considerata ben chiusa. */
         const val GYRO_GOOD_CLOSURE_DEG = 0.6f

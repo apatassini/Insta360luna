@@ -1183,13 +1183,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setPanoramaAspect(aspect: PhotoFrameAspect) =
         container.sequenceStore.update { it.copy(panoramaAspect = aspect) }
 
-    /** Crea la griglia a serpentina solo se tutta la copertura rientra nei fine corsa misurati. */
-    fun createPanoramaPlan() {
+    /**
+     * Gli ingredienti del piano, uguali per l'anteprima e per lo scatto.
+     *
+     * Prima i due li mettevano insieme per conto proprio, e non allo stesso modo: l'anteprima
+     * centrava sempre sulla posizione attuale anche nello scatto sferico, così mostrava «non
+     * entra» su una panoramica che partendo sarebbe andata benissimo.
+     *
+     * Restituisce `null` quando manca la calibrazione, perché lì non c'è niente da pianificare.
+     */
+    private fun panoramaPlan(): Result<PanoramaPlan>? {
         val profile = gimbalCalibration.value
-        if (!profile.isValid) {
-            showMessage("Esegui prima la calibrazione completa dei fine corsa")
-            return
-        }
+        if (!profile.isValid) return null
         val seq = sequence.value
         val current = container.gimbal.position.value
         val zoom = settings.value.photo.zoomScale
@@ -1206,7 +1211,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             horizontalFovDegrees = fov.horizontalDegrees,
             verticalFovDegrees = fov.verticalDegrees,
         )
-        val result = runCatching {
+        return runCatching {
             PanoramaPlanner.plan(
                 centerPan = if (seq.panoramaSpherical) spherical.centerPanDegrees else current.pan,
                 centerTilt = if (seq.panoramaSpherical) spherical.centerTiltDegrees else current.tilt,
@@ -1231,6 +1236,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 tiltLimits = profile.tiltLimits,
             ).getOrThrow()
         }
+    }
+
+    /**
+     * Crea la griglia a serpentina.
+     *
+     * Il centro lo decide il pianificatore, non chi scatta: se da dove si guarda adesso la
+     * copertura chiesta uscirebbe dai fine corsa, la griglia scivola dentro la corsa e il
+     * gimbal ci si porta da solo prima del primo scatto. Chiedere all'utente di «ricentrare»
+     * a mano una sferica non ha senso — una sfera non ha un davanti da inquadrare.
+     */
+    fun createPanoramaPlan() {
+        val result = panoramaPlan()
+        if (result == null) {
+            showMessage("Esegui prima la calibrazione completa dei fine corsa")
+            return
+        }
         result.onSuccess { plan ->
             container.sequenceStore.update {
                 it.copy(
@@ -1241,15 +1262,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             _captureMode.value = CaptureMode.forSequence(ShootingMode.FOTO)
+            val seq = sequence.value
             container.log.info(
                 "PANORAMA PIANIFICATO",
                 buildString {
-                    appendLine("Copertura: ${seq.panoramaHorizontalDegrees.toInt()}° × ${seq.panoramaVerticalDegrees.toInt()}°")
-                    appendLine("Zoom: ${zoom}× · FOV stimato %.1f° × %.1f°".format(
+                    appendLine("Copertura: %.0f° × %.0f°".format(plan.horizontalCoverage, plan.verticalCoverage))
+                    appendLine("Zoom: ${settings.value.photo.zoomScale}× · FOV stimato %.1f° × %.1f°".format(
                         plan.fieldOfView.horizontalDegrees,
                         plan.fieldOfView.verticalDegrees,
                     ))
-                    appendLine("Sovrapposizione: ${seq.panoramaOverlapPercent}%")
+                    appendLine("Centro: pan %.1f° · tilt %.1f°".format(plan.centerPan, plan.centerTilt))
+                    if (plan.recentered) {
+                        appendLine(
+                            "Ricentrato di %.1f° in pan e %.1f° in tilt: da dove guardavi, la griglia usciva dalla corsa. Ci si porta da solo prima del primo scatto."
+                                .format(plan.recenteredPanDegrees, plan.recenteredTiltDegrees),
+                        )
+                    }
+                    plan.warning?.let { appendLine("Attenzione: $it") }
+                    appendLine("Sovrapposizione: ${if (seq.panoramaSpherical) SPHERICAL_OVERLAP_PERCENT else seq.panoramaOverlapPercent}%")
                     appendLine("Griglia: ${plan.columns} × ${plan.rows} · ${plan.totalShots} scatti")
                     append("Scatti per fila: ${plan.columnsPerRow.joinToString("·")}")
                     if (plan.shotsSavedAtPoles > 0) {
@@ -1261,10 +1291,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
             )
             _panoramaPlan.value = plan
-            showMessage("Panorama pronto: ${plan.columns}×${plan.rows}, ${plan.totalShots} scatti")
+            showMessage(
+                buildString {
+                    append("Panorama pronto: ${plan.columns}×${plan.rows}, ${plan.totalShots} scatti")
+                    if (plan.recentered) append(" · mi sposto al centro da solo")
+                },
+            )
         }.onFailure { error ->
             _panoramaPlan.value = null
-            showMessage(error.message ?: "Il panorama non entra nei fine corsa disponibili")
+            showMessage(error.message ?: "Il panorama non si è potuto pianificare")
         }
     }
 
@@ -1280,24 +1315,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Ricalcola il piano senza muovere niente: serve solo a mostrarne le dimensioni. */
     fun refreshPanoramaPreview() {
-        val profile = gimbalCalibration.value
-        if (!profile.isValid) {
-            _panoramaPlan.value = null
-            return
-        }
-        val seq = sequence.value
-        val current = container.gimbal.position.value
-        _panoramaPlan.value = PanoramaPlanner.plan(
-            centerPan = current.pan,
-            centerTilt = current.tilt,
-            horizontalCoverage = seq.panoramaHorizontalDegrees,
-            verticalCoverage = seq.panoramaVerticalDegrees,
-            overlapPercent = seq.panoramaOverlapPercent,
-            zoomScale = settings.value.photo.zoomScale,
-            aspect = seq.panoramaAspect,
-            panLimits = profile.panLimits,
-            tiltLimits = profile.tiltLimits,
-        ).getOrNull()
+        _panoramaPlan.value = panoramaPlan()?.getOrNull()
     }
 
     /** Pianifica e parte: per chi scatta una panoramica, sono un gesto solo. */

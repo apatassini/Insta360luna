@@ -267,8 +267,8 @@ fun PanoramaScreen(viewModel: MainViewModel) {
             if (current == null) {
                 Hint(
                     if (calibration.isValid) {
-                        "Questa copertura non entra nei fine corsa misurati: riduci i gradi, " +
-                            "oppure ricentra la camera prima di riprovare."
+                        "Il piano non è ancora pronto: cambia una delle scelte qui sopra per " +
+                            "farlo ricalcolare."
                     } else {
                         "Il piano si può calcolare solo dopo la calibrazione."
                     },
@@ -306,6 +306,20 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                         .coerceIn(0.05f, 1f),
                 )
                 LabeledValue("Copertura reale", "%.0f° × %.0f°".format(realHorizontal, realVertical))
+                LabeledValue(
+                    "Centro della griglia",
+                    "pan %.0f° · tilt %.0f°".format(current.centerPan, current.centerTilt),
+                )
+                if (current.recentered) {
+                    LabeledValue(
+                        "Ricentraggio",
+                        "%+.0f° pan · %+.0f° tilt, automatico".format(
+                            current.recenteredPanDegrees,
+                            current.recenteredTiltDegrees,
+                        ),
+                        valueColor = Luna.Ok,
+                    )
+                }
                 current.warning?.let { Hint(it) }
                 Button(
                     onClick = viewModel::shootPanorama,
@@ -315,9 +329,16 @@ fun PanoramaScreen(viewModel: MainViewModel) {
                     ButtonLabel(LunaIcons.Panorama, "Scatta ${current.totalShots} foto")
                 }
                 Hint(
-                    "Parte dall'inquadratura attuale, che diventa il centro della panoramica. " +
-                        "La camera percorre la griglia a serpentina e scatta a ogni posizione, " +
-                        "fermandosi il tempo necessario perché l'immagine non venga mossa.",
+                    if (current.recentered) {
+                        "Il centro non è dove stai guardando: da lì la griglia sarebbe uscita " +
+                            "dai fine corsa, quindi l'app lo ha spostato dentro la corsa " +
+                            "restando il più vicino possibile alla tua inquadratura. Il gimbal " +
+                            "ci va da solo prima del primo scatto: non devi ricentrare niente."
+                    } else {
+                        "Il centro della griglia è l'inquadratura attuale. La camera percorre " +
+                            "la griglia a serpentina e scatta a ogni posizione, fermandosi il " +
+                            "tempo necessario perché l'immagine non venga mossa."
+                    },
                 )
             }
         }

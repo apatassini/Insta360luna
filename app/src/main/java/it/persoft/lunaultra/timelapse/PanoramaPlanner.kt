@@ -81,6 +81,15 @@ data class PanoramaPlan(
     val fieldOfView: LensFieldOfView,
     val horizontalCenterSpan: Float,
     val verticalCenterSpan: Float,
+    /** Il centro che la griglia ha davvero, che non è per forza quello chiesto. */
+    val centerPan: Float = 0f,
+    val centerTilt: Float = 0f,
+    /** Di quanto il centro si è spostato rispetto a dove guardava la camera. */
+    val recenteredPanDegrees: Float = 0f,
+    val recenteredTiltDegrees: Float = 0f,
+    /** La copertura che si ottiene davvero: minore di quella chiesta se la corsa non basta. */
+    val horizontalCoverage: Float = 0f,
+    val verticalCoverage: Float = 0f,
     val warning: String? = null,
     /**
      * Quanti scatti ha ogni fila, dal basso verso l'alto.
@@ -94,6 +103,19 @@ data class PanoramaPlan(
 
     /** Quanti scatti si sono risparmiati stringendo le file alte. */
     val shotsSavedAtPoles: Int get() = columns * rows - totalShots
+
+    /**
+     * Il centro si è dovuto spostare rispetto a dove guardava la camera.
+     *
+     * Non è un errore ed è la cosa normale su una sferica: serve solo a dirlo, perché il gimbal
+     * si muove prima del primo scatto e chi guarda deve sapere perché.
+     */
+    val recentered: Boolean
+        get() = abs(recenteredPanDegrees) > RECENTER_TOLERANCE || abs(recenteredTiltDegrees) > RECENTER_TOLERANCE
+
+    private companion object {
+        const val RECENTER_TOLERANCE = 0.5f
+    }
 }
 
 object PanoramaPlanner {
@@ -113,43 +135,42 @@ object PanoramaPlanner {
         val overlap = overlapPercent.coerceIn(10, 60) / 100f
         val requestedHorizontal = horizontalCoverage.coerceIn(1f, 360f)
         val requestedVertical = verticalCoverage.coerceIn(0f, 180f)
-        val horizontalCenterSpan = (requestedHorizontal - fov.horizontalDegrees).coerceAtLeast(0f)
-        val verticalCenterSpan = (requestedVertical - fov.verticalDegrees).coerceAtLeast(0f)
-        val startPan = centerPan - horizontalCenterSpan / 2f
-        val endPan = centerPan + horizontalCenterSpan / 2f
-        val startTilt = centerTilt - verticalCenterSpan / 2f
-        val endTilt = centerTilt + verticalCenterSpan / 2f
 
-        if (startPan < panLimits.minimumDeg || endPan > panLimits.maximumDeg) {
-            val available = fov.horizontalDegrees + 2f * minOf(
-                centerPan - panLimits.minimumDeg,
-                panLimits.maximumDeg - centerPan,
-            ).coerceAtLeast(0f)
-            return Result.failure(
-                IllegalArgumentException(
-                    "Da questa posizione il panorama da ${requestedHorizontal.toInt()}° non entra: " +
-                        "massimo centrato circa ${available.toInt()}°. Sposta l'inquadratura iniziale.",
-                ),
-            )
-        }
-        if (startTilt < tiltLimits.minimumDeg || endTilt > tiltLimits.maximumDeg) {
-            val available = fov.verticalDegrees + 2f * minOf(
-                centerTilt - tiltLimits.minimumDeg,
-                tiltLimits.maximumDeg - centerTilt,
-            ).coerceAtLeast(0f)
-            return Result.failure(
-                IllegalArgumentException(
-                    "Da questa inclinazione la copertura verticale da ${requestedVertical.toInt()}° non entra: " +
-                        "massimo centrato circa ${available.toInt()}°.",
-                ),
-            )
-        }
+        // Il centro non è un dato: è una conseguenza. Chi scatta inquadra quello che gli
+        // interessa, non si mette a cercare a mano il punto da cui la griglia sta dentro i fine
+        // corsa — e su una sferica quel punto non è nemmeno una cosa che si possa guardare. Qui
+        // la posizione attuale è il *desiderio*, e la griglia scivola dentro la corsa restando
+        // il più vicino possibile a quel desiderio.
+        val pan = fitAxis(centerPan, requestedHorizontal, fov.horizontalDegrees, panLimits)
+        val tilt = fitAxis(centerTilt, requestedVertical, fov.verticalDegrees, tiltLimits)
 
-        val columns = shotCount(requestedHorizontal, fov.horizontalDegrees, overlap)
-        val rows = if (requestedVertical <= 0f) 1 else shotCount(requestedVertical, fov.verticalDegrees, overlap)
+        val horizontalCenterSpan = pan.centerSpan
+        val verticalCenterSpan = tilt.centerSpan
+        val startPan = pan.center - horizontalCenterSpan / 2f
+        val endPan = pan.center + horizontalCenterSpan / 2f
+        val startTilt = tilt.center - verticalCenterSpan / 2f
+        val endTilt = tilt.center + verticalCenterSpan / 2f
+
+        val warning = buildList {
+            if (pan.reduced) {
+                add(
+                    "orizzontale ridotta da ${requestedHorizontal.toInt()}° a ${pan.coverage.toInt()}°: " +
+                        "la corsa del pan è ${panLimits.spanDeg.toInt()}°",
+                )
+            }
+            if (tilt.reduced) {
+                add(
+                    "verticale ridotta da ${requestedVertical.toInt()}° a ${tilt.coverage.toInt()}°: " +
+                        "la corsa del tilt è ${tiltLimits.spanDeg.toInt()}°",
+                )
+            }
+        }.takeIf { it.isNotEmpty() }?.joinToString("; ")
+
+        val columns = shotCount(pan.coverage, fov.horizontalDegrees, overlap)
+        val rows = if (tilt.coverage <= 0f) 1 else shotCount(tilt.coverage, fov.verticalDegrees, overlap)
         val tilts = positions(startTilt, endTilt, rows)
-        val columnsPerRow = tilts.map { tilt ->
-            columnsForRow(tilt, requestedHorizontal, fov.horizontalDegrees, overlap).coerceAtMost(columns)
+        val columnsPerRow = tilts.map { rowTilt ->
+            columnsForRow(rowTilt, pan.coverage, fov.horizontalDegrees, overlap).coerceAtMost(columns)
         }
         val points = buildList {
             tilts.forEachIndexed { row, tilt ->
@@ -179,10 +200,63 @@ object PanoramaPlanner {
                 fieldOfView = fov,
                 horizontalCenterSpan = horizontalCenterSpan,
                 verticalCenterSpan = verticalCenterSpan,
+                centerPan = pan.center,
+                centerTilt = tilt.center,
+                recenteredPanDegrees = pan.center - centerPan,
+                recenteredTiltDegrees = tilt.center - centerTilt,
+                horizontalCoverage = pan.coverage,
+                verticalCoverage = tilt.coverage,
+                warning = warning,
                 columnsPerRow = columnsPerRow,
             ),
         )
     }
+
+    /** Dove finisce il centro di un asse, e quanta copertura ci sta davvero. */
+    private data class AxisFit(
+        val center: Float,
+        val centerSpan: Float,
+        val coverage: Float,
+        val reduced: Boolean,
+    )
+
+    /**
+     * Fa entrare la copertura chiesta dentro la corsa misurata, spostando il centro il meno
+     * possibile.
+     *
+     * La griglia occupa `copertura - campo visivo` gradi di **centri** (il primo scatto vede già
+     * mezzo campo prima del suo centro, l'ultimo mezzo campo dopo), quindi il centro deve stare
+     * nell'intervallo `[min + arco/2, max - arco/2]`. Finché quell'intervallo esiste, si prende
+     * il punto più vicino a dove la camera sta guardando adesso: chi ha inquadrato una cosa
+     * precisa se la ritrova più o meno lì, e chi non ha inquadrato niente non deve fare nulla.
+     *
+     * Quando l'intervallo non esiste — la corsa è più corta della copertura chiesta — non c'è
+     * nessun centro che funzioni: si prende tutta la corsa, centro in mezzo, e la copertura
+     * diventa quella che il gimbal può davvero fare. Meglio una panoramica un po' più stretta
+     * di quella chiesta che un rifiuto con l'invito a spostarsi a mano.
+     */
+    private fun fitAxis(
+        desiredCenter: Float,
+        requestedCoverage: Float,
+        fovDegrees: Float,
+        limits: GimbalAxisLimits,
+    ): AxisFit {
+        val requestedSpan = (requestedCoverage - fovDegrees).coerceAtLeast(0f)
+        val travel = (limits.maximumDeg - limits.minimumDeg).coerceAtLeast(0f)
+        val span = requestedSpan.coerceAtMost(travel)
+        val low = limits.minimumDeg + span / 2f
+        val high = limits.maximumDeg - span / 2f
+        val center = if (low > high) (limits.minimumDeg + limits.maximumDeg) / 2f else desiredCenter.coerceIn(low, high)
+        return AxisFit(
+            center = center,
+            centerSpan = span,
+            coverage = span + fovDegrees,
+            reduced = requestedSpan - span > CENTER_SPAN_TOLERANCE,
+        )
+    }
+
+    /** Sotto mezzo grado la copertura non è stata «ridotta»: è arrotondamento. */
+    private const val CENTER_SPAN_TOLERANCE = 0.5f
 
     /**
      * Quanti scatti servono a coprire [coverage] con fotogrammi larghi [frameFov].

@@ -87,8 +87,10 @@ class PanoramaPlannerTest {
     }
 
     @Test
-    fun `rejects a panorama that cannot be centered at the current position`() {
-        val result = PanoramaPlanner.plan(
+    fun `una panoramica che da qui non ci starebbe viene ricentrata invece che rifiutata`() {
+        // Da -50° una copertura di 270° sborderebbe dal fine corsa: prima era un rifiuto con
+        // l'invito a spostarsi a mano, che su una sferica non vuol dire niente.
+        val plan = PanoramaPlanner.plan(
             centerPan = -50f,
             centerTilt = 0f,
             horizontalCoverage = 270f,
@@ -98,10 +100,38 @@ class PanoramaPlannerTest {
             aspect = PhotoFrameAspect.FOUR_THREE,
             panLimits = pan,
             tiltLimits = tilt,
-        )
+        ).getOrThrow()
 
-        assertTrue(result.isFailure)
-        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("Da questa posizione"))
+        assertTrue("il centro si è spostato", plan.recentered)
+        assertTrue("si è spostato verso l'interno della corsa", plan.centerPan > -50f)
+        // La copertura chiesta resta intera: si è solo scelto da dove partire.
+        assertEquals(270f, plan.horizontalCoverage, 0.5f)
+        val pans = plan.waypoints.map { it.pan }
+        assertTrue("nessuno scatto fuori dal fine corsa", pans.all { it >= pan.minimumDeg - 0.01f })
+        assertTrue("nessuno scatto fuori dal fine corsa", pans.all { it <= pan.maximumDeg + 0.01f })
+    }
+
+    @Test
+    fun `quando la corsa non basta la copertura si riduce e lo dice`() {
+        val plan = PanoramaPlanner.plan(
+            centerPan = 0f,
+            centerTilt = 0f,
+            // 360° con una corsa di 292°: nessun centro può bastare, e l'unica cosa onesta è
+            // prendere tutta la corsa e dichiarare quanto si è ottenuto davvero.
+            horizontalCoverage = 360f,
+            verticalCoverage = 0f,
+            overlapPercent = 30,
+            zoomScale = 3,
+            aspect = PhotoFrameAspect.FOUR_THREE,
+            panLimits = pan,
+            tiltLimits = tilt,
+        ).getOrThrow()
+
+        assertTrue("la copertura ottenuta è minore di quella chiesta", plan.horizontalCoverage < 360f)
+        assertEquals("centro in mezzo alla corsa", 89f, plan.centerPan, 0.5f)
+        assertTrue("lo dichiara", plan.warning.orEmpty().contains("orizzontale ridotta"))
+        val pans = plan.waypoints.map { it.pan }
+        assertTrue(pans.all { it >= pan.minimumDeg - 0.01f && it <= pan.maximumDeg + 0.01f })
     }
 
     private fun limits(min: Float, max: Float, seconds: Float) = GimbalAxisLimits(

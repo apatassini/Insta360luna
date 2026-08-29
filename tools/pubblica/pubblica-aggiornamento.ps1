@@ -70,7 +70,10 @@ function Native {
 if ($BuildNumber -le 0) {
     $daSito = 0
     try {
-        $manifest = Invoke-RestMethod -Uri "$manifestUrl`?t=$([int](Get-Date -UFormat %s))" -TimeoutSec 20
+        # Niente `Get-Date -UFormat %s`: su una macchina italiana torna "1788024700,88734" e il
+        # cast a intero muore sulla virgola. Il conto dei secondi si fa a mano, che non ha lingua.
+        $adesso = [int]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds
+        $manifest = Invoke-RestMethod -Uri "$manifestUrl`?t=$adesso" -TimeoutSec 20
         if ($manifest.versionCode) { $daSito = [int]$manifest.versionCode }
     } catch {
         Write-Host "    (sul sito non c'e' ancora un manifest: parto dalla CI)" -ForegroundColor DarkGray

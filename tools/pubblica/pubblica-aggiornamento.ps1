@@ -99,9 +99,12 @@ if ($BuildNumber -le 0 -and -not $SaltaBuild) {
     # mai sopra la prima, perche' per Android non e' piu' recente.
     $daRelease = 0
     try {
-        $note = & gh release view $tagRelease --repo $repoGitHub --json body --jq '.body' 2>$null
-        if ($note) {
-            $trovato = [regex]::Match([string]$note, 'build (\d+)')
+        # Attenzione al nome: in PowerShell le variabili non distinguono maiuscole e
+        # minuscole, quindi una `$note` qui dentro sovrascriverebbe il parametro `$Note` — e
+        # nel manifest finirebbe la nota della versione precedente invece di quella nuova.
+        $noteRelease = & gh release view $tagRelease --repo $repoGitHub --json body --jq '.body' 2>$null
+        if ($noteRelease) {
+            $trovato = [regex]::Match([string]$noteRelease, 'build (\d+)')
             if ($trovato.Success) { $daRelease = [int]$trovato.Groups[1].Value }
         }
     } catch {
@@ -209,7 +212,8 @@ if (-not $SoloSito) {
     # sotto lo stesso tag vorrebbe dire proporre al telefono un APK che non gli si installa.
     $copia = Join-Path $env:TEMP $nomeApkPubblicato
     Copy-Item -LiteralPath $apk -Destination $copia -Force
-    $note = @"
+    # Stesso motivo del nome qui sopra: mai una $note accanto a un parametro $Note.
+    $noteGitHub = @"
 Luna Timelapse $versioneNome (build $versioneCodice), firmata con il certificato Persoft.
 
 $Note
@@ -223,7 +227,7 @@ da sola da li': questa release serve a chi vuole scaricarla a mano.
     Native { gh release delete $tagRelease --repo $repoGitHub --yes --cleanup-tag } | Out-Null
     $esito = Native {
         gh release create $tagRelease --repo $repoGitHub `
-            --title "Luna Timelapse $versioneNome (Persoft)" --notes $note $copia
+            --title "Luna Timelapse $versioneNome (Persoft)" --notes $noteGitHub $copia
     }
     if ($esito -ne 0) {
         if (-not $sitoFatto) { Fail "Pubblicazione della release GitHub non riuscita (exit $esito)." }

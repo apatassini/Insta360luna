@@ -93,7 +93,21 @@ if ($BuildNumber -le 0 -and -not $SaltaBuild) {
     } catch {
         Write-Host "    (numero di run della CI non leggibile)" -ForegroundColor DarkGray
     }
-    $BuildNumber = ([Math]::Max($daSito, $daCi)) + 1
+    # E la release gia' pubblicata, che il sito puo' non avere: quando una delle due
+    # destinazioni resta indietro, e' l'unica a sapere quale numero e' gia' stato usato.
+    # Senza, due APK diversi finiscono a chiamarsi uguale — e la seconda non si installa
+    # mai sopra la prima, perche' per Android non e' piu' recente.
+    $daRelease = 0
+    try {
+        $note = & gh release view $tagRelease --repo $repoGitHub --json body --jq '.body' 2>$null
+        if ($note) {
+            $trovato = [regex]::Match([string]$note, 'build (\d+)')
+            if ($trovato.Success) { $daRelease = [int]$trovato.Groups[1].Value }
+        }
+    } catch {
+        Write-Host "    (nessuna release persoft da cui leggere la versione)" -ForegroundColor DarkGray
+    }
+    $BuildNumber = ([Math]::Max([Math]::Max($daSito, $daCi), $daRelease)) + 1
 }
 # ---------------------------------------------------------------- compila e firma
 $apk = Join-Path $repo 'dist\app-release-persoft.apk'

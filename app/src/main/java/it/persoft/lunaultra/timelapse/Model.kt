@@ -77,6 +77,21 @@ data class TimelapseSequence(
     val intervalSeconds: Float = 2f,
     val totalDurationSeconds: Float = 60f,
     val interpolation: InterpolationMode = InterpolationMode.SMOOTH,
+
+    /**
+     * Quante volte la velocita' media si arriva a toccare a meta' tratto.
+     *
+     * Con l'interpolazione morbida la camera parte da ferma, accelera e rallenta: da qualche
+     * parte deve recuperare il tempo perso ai due capi, e lo fa in mezzo. La vecchia smoothstep
+     * arrivava a **1,5 volte** la media, che su un movimento lungo si vede — sembra che a meta'
+     * strada qualcuno acceleri.
+     *
+     * Uno significa velocita' costante, cioe' la retta. Due significa rampe che si toccano a
+     * meta', senza nessun tratto a velocita' costante. Uno e due sono gli estremi, e 1,2 e' il
+     * compromesso: partenza e arresto ancora morbidi, ma il centro va appena il 20% piu' della
+     * media invece del 50%.
+     */
+    val easingPeak: Float = 1.2f,
     /** Se true le durate dei tratti derivano da [totalDurationSeconds] divisa equamente. */
     val useTotalDuration: Boolean = true,
     val controlRecording: Boolean = true,

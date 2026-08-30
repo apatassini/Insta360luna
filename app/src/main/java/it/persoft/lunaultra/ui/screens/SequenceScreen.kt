@@ -64,6 +64,8 @@ import it.persoft.lunaultra.ui.viewfinder.CaptureMode
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import it.persoft.lunaultra.ui.components.SliderRow
+import it.persoft.lunaultra.timelapse.Interpolation
 
 /** I colori dei punti, a rotazione: due punti vicini non hanno mai lo stesso. */
 private val WaypointColors = listOf(Luna.Path, Luna.Pano, Luna.Photo, Luna.PathLapse, Luna.Lapse, Luna.Movie)
@@ -369,9 +371,34 @@ fun SequenceScreen(viewModel: MainViewModel) {
                     }
                 }
                 Hint(
-                    "Lineare mantiene la stessa velocità per tutto il tratto; smooth parte e " +
+                    "Lineare mantiene la stessa velocità per tutto il tratto; morbida parte e " +
                         "arriva piano, che su un movimento lungo si nota.",
                 )
+                if (sequence.interpolation == InterpolationMode.SMOOTH) {
+                    // Il tempo perso a partire e a fermarsi va recuperato da qualche parte, e
+                    // viene recuperato in mezzo: questo cursore dice quanto. È il numero che si
+                    // vede guardando il video, quindi si imposta quello e non la rampa.
+                    SliderRow(
+                        label = "Punta al centro",
+                        value = sequence.easingPeak,
+                        valueRange = Interpolation.PUNTA_MINIMA..Interpolation.PUNTA_MASSIMA,
+                        steps = 9,
+                        onValueChange = viewModel::setEasingPeak,
+                        valueLabel = "%.1f× la media".format(sequence.easingPeak),
+                    )
+                    Hint(
+                        when {
+                            sequence.easingPeak <= 1.05f ->
+                                "A uno è la retta: velocità costante, ma partenza e arresto di colpo."
+                            sequence.easingPeak >= 1.45f ->
+                                "A metà tratto la camera va %.0f%% più della media: su un movimento lungo si vede."
+                                    .format((sequence.easingPeak - 1f) * 100f)
+                            else ->
+                                "Partenza e arresto morbidi, e a metà tratto solo il %.0f%% più della media."
+                                    .format((sequence.easingPeak - 1f) * 100f)
+                        },
+                    )
+                }
                 if (sequence.mode == ShootingMode.TIMELAPSE_CAMERA) {
                     ToggleRow(
                         title = "Invia durata e intervallo alla camera",

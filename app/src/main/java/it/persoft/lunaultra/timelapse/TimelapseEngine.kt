@@ -330,8 +330,8 @@ class TimelapseEngine(
                 // Dopo una correzione fotografica la stima può non coincidere più con le vecchie
                 // coordinate salvate: il tratto successivo parte dalla posizione realmente
                 // raggiunta, altrimenti il primo tick annullerebbe la correzione appena fatta.
-                val targetPan = Interpolation.position(atLegStart.pan, to.pan, t, sequence.interpolation)
-                val targetTilt = Interpolation.position(atLegStart.tilt, to.tilt, t, sequence.interpolation)
+                val targetPan = Interpolation.position(atLegStart.pan, to.pan, t, sequence.interpolation, sequence.easingPeak)
+                val targetTilt = Interpolation.position(atLegStart.tilt, to.tilt, t, sequence.interpolation, sequence.easingPeak)
 
                 gimbal.driveTo(targetPan, targetTilt, stepSeconds)
                     .onFailure { log.warn("Comando gimbal fallito: ${it.message}") }
@@ -658,8 +658,8 @@ class TimelapseEngine(
                     val t = shot.toFloat() / (shotsPerLeg - 1)
                     add(
                         PhotoTarget(
-                            pan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation),
-                            tilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation),
+                            pan = Interpolation.position(from.pan, to.pan, t, sequence.interpolation, sequence.easingPeak),
+                            tilt = Interpolation.position(from.tilt, to.tilt, t, sequence.interpolation, sequence.easingPeak),
                             legIndex = legIndex,
                             legProgress = t,
                         ),

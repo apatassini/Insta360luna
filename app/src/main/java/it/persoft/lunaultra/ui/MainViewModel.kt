@@ -75,6 +75,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import it.persoft.lunaultra.timelapse.Interpolation
 
 /** Una notifica spontanea osservata sul canale di controllo. */
 data class NotificationSighting(
@@ -1132,6 +1133,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setInterpolation(mode: InterpolationMode) =
         container.sequenceStore.update { it.copy(interpolation = mode) }
+
+    /** Quante volte la velocita' media si tocca a meta' tratto: uno e' la retta, due il triangolo. */
+    fun setEasingPeak(peak: Float) = container.sequenceStore.update {
+        it.copy(
+            easingPeak = peak.coerceIn(Interpolation.PUNTA_MINIMA, Interpolation.PUNTA_MASSIMA),
+        )
+    }
 
     fun setUseTotalDuration(enabled: Boolean) =
         container.sequenceStore.update { it.copy(useTotalDuration = enabled) }

@@ -127,10 +127,26 @@ class GimbalGyroMeter(
         val video = nuovoVideo ?: throw IllegalStateException(
             "La registrazione è finita ma il nuovo LRV non compare nella libreria",
         )
-        val file = media.cache(video, preferProxy = true).getOrThrow()
-        val traccia = InstaTrailer.readGyroTrack(file)
-            ?: throw IllegalStateException("Il proxy ${video.proxyPath} non contiene una traccia giroscopica valida")
-        val movimenti = traccia.trovaDueMovimenti(RIPOSO_BIAS_SECONDI)
+        // Prima il proxy, che pesa una frazione del video principale. Ma la traccia dentro il
+        // proxy non c'e' sempre — su questo esemplare non c'e' mai — e il video vero ce l'ha di
+        // sicuro: e' da un mp4 che sono usciti gli 8.387 campioni in 8,386 secondi. Quindi si
+        // prova il leggero, e se non porta niente si scarica il pesante invece di rinunciare.
+        var file = media.cache(video, preferProxy = true).getOrThrow()
+        var traccia = InstaTrailer.readGyroTrack(file)
+        if (traccia == null) {
+            log.warn(
+                "MISURA GIROSCOPICA * PROXY SENZA TRACCIA",
+                "${video.proxyPath} non porta la traccia giroscopica. Scarico il video " +
+                    "principale, che pesa di piu' ma ce l'ha.",
+            )
+            file.delete()
+            file = media.cache(video, preferProxy = false).getOrThrow()
+            traccia = InstaTrailer.readGyroTrack(file)
+        }
+        val letta = traccia ?: throw IllegalStateException(
+            "Ne' il proxy ne' il video ${video.name} contengono una traccia giroscopica valida",
+        )
+        val movimenti = letta.trovaDueMovimenti(RIPOSO_BIAS_SECONDI)
         val risultato = MisuraCurvaGiroscopio(
             gradiAndata = movimenti.andata.rotazione.angoloGradi.toFloat(),
             gradiRitorno = movimenti.ritorno.rotazione.angoloGradi.toFloat(),

@@ -11,6 +11,16 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
+ * Il giroscopio non ha visto muoversi niente.
+ *
+ * Ha un tipo suo perche' e' l'unico esito che significa davvero «il gimbal non si e'
+ * mosso». Tutto il resto — un video che non compare, una traccia illeggibile, un download
+ * fallito — e' un guasto della catena, e dirlo «zona morta» sarebbe una diagnosi
+ * sbagliata che manda a cercare nel posto sbagliato.
+ */
+class MovimentoNonRilevato(message: String) : IllegalStateException(message)
+
+/**
  * Come era messa la camera nell'istante dello scatto, letta dalla foto stessa.
  *
  * [pitchDegrees] è l'inclinazione rispetto all'orizzontale vera, positiva verso l'alto, e non è
@@ -278,8 +288,10 @@ class TracciaGiroscopio internal constructor(
         }.sortedByDescending { it.rotazione.angoloGradi }
             .take(2)
             .sortedBy(MovimentoGiroscopio::inizioSecondi)
-        require(movimenti.size == 2) {
-            "Riconosciuti ${movimenti.size} movimenti giroscopici invece di due"
+        if (movimenti.size != 2) {
+            throw MovimentoNonRilevato(
+                "Riconosciuti ${movimenti.size} movimenti giroscopici invece di due",
+            )
         }
         return CoppiaMovimentiGiroscopio(movimenti[0], movimenti[1], soglia)
     }

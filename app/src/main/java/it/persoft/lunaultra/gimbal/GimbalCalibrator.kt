@@ -1,6 +1,7 @@
 package it.persoft.lunaultra.gimbal
 
 import android.graphics.BitmapFactory
+import it.persoft.lunaultra.stitch.MovimentoNonRilevato
 import it.persoft.lunaultra.camera.CameraMode
 import it.persoft.lunaultra.data.GimbalCalibrationBuilder
 import it.persoft.lunaultra.data.GimbalAxisLimits
@@ -507,6 +508,8 @@ class GimbalCalibrator(
         val measured = mutableListOf<Pair<Int, Float>>()
         /** Le intensita' a cui il gimbal non si e' mosso: la zona morta, misurata. */
         val inerti = mutableListOf<Int>()
+        /** Guasti consecutivi della catena video: due di fila e si cambia metodo. */
+        var guastiDiFila = 0
         log.info(
             "CALIBRAZIONE · CURVA GIROSCOPICA ${axisLabel(axis).uppercase()}",
             "Ogni intensità viene registrata nel proxy LRV: riposo, andata, pausa e ritorno. " +
@@ -567,6 +570,33 @@ class GimbalCalibrator(
             // calibrazione: il punto si registra come non utilizzabile e si prosegue.
             val esito = gyroMeter.misura(panAxis, intensity, durationMs)
             val result = esito.getOrNull()
+            val guasto = esito.exceptionOrNull()
+                ?.takeIf { it !is MovimentoNonRilevato }
+            if (guasto != null) {
+                // Non e' il gimbal: e' la catena che porta il video fino a qui. Ripeterlo per
+                // dodici intensita' su due assi vuol dire nove minuti per scoprire dodici volte
+                // la stessa cosa, quindi al secondo guasto di fila si passa direttamente al
+                // metodo di ripiego.
+                guastiDiFila++
+                log.warn(
+                    "CALIBRAZIONE * $intensity% ${axisLabel(axis).uppercase()} NON MISURATO",
+                    "${guasto.message}" + "\nNon e' il motore: e' la registrazione che non e' " +
+                        "arrivata fin qui. Il gimbal potrebbe essersi mosso benissimo.",
+                )
+                addFinding(
+                    "$intensity% ${axisLabel(axis)}",
+                    "non misurato: ${guasto.message}",
+                    FindingKind.WARN,
+                )
+                if (guastiDiFila >= MAX_GUASTI_DI_FILA) {
+                    throw IllegalStateException(
+                        "La misura giroscopica non arriva a destinazione ($guastiDiFila volte di " +
+                            "fila sull'asse ${axisLabel(axis)}): ${guasto.message}",
+                    )
+                }
+                return@forEachIndexed
+            }
+            guastiDiFila = 0
             if (result == null || result.gradiSecondo <= 0f) {
                 val motivo = esito.exceptionOrNull()?.message ?: "nessuna rotazione misurabile"
                 inerti += intensity
@@ -2118,6 +2148,14 @@ class GimbalCalibrator(
          * abbastanza materiale.
          */
         const val MIN_GYRO_POINTS = 6
+
+        /**
+         * Dopo quanti guasti di fila si smette di insistere col giroscopio.
+         *
+         * Due: uno puo' essere sfortuna, due di fila e' la catena che non funziona in questo
+         * momento. Insistere costerebbe nove minuti per arrivare alla stessa conclusione.
+         */
+        const val MAX_GUASTI_DI_FILA = 2
         const val REFERENCE_INTENSITY_PERCENT = 40
         /**
          * Il ricentraggio parte dal fine corsa vicino, cioè da 57° dallo zero: va aspettato.

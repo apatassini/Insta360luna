@@ -167,7 +167,20 @@ class GimbalGyroMeter(
         const val PAUSA_FRA_MOVIMENTI_MS = 700L
         const val RIPOSO_FINALE_MS = 1_000L
         const val RIPOSO_BIAS_SECONDI = 0.7
-        const val TENTATIVI_FILE = 20
-        const val ATTESA_FILE_MS = 700L
+        /**
+         * Quanto si aspetta che la camera faccia comparire la registrazione appena chiusa.
+         *
+         * Venti tentativi da settecento millisecondi facevano quattordici secondi, e bastavano
+         * finche' i clip duravano sei secondi. Allungando gli impulsi a cinque secondi per
+         * misurare l'1%, il clip e' arrivato a tredici — e la camera ci ha messo piu' di
+         * quattordici secondi a indicizzarlo. Ogni misura falliva per il file, non per il
+         * gimbal, e il referto lo chiamava «non muove»: la diagnosi sbagliata peggiore, perche'
+         * manda a cercare nel motore un guasto che sta nell'attesa.
+         *
+         * Quarantacinque secondi: piu' del triplo del clip piu' lungo che questa misura sappia
+         * produrre.
+         */
+        const val TENTATIVI_FILE = 45
+        const val ATTESA_FILE_MS = 1_000L
     }
 }

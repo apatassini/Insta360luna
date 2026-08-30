@@ -306,7 +306,7 @@ class TimelapseEngine(
             val from = sequence.waypoints[legIndex]
             val to = sequence.waypoints[legIndex + 1]
             val legSeconds = durations[legIndex]
-            val correctionBudget = visualCorrectionBudget(legSeconds, to)
+            val correctionBudget = visualCorrectionBudget(legSeconds, to, sequence.mode)
             val motionSeconds = (legSeconds - correctionBudget).coerceAtLeast(MIN_VISUAL_MOTION_SECONDS)
             val atLegStart = gimbal.position.value
             log.info(
@@ -871,7 +871,30 @@ class TimelapseEngine(
         return verification
     }
 
-    private fun visualCorrectionBudget(legSeconds: Float, target: Waypoint): Float {
+    /**
+     * Quanto tempo del tratto si tiene da parte per l'allineamento visivo.
+     *
+     * Zero quando si sta registrando un video, e non e' un'ottimizzazione: la modalita' Video
+     * promette «durata reale = durata della sequenza». Tenendo da parte il 12% del tratto, il
+     * movimento finiva prima — trenta secondi chiesti, ventisei e mezzo di movimento e poi
+     * l'inquadratura ferma — e se il controllo passava al primo colpo, come succede quasi
+     * sempre, quel tempo non veniva nemmeno usato: il tratto durava davvero ventisei secondi e
+     * mezzo. In un video una coda immobile di tre secondi e mezzo si vede eccome.
+     *
+     * Il controllo continua a farsi, ma **dopo** essere arrivati invece che al posto dell'ultimo
+     * pezzo di movimento: quando non c'e' niente da correggere costa quaranta millisecondi, e
+     * quando c'e' qualcosa da correggere e' meglio uno scarto a fine tratto che una fermata in
+     * mezzo alla panoramica.
+     *
+     * Nelle modalita' a scatti la riserva resta: li' il gimbal si ferma comunque a ogni punto,
+     * quindi il tempo dell'allineamento non toglie niente a nessuno.
+     */
+    private fun visualCorrectionBudget(
+        legSeconds: Float,
+        target: Waypoint,
+        mode: ShootingMode,
+    ): Float {
+        if (mode == ShootingMode.VIDEO) return 0f
         if (!settings.value.gimbal.visualWaypointCorrection || target.previewJpegBase64 == null) return 0f
         val desired = max(MIN_VISUAL_BUDGET_SECONDS, legSeconds * VISUAL_BUDGET_FRACTION)
         return min(desired, MAX_VISUAL_BUDGET_SECONDS)

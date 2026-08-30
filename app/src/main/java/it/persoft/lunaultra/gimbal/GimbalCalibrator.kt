@@ -518,15 +518,14 @@ class GimbalCalibrator(
             // dalla velocita' gia' misurata a un'intensita' piu' bassa. Con un secondo fisso, al
             // 100% l'escursione supera i cinquanta gradi e finisce contro il fine corsa; con un
             // arco costante ci sta a qualunque velocita'.
-            val stimaGradiSecondo = measured.lastOrNull()?.let { (intensitaNota, gradiSecondo) ->
-                if (intensitaNota > 0) gradiSecondo * intensity / intensitaNota else null
-            }
-            val durationMs = when {
-                stimaGradiSecondo == null || stimaGradiSecondo <= 0f ->
-                    if (intensity <= SLOW_INTENSITY_THRESHOLD) GYRO_SLOW_MOVEMENT_MS else GYRO_MOVEMENT_MS
-                else -> (1_000f * GYRO_TARGET_DEGREES / stimaGradiSecondo).toLong()
-                    .coerceIn(GYRO_MIN_MOVEMENT_MS, GYRO_SLOW_MOVEMENT_MS)
-            }
+            val stimaGradiSecondo = measured.lastOrNull()
+                ?.let { (intensitaNota, gradiSecondo) ->
+                    if (intensitaNota > 0) gradiSecondo * intensity / intensitaNota else null
+                }
+                ?.takeIf { it > 0f }
+                ?: (GYRO_STIMA_INIZIALE_GRADI_SECONDO_PER_PERCENTO * intensity)
+            val durationMs = (1_000f * GYRO_TARGET_DEGREES / stimaGradiSecondo).toLong()
+                .coerceIn(GYRO_MIN_MOVEMENT_MS, GYRO_MAX_MOVEMENT_MS)
 
             // Prima di ogni misura si torna in mezzo alla corsa. Senza, l'asse deriva: ogni
             // andata-e-ritorno lascia un residuo, e dopo qualche intensita' il movimento parte
@@ -2059,6 +2058,29 @@ class GimbalCalibrator(
 
         /** Sotto mezzo secondo il movimento e' tutto accelerazione e frenata. */
         const val GYRO_MIN_MOVEMENT_MS = 500L
+
+        /**
+         * Il piu' lungo che si concede a un impulso di misura.
+         *
+         * Serve alle intensita' basse: all'1% il gimbal fa sei decimi di grado al secondo, e in
+         * due secondi percorre un grado e tre — un arco cosi' corto e' misurabile ma impreciso.
+         * Cinque secondi ne fanno tre, che e' un numero su cui si puo' dividere. E' lo stesso
+         * ragionamento del mandare dieci impulsi e dividere per dieci: quello che conta e'
+         * l'angolo totale, perche' l'errore di partenza e arrivo e' fisso e pesa meno su un
+         * arco lungo.
+         */
+        const val GYRO_MAX_MOVEMENT_MS = 5_000L
+
+        /**
+         * Quanto si presume vada il gimbal, in gradi al secondo per punto di intensita', finche'
+         * non l'ha misurato nessuno.
+         *
+         * Serve solo al primo punto della curva, che non ha una misura precedente da cui
+         * ricavare la durata. Sull'esemplare vero il rapporto e' 0,64; qui si sta sotto, perche'
+         * sbagliare per difetto allunga l'impulso — e un impulso troppo lungo lo taglia il
+         * limite qui sopra, mentre uno troppo corto non si recupera.
+         */
+        const val GYRO_STIMA_INIZIALE_GRADI_SECONDO_PER_PERCENTO = 0.5f
 
         /** Scarto andata/ritorno sotto cui la misura reale è considerata ben chiusa. */
         const val GYRO_GOOD_CLOSURE_DEG = 0.6f

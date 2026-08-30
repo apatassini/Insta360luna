@@ -195,15 +195,33 @@ class TracciaGiroscopio internal constructor(
      */
     fun trovaDueMovimenti(durataRiposoSecondi: Double = 0.7): CoppiaMovimentiGiroscopio {
         val bias = stimaBias(durataRiposoSecondi)
-        var rumoreQuadratico = 0.0
-        var campioniRumore = 0
-        for (indice in 0 until numeroCampioni) {
+
+        // La velocita' assoluta, campione per campione, gia' senza bias.
+        val velocita = DoubleArray(numeroCampioni) { indice ->
             val campione = campione(indice)
-            if (campione.tempoSecondi >= durataRiposoSecondi) break
             val velocita0 = campione.asse0GradiSecondo - bias.asse0 / conteggiPerGradoSecondo
             val velocita1 = campione.asse1GradiSecondo - bias.asse1 / conteggiPerGradoSecondo
             val velocita2 = campione.asse2GradiSecondo - bias.asse2 / conteggiPerGradoSecondo
-            rumoreQuadratico += velocita0 * velocita0 + velocita1 * velocita1 + velocita2 * velocita2
+            sqrt(velocita0 * velocita0 + velocita1 * velocita1 + velocita2 * velocita2)
+        }
+
+        // Prima di decidere cosa e' movimento, si fa una media mobile.
+        //
+        // Il rumore del sensore e' bianco: mediando N campioni scende di radice di N. Il
+        // movimento no, resta quello che e'. A mille campioni al secondo, un quinto di secondo
+        // sono duecento campioni e il rumore scende di quattordici volte — che e' la differenza
+        // fra vedere l'1% e non vederlo. Sul campione singolo la soglia veniva a 2,5 gradi al
+        // secondo, e l'1% ne fa sei decimi: era sotto il rumore, non fermo. E che non fosse
+        // fermo si sapeva, perche' i timelapse a movimento lentissimo funzionano.
+        val larghezza = (FINESTRA_MEDIA_SECONDI * numeroCampioni / durataSecondi)
+            .toInt().coerceIn(1, numeroCampioni.coerceAtLeast(1))
+        val lisciata = mediaMobile(velocita, larghezza)
+
+        var rumoreQuadratico = 0.0
+        var campioniRumore = 0
+        for (indice in 0 until numeroCampioni) {
+            if (campione(indice).tempoSecondi >= durataRiposoSecondi) break
+            rumoreQuadratico += lisciata[indice] * lisciata[indice]
             campioniRumore++
         }
         val soglia = maxOf(
@@ -219,12 +237,7 @@ class TracciaGiroscopio internal constructor(
         for (indice in 0 until numeroCampioni) {
             val campione = campione(indice)
             if (campione.tempoSecondi < durataRiposoSecondi) continue
-            val velocita0 = campione.asse0GradiSecondo - bias.asse0 / conteggiPerGradoSecondo
-            val velocita1 = campione.asse1GradiSecondo - bias.asse1 / conteggiPerGradoSecondo
-            val velocita2 = campione.asse2GradiSecondo - bias.asse2 / conteggiPerGradoSecondo
-            val inMovimento = sqrt(
-                velocita0 * velocita0 + velocita1 * velocita1 + velocita2 * velocita2,
-            ) >= soglia
+            val inMovimento = lisciata[indice] >= soglia
             if (inMovimento) {
                 if (inizio < 0) inizio = indice
                 ultimoAttivo = indice
@@ -241,13 +254,27 @@ class TracciaGiroscopio internal constructor(
         }
         if (inizio >= 0 && ultimoAttivo > inizio) intervalli += Intervallo(inizio, ultimoAttivo)
 
+        // La media centrata allarga ogni gradino di mezza finestra da entrambe le parti: il
+        // movimento risulta cominciato prima e finito dopo di quanto sia.
+        //
+        // Le due cose che servono pero' sono diverse, e vanno trattate diversamente. Per
+        // **integrare** conviene la finestra larga: i campioni in piu' sono a riposo e, tolto il
+        // bias, non aggiungono rotazione — mentre tagliare stretto rischia di lasciare fuori la
+        // rampa di partenza, e li' l'angolo si perde davvero. Per **dire quando** il movimento
+        // e' cominciato serve invece il bordo corretto, perche' quello finisce nel log e nei
+        // controlli.
+        val meta = larghezza / 2
         val movimenti = intervalli.map { intervallo ->
-            val da = campione(intervallo.inizio).tempoSecondi
-            val a = minOf(
+            val daLargo = campione(intervallo.inizio).tempoSecondi
+            val aLargo = minOf(
                 durataSecondi,
                 campione(intervallo.ultimoAttivo).tempoSecondi + CODA_FRENATA_SECONDI,
             )
-            MovimentoGiroscopio(da, a, integra(da, a, bias))
+            val inizio = campione((intervallo.inizio + meta).coerceAtMost(intervallo.ultimoAttivo))
+                .tempoSecondi
+            val fine = campione((intervallo.ultimoAttivo - meta).coerceAtLeast(intervallo.inizio))
+                .tempoSecondi
+            MovimentoGiroscopio(inizio, fine, integra(daLargo, aLargo, bias))
         }.sortedByDescending { it.rotazione.angoloGradi }
             .take(2)
             .sortedBy(MovimentoGiroscopio::inizioSecondi)
@@ -257,7 +284,32 @@ class TracciaGiroscopio internal constructor(
         return CoppiaMovimentiGiroscopio(movimenti[0], movimenti[1], soglia)
     }
 
+    /** Media mobile centrata: e' quello che separa un movimento lento dal rumore. */
+    private fun mediaMobile(valori: DoubleArray, larghezza: Int): DoubleArray {
+        if (larghezza <= 1 || valori.isEmpty()) return valori
+        val cumulate = DoubleArray(valori.size + 1)
+        for (indice in valori.indices) cumulate[indice + 1] = cumulate[indice] + valori[indice]
+        val meta = larghezza / 2
+        return DoubleArray(valori.size) { indice ->
+            val da = (indice - meta).coerceAtLeast(0)
+            val a = (indice + larghezza - meta).coerceAtMost(valori.size)
+            (cumulate[a] - cumulate[da]) / (a - da)
+        }
+    }
+
     private companion object {
+        /**
+         * Quanto si media prima di decidere se c'e' movimento.
+         *
+         * Sessanta millisecondi, e il numero non e' arbitrario da nessuna delle due parti. Verso
+         * l'alto lo limita la pausa fra andata e ritorno: mediare su una finestra larga quanto
+         * quella pausa la cancella, e i due movimenti diventano uno. Verso il basso lo limita il
+         * rumore: a mille campioni al secondo, sessanta millisecondi sono sessanta campioni e il
+         * rumore scende di quasi otto volte — la soglia passa da 2,5 gradi al secondo a tre
+         * decimi, e l'1% del gimbal, che ne fa sei decimi, esce allo scoperto.
+         */
+        const val FINESTRA_MEDIA_SECONDI = 0.06
+
         const val SOGLIA_MINIMA_GRADI_SECONDO = 0.18
         const val MOLTIPLICATORE_RUMORE = 6.0
         const val PAUSA_CHIUSURA_SECONDI = 0.12

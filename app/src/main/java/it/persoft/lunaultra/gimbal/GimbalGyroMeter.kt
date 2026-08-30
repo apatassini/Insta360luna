@@ -101,10 +101,25 @@ class GimbalGyroMeter(
             ).getOrThrow()
             delay(RIPOSO_FINALE_MS)
 
-            commands.stopCapture().getOrThrow()
+            // La mancata risposta a STOP_CAPTURE non dice che la registrazione non si sia
+            // chiusa: questa camera risponde 200 a qualunque cosa, quindi l'ack non vale come
+            // prova ne' in un verso ne' nell'altro. Quello che conta e' lo stato, e lo si
+            // chiede subito dopo. Un timeout di tre secondi mentre la camera sta scrivendo un
+            // clip da tredici e' un'attesa corta, non un guasto — e' cosi' che si e' perso
+            // l'80% verticale, due volte di fila.
+            val fermata = commands.stopCapture()
             registrazione = false
+            fermata.onFailure {
+                log.warn(
+                    "MISURA GIROSCOPICA * STOP SENZA RISPOSTA",
+                    "${it.message}. Non vuol dire che non si sia fermata: verifico lo stato.",
+                )
+            }
             if (!commands.awaitCaptureIdle()) {
-                throw IllegalStateException("La camera non ha chiuso la registrazione di taratura")
+                throw IllegalStateException(
+                    "La camera non ha chiuso la registrazione di taratura" +
+                        (fermata.exceptionOrNull()?.let { " (${it.message})" } ?: ""),
+                )
             }
         } finally {
             withContext(NonCancellable) {

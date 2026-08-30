@@ -206,26 +206,36 @@ class TracciaGiroscopio internal constructor(
     fun trovaDueMovimenti(durataRiposoSecondi: Double = 0.7): CoppiaMovimentiGiroscopio {
         val bias = stimaBias(durataRiposoSecondi)
 
-        // La velocita' assoluta, campione per campione, gia' senza bias.
-        val velocita = DoubleArray(numeroCampioni) { indice ->
-            val campione = campione(indice)
-            val velocita0 = campione.asse0GradiSecondo - bias.asse0 / conteggiPerGradoSecondo
-            val velocita1 = campione.asse1GradiSecondo - bias.asse1 / conteggiPerGradoSecondo
-            val velocita2 = campione.asse2GradiSecondo - bias.asse2 / conteggiPerGradoSecondo
-            sqrt(velocita0 * velocita0 + velocita1 * velocita1 + velocita2 * velocita2)
-        }
+        // La velocita' asse per asse, gia' senza bias. Restano separate di proposito: e' la
+        // media del **vettore** che serve, non quella del suo modulo.
+        val asse0 = DoubleArray(numeroCampioni) { campione(it).asse0GradiSecondo - bias.asse0 / conteggiPerGradoSecondo }
+        val asse1 = DoubleArray(numeroCampioni) { campione(it).asse1GradiSecondo - bias.asse1 / conteggiPerGradoSecondo }
+        val asse2 = DoubleArray(numeroCampioni) { campione(it).asse2GradiSecondo - bias.asse2 / conteggiPerGradoSecondo }
 
-        // Prima di decidere cosa e' movimento, si fa una media mobile.
+        // Cosa distingue un movimento dal fondo, e perche' il modulo non basta.
         //
-        // Il rumore del sensore e' bianco: mediando N campioni scende di radice di N. Il
-        // movimento no, resta quello che e'. A mille campioni al secondo, un quinto di secondo
-        // sono duecento campioni e il rumore scende di quattordici volte — che e' la differenza
-        // fra vedere l'1% e non vederlo. Sul campione singolo la soglia veniva a 2,5 gradi al
-        // secondo, e l'1% ne fa sei decimi: era sotto il rumore, non fermo. E che non fosse
-        // fermo si sapeva, perche' i timelapse a movimento lentissimo funzionano.
+        // Il fondo di questa camera non e' rumore bianco del sensore: e' la stabilizzazione che
+        // micro-corregge in continuazione. Ha media zero ma modulo tutt'altro che nullo, quindi
+        // mediare |velocita| non lo abbatte — infatti la soglia restava a 2,4 gradi al secondo
+        // anche dopo aver introdotto la media, e l'1%, che ne fa sei decimi, continuava a
+        // sparirci sotto.
+        //
+        // Mediando invece il vettore e prendendo il modulo dopo, il tremolio si cancella da solo
+        // — verso e contro-verso si sommano a niente — mentre una rotazione vera, che va sempre
+        // dalla stessa parte, resta intera. E' la stessa ragione per cui integrare separa il
+        // segnale dal disturbo: qui si integra su una finestra corta, e basta.
         val larghezza = (FINESTRA_MEDIA_SECONDI * numeroCampioni / durataSecondi)
             .toInt().coerceIn(1, numeroCampioni.coerceAtLeast(1))
-        val lisciata = mediaMobile(velocita, larghezza)
+        val medio0 = mediaMobile(asse0, larghezza)
+        val medio1 = mediaMobile(asse1, larghezza)
+        val medio2 = mediaMobile(asse2, larghezza)
+        val lisciata = DoubleArray(numeroCampioni) { indice ->
+            sqrt(
+                medio0[indice] * medio0[indice] +
+                    medio1[indice] * medio1[indice] +
+                    medio2[indice] * medio2[indice],
+            )
+        }
 
         var rumoreQuadratico = 0.0
         var campioniRumore = 0

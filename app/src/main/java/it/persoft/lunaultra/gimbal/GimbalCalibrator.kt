@@ -568,7 +568,17 @@ class GimbalCalibrator(
             // morta del motore, ed e' essa stessa un dato. Buttare via nove minuti di misure
             // buone perche' l'1% non parte sarebbe il modo piu' rapido di non avere mai una
             // calibrazione: il punto si registra come non utilizzabile e si prosegue.
-            val esito = gyroMeter.misura(panAxis, intensity, durationMs)
+            // Un guasto della catena e' spesso un momento sbagliato — la camera che non
+            // risponde all'elenco file entro dodici secondi, e basta. Si riprova una volta
+            // prima di rinunciare al punto: e' il 30% orizzontale che si e' perso cosi'.
+            var esito = gyroMeter.misura(panAxis, intensity, durationMs)
+            if (esito.exceptionOrNull()?.let { it !is MovimentoNonRilevato } == true) {
+                log.info(
+                    "CALIBRAZIONE * $intensity% ${axisLabel(axis).uppercase()} RIPROVO",
+                    "${esito.exceptionOrNull()?.message}",
+                )
+                esito = gyroMeter.misura(panAxis, intensity, durationMs)
+            }
             val result = esito.getOrNull()
             val guasto = esito.exceptionOrNull()
                 ?.takeIf { it !is MovimentoNonRilevato }

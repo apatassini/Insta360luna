@@ -1,5 +1,6 @@
 package it.persoft.lunaultra.camera
 
+import it.persoft.lunaultra.data.GimbalCalibrationProfile
 import it.persoft.lunaultra.data.AppSettings
 import it.persoft.lunaultra.data.PhotoSettings
 import it.persoft.lunaultra.data.LunaVideoProfiles
@@ -141,7 +142,7 @@ class LunaCommands(
     private fun batteryPercent(level: Int?, scale: Int?): Int? {
         if (level == null) return null
         val fullScale = scale?.takeIf { it > 0 } ?: 100
-        return ((level.toFloat() / fullScale) * 100f).roundToInt().coerceIn(0, 100)
+        return ((level.toFloat() / fullScale) * 100f).roundToInt().coerceIn(0, GimbalCalibrationProfile.MASSIMA_INTENSITA_COMANDO)
     }
 
     /**
@@ -662,8 +663,10 @@ class LunaCommands(
         val pan = applySign(panPercent.coerceIn(-1f, 1f), cfg.invertPan)
         val tilt = applySign(tiltPercent.coerceIn(-1f, 1f), cfg.invertTilt)
         val payload = LunaMessages.gimbalMove(
-            horizontal = (pan * 100f).roundToInt(),
-            vertical = (tilt * 100f).roundToInt(),
+            // Mai 100: a fondo scala la Luna rallenta invece di accelerare. Il tetto sta nel
+            // profilo, misurato, insieme al perche'.
+            horizontal = (pan * 100f).roundToInt().coerceIn(-GimbalCalibrationProfile.MASSIMA_INTENSITA_COMANDO, GimbalCalibrationProfile.MASSIMA_INTENSITA_COMANDO),
+            vertical = (tilt * 100f).roundToInt().coerceIn(-GimbalCalibrationProfile.MASSIMA_INTENSITA_COMANDO, GimbalCalibrationProfile.MASSIMA_INTENSITA_COMANDO),
         )
         return session.fire(LunaProtocolCodes.GIMBAL_CONTROL, payload)
     }

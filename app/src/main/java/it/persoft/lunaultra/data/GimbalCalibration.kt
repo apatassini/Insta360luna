@@ -148,7 +148,7 @@ data class GimbalCalibrationProfile(
         get() = schemaVersion == CURRENT_SCHEMA && calibratedAtMs > 0L &&
             responsePoints.size >= MIN_VALID_POINTS &&
             responsePoints.any { it.intensityPercent <= 10 } &&
-            responsePoints.any { it.intensityPercent == 100 } &&
+            responsePoints.any { it.intensityPercent >= MASSIMA_INTENSITA_COMANDO } &&
             panLimits.isValid && tiltLimits.isValid &&
             responsePoints.all { it.measuredInDegrees || legacyPixelPoint(it) }
 
@@ -171,7 +171,9 @@ data class GimbalCalibrationProfile(
             if (responsePoints.none { it.intensityPercent <= 10 }) {
                 return "nessuna intensità bassa (1–10%) misurata: senza quelle i movimenti lenti non sono calcolabili"
             }
-            if (responsePoints.none { it.intensityPercent == 100 }) return "il 100% non è stato misurato"
+            if (responsePoints.none { it.intensityPercent >= MASSIMA_INTENSITA_COMANDO }) {
+                return "l'intensita' massima non e' stata misurata"
+            }
             responsePoints.forEach { point ->
                 if (point.measuredInDegrees) return@forEach
                 if (point.validPanSamples < MIN_SAMPLES_PER_AXIS) {
@@ -405,6 +407,21 @@ data class GimbalCalibrationProfile(
 
         /** Sotto questo il "ritaglio" non sarebbe piu un ritaglio ma una misura sbagliata. */
         const val MIN_CROP_FACTOR = 0.5f
+
+        /**
+         * La massima intensita' che si manda al gimbal. Non e' cento, ed e' misurato.
+         *
+         * A 100 la Luna rallenta invece di accelerare: tre calibrazioni di fila hanno misurato
+         * poco meno di dieci gradi al secondo contro i cinquantasette del 90%, su entrambi gli
+         * assi, con andata e ritorno che si chiudono a cinque centesimi di grado — quindi non e'
+         * un errore di misura, il gimbal si e' mosso davvero cosi' piano. Il sospetto e' che il
+         * firmware tratti il valore 100 in modo speciale.
+         *
+         * Non serve capirlo per evitarlo: si manda 99 e basta, e il grado che si perde non lo
+         * nota nessuno. Il confronto e' con il 90%, che ne fa 57: il 99 sta piu' in alto di
+         * qualunque cosa il 100 abbia mai prodotto.
+         */
+        const val MASSIMA_INTENSITA_COMANDO = 99
         const val DEFAULT_SETTLE_MS = 260L
         const val MIN_SAMPLES_PER_AXIS = 2
         const val MIN_VALID_POINTS = 8

@@ -1714,7 +1714,8 @@ class GimbalCalibrator(
 
     private fun recordTravel(into: MutableMap<Int, Long>, command: Float, durationMs: Long) {
         if (command == 0f || durationMs <= 0L) return
-        val bucket = (abs(command) * 100f).roundToInt().coerceIn(1, 100)
+        val bucket = (abs(command) * 100f).roundToInt()
+            .coerceIn(1, GimbalCalibrationProfile.MASSIMA_INTENSITA_COMANDO)
         val signed = if (command > 0f) durationMs else -durationMs
         into[bucket] = (into[bucket] ?: 0L) + signed
     }
@@ -2013,7 +2014,8 @@ class GimbalCalibrator(
     }
 
     private companion object {
-        val INTENSITY_PERCENTAGES = intArrayOf(1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+        // L'ultimo gradino e' 99, non 100: vedi GimbalCalibrationProfile.MASSIMA_INTENSITA_COMANDO.
+        val INTENSITY_PERCENTAGES = intArrayOf(1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 99)
         const val REPETITIONS = 1
         const val TARGET_RESPONSE_ARC_DEG = 45f
         const val MIN_RESPONSE_SWEEP_MS = 1_000L

@@ -1,0 +1,1131 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#1b1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="description" content="Salone Star: gioco da parrucchiere in un solo file HTML, da giocare in orizzontale sul telefono.">
+<title>Salone Star ✂️</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:#140d18;color:#f7eef5;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  user-select:none;-webkit-user-select:none;touch-action:none;overscroll-behavior:none}
+body{background:radial-gradient(120% 90% at 50% 0%,#3a1d3f 0%,#1b1020 55%,#120a16 100%)}
+#app{position:fixed;inset:0;display:grid;
+  grid-template-columns:clamp(146px,21vw,230px) 1fr clamp(112px,16vw,180px);
+  grid-template-rows:clamp(32px,7vh,44px) 1fr clamp(66px,17vh,92px);
+  gap:6px;padding:6px;padding-left:max(6px,env(safe-area-inset-left));padding-right:max(6px,env(safe-area-inset-right))}
+
+.card{background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.04));
+  border:1px solid rgba(255,255,255,.14);border-radius:14px;backdrop-filter:blur(6px)}
+
+/* ---------- HUD ---------- */
+#hud{grid-column:1/4;display:flex;align-items:center;gap:8px;padding:0 10px}
+#hud .logo{font-weight:800;letter-spacing:.4px;font-size:clamp(11px,2.3vh,15px);
+  background:linear-gradient(90deg,#ffd27a,#ff8fc5);-webkit-background-clip:text;background-clip:text;color:transparent;white-space:nowrap}
+#timerWrap{flex:1;height:clamp(12px,2.6vh,18px);border-radius:99px;background:rgba(0,0,0,.38);
+  border:1px solid rgba(255,255,255,.16);overflow:hidden;position:relative;min-width:60px}
+#timerBar{height:100%;width:100%;border-radius:99px;background:linear-gradient(90deg,#57e39b,#b6f06a);transition:background .3s}
+#timerTxt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:clamp(9px,1.9vh,12px);font-weight:800;text-shadow:0 1px 2px rgba(0,0,0,.7)}
+.pill{font-size:clamp(9px,2vh,13px);font-weight:700;padding:3px 9px;border-radius:99px;
+  background:rgba(0,0,0,.32);border:1px solid rgba(255,255,255,.14);white-space:nowrap}
+.iconbtn{width:clamp(26px,5.6vh,34px);height:clamp(26px,5.6vh,34px);border-radius:10px;display:grid;place-items:center;
+  background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);font-size:clamp(12px,2.6vh,16px);cursor:pointer}
+.iconbtn:active{transform:scale(.92)}
+
+/* ---------- BRIEF ---------- */
+#brief{grid-row:2;display:flex;flex-direction:column;padding:7px 8px;gap:5px;overflow:hidden}
+#brief h2{margin:0;font-size:clamp(9px,1.9vh,12px);letter-spacing:1.2px;text-transform:uppercase;opacity:.62;font-weight:800}
+#clientName{font-size:clamp(11px,2.4vh,15px);font-weight:800;display:flex;align-items:center;gap:5px}
+#reqList{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch}
+#reqList li{display:flex;align-items:center;gap:6px;font-size:clamp(9px,2vh,13px);line-height:1.15;
+  padding:4px 6px;border-radius:9px;background:rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.08)}
+#reqList li .tick{width:15px;height:15px;flex:0 0 15px;border-radius:5px;display:grid;place-items:center;
+  background:rgba(255,255,255,.12);font-size:10px;font-weight:900}
+#reqList li.ok{background:rgba(87,227,155,.16);border-color:rgba(87,227,155,.45)}
+#reqList li.ok .tick{background:#57e39b;color:#0d2a1c}
+#reqList li .sw{width:13px;height:13px;border-radius:4px;border:1px solid rgba(255,255,255,.5);flex:0 0 13px}
+#statusRow{display:flex;flex-wrap:wrap;gap:4px}
+.badge{font-size:clamp(8px,1.7vh,11px);padding:2px 6px;border-radius:7px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.14)}
+.badge.warn{background:rgba(255,176,60,.2);border-color:rgba(255,176,60,.55)}
+.badge.bad{background:rgba(255,92,110,.2);border-color:rgba(255,92,110,.55)}
+
+/* ---------- STAGE ---------- */
+#stage{grid-row:2;position:relative;overflow:hidden;border-radius:16px;
+  background:radial-gradient(85% 70% at 50% 18%,#5b3560 0%,#31183a 60%,#1d0f24 100%);
+  border:1px solid rgba(255,255,255,.12)}
+#scene{position:absolute;inset:0;width:100%;height:100%;display:block}
+#fx{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+#hint{position:absolute;left:50%;transform:translateX(-50%);bottom:5px;font-size:clamp(8px,1.8vh,12px);
+  padding:3px 10px;border-radius:99px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.16);
+  white-space:nowrap;max-width:96%;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+#toast{position:absolute;left:50%;top:8px;transform:translateX(-50%);font-size:clamp(9px,2vh,13px);font-weight:800;
+  padding:5px 12px;border-radius:99px;background:rgba(20,8,26,.9);border:1px solid rgba(255,255,255,.22);
+  opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;white-space:nowrap;max-width:94%}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(3px)}
+#progWrap{position:absolute;left:50%;transform:translateX(-50%);bottom:26px;width:52%;height:9px;border-radius:99px;
+  background:rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.2);display:none;overflow:hidden}
+#progWrap.on{display:block}
+#progBar{height:100%;width:0%;background:linear-gradient(90deg,#ffd27a,#ff8fc5)}
+
+/* ---------- OPTIONS ---------- */
+#opts{grid-row:2;padding:6px;display:flex;flex-direction:column;gap:5px;overflow:hidden}
+#optTitle{font-size:clamp(8px,1.8vh,11px);letter-spacing:1px;text-transform:uppercase;opacity:.65;font-weight:800;text-align:center}
+#optBody{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:5px;-webkit-overflow-scrolling:touch;padding-right:2px}
+.opt{display:flex;align-items:center;gap:6px;padding:5px 7px;border-radius:10px;cursor:pointer;
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);font-size:clamp(9px,1.9vh,12px);font-weight:600}
+.opt:active{transform:scale(.96)}
+.opt.sel{background:linear-gradient(90deg,rgba(255,143,197,.34),rgba(255,210,122,.22));border-color:#ff8fc5}
+.opt .dot{width:16px;height:16px;border-radius:50%;flex:0 0 16px;border:1px solid rgba(255,255,255,.55)}
+.opt.act{background:linear-gradient(90deg,#ff8fc5,#ffb36b);color:#2a0f1e;border-color:#fff;justify-content:center}
+.swatches{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+.sw2{aspect-ratio:1;border-radius:9px;border:2px solid rgba(255,255,255,.25);cursor:pointer}
+.sw2.sel{border-color:#fff;box-shadow:0 0 0 2px rgba(255,143,197,.75)}
+
+/* ---------- DOCK ---------- */
+#dock{grid-column:1/4;display:flex;gap:5px;padding:5px 6px;overflow-x:auto;align-items:stretch;-webkit-overflow-scrolling:touch}
+#dock::-webkit-scrollbar{display:none}
+.tool{flex:1 1 0;min-width:clamp(42px,7.2vw,74px);border-radius:12px;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:1px;cursor:pointer;
+  background:linear-gradient(180deg,rgba(255,255,255,.11),rgba(255,255,255,.04));border:1px solid rgba(255,255,255,.14)}
+.tool .em{font-size:clamp(15px,4.2vh,26px);line-height:1}
+.tool .nm{font-size:clamp(7px,1.6vh,10px);font-weight:700;opacity:.85;white-space:nowrap}
+.tool.sel{background:linear-gradient(180deg,#ff8fc5,#e0559a);border-color:#fff;color:#2a0f1e}
+.tool.sel .nm{opacity:1}
+.tool:active{transform:scale(.94)}
+.tool.done{outline:2px solid rgba(87,227,155,.8)}
+
+/* ---------- OVERLAYS ---------- */
+#rotate{position:fixed;inset:0;z-index:60;display:none;flex-direction:column;align-items:center;justify-content:center;
+  gap:14px;background:#150c1a;text-align:center;padding:24px}
+#rotate .ph{font-size:64px;animation:rot 1.8s ease-in-out infinite}
+@keyframes rot{0%,40%{transform:rotate(0)}60%,100%{transform:rotate(-90deg)}}
+@media (orientation:portrait){#rotate{display:flex}#app{display:none}}
+
+#veil{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:10px;
+  background:rgba(10,5,14,.86);backdrop-filter:blur(7px)}
+#veil.hide{display:none}
+.sheet{width:min(760px,96vw);max-height:94vh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  background:linear-gradient(180deg,#2e1836,#1d0f24);border:1px solid rgba(255,255,255,.18);
+  border-radius:18px;padding:14px 16px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.sheet h1{margin:0 0 4px;font-size:clamp(17px,4.6vh,30px);
+  background:linear-gradient(90deg,#ffd27a,#ff8fc5,#a98bff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sheet h2{margin:0 0 8px;font-size:clamp(13px,3.4vh,22px)}
+.sheet p{margin:5px 0;font-size:clamp(10px,2.2vh,14px);line-height:1.35;opacity:.9}
+.btn{display:inline-block;margin:8px 4px 2px;padding:9px 22px;border-radius:99px;font-weight:800;cursor:pointer;
+  font-size:clamp(11px,2.5vh,16px);background:linear-gradient(90deg,#ff8fc5,#ffb36b);color:#2a0f1e;border:none}
+.btn.ghost{background:rgba(255,255,255,.12);color:#f7eef5;border:1px solid rgba(255,255,255,.25)}
+.btn:active{transform:scale(.95)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px;text-align:left;margin:8px 0}
+.grid2 div{font-size:clamp(9px,2vh,13px);padding:5px 8px;background:rgba(255,255,255,.07);border-radius:9px;
+  display:flex;justify-content:space-between;gap:8px;border:1px solid rgba(255,255,255,.1)}
+.stars{font-size:clamp(22px,6vh,40px);letter-spacing:4px;margin:4px 0}
+.scoreBig{font-size:clamp(22px,6vh,40px);font-weight:900;
+  background:linear-gradient(90deg,#ffd27a,#ff8fc5);-webkit-background-clip:text;background-clip:text;color:transparent}
+.tips{text-align:left;font-size:clamp(9px,2vh,13px);line-height:1.5;opacity:.92;
+  columns:2;column-gap:16px;margin:6px 0}
+@media (max-height:400px){.tips{columns:3}}
+
+/* ---------- FX ---------- */
+.part{position:absolute;pointer-events:none;will-change:transform,opacity}
+@keyframes fall{to{transform:translate(var(--dx),var(--dy)) rotate(var(--rot));opacity:0}}
+@keyframes pop{0%{transform:scale(.3);opacity:1}100%{transform:scale(1.7) translateY(-26px);opacity:0}}
+@keyframes puff{0%{transform:translate(0,0) scale(.5);opacity:.85}100%{transform:translate(var(--dx),var(--dy)) scale(1.6);opacity:0}}
+.float{position:absolute;font-weight:900;font-size:clamp(11px,2.6vh,17px);text-shadow:0 2px 6px rgba(0,0,0,.7);
+  animation:pop .9s ease-out forwards;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="rotate">
+  <div class="ph">📱</div>
+  <h2 style="margin:0;font-size:20px">Gira il telefono</h2>
+  <p style="margin:0;opacity:.75;font-size:14px;max-width:280px">Salone Star si gioca in orizzontale, a tutto schermo.</p>
+</div>
+
+<div id="app">
+  <div id="hud" class="card">
+    <span class="logo">✂️ SALONE STAR</span>
+    <span class="pill" id="dayPill">Giorno 1</span>
+    <span class="pill" id="clientPill">Cliente 1/5</span>
+    <div id="timerWrap"><div id="timerBar"></div><div id="timerTxt">0:00</div></div>
+    <span class="pill" id="moneyPill">💶 0</span>
+    <div class="iconbtn" id="btnSound">🔊</div>
+    <div class="iconbtn" id="btnFull">⛶</div>
+    <div class="iconbtn" id="btnPause">⏸</div>
+  </div>
+
+  <div id="brief" class="card">
+    <h2>La richiesta</h2>
+    <div id="clientName">🙋‍♀️ <span>Cliente</span></div>
+    <ul id="reqList"></ul>
+    <div id="statusRow"></div>
+    <div class="opt act" id="btnDone" style="justify-content:center">✅ Consegna</div>
+  </div>
+
+  <div id="stage">
+    <svg id="scene" viewBox="0 0 400 520" preserveAspectRatio="xMidYMid meet"></svg>
+    <div id="fx"></div>
+    <div id="progWrap"><div id="progBar"></div></div>
+    <div id="hint">Scegli uno strumento qui sotto</div>
+    <div id="toast"></div>
+  </div>
+
+  <div id="opts" class="card">
+    <div id="optTitle">Strumenti</div>
+    <div id="optBody"></div>
+  </div>
+
+  <div id="dock" class="card"></div>
+</div>
+
+<div id="veil"><div class="sheet" id="sheet"></div></div>
+
+<script>
+"use strict";
+/* =======================================================================
+   SALONE STAR - gioco da parrucchiere, un solo file HTML
+   Orizzontale, a tutto schermo, pensato per il telefono.
+   ======================================================================= */
+
+/* ------------------------- dati di gioco ------------------------------ */
+const COLORS = [
+  {id:'nero',     nome:'Nero',        hex:'#241c1a'},
+  {id:'castano',  nome:'Castano',     hex:'#5b3a22'},
+  {id:'cioccolato',nome:'Cioccolato', hex:'#7a4a2b'},
+  {id:'ramato',   nome:'Ramato',      hex:'#c2551f'},
+  {id:'rosso',    nome:'Rosso',       hex:'#ae2331'},
+  {id:'biondo',   nome:'Biondo',      hex:'#dfb257'},
+  {id:'platino',  nome:'Platino',     hex:'#e6e0d0'},
+  {id:'rosa',     nome:'Rosa',        hex:'#ef86bd'},
+  {id:'lilla',    nome:'Lilla',       hex:'#9a6ee0'},
+  {id:'blu',      nome:'Blu',         hex:'#3d79d6'},
+  {id:'verde',    nome:'Verde',       hex:'#3aad7c'},
+  {id:'argento',  nome:'Argento',     hex:'#b9c2cc'}
+];
+const colorOf = id => COLORS.find(c=>c.id===id) || COLORS[1];
+
+const TEXTURES = [
+  {id:'lisci', nome:'Lisci',  em:'💇‍♀️'},
+  {id:'mossi', nome:'Mossi',  em:'🌊'},
+  {id:'ricci', nome:'Ricci',  em:'🌀'}
+];
+const STYLES = [
+  {id:'sciolti',  nome:'Sciolti',    em:'💁‍♀️'},
+  {id:'codaalta', nome:'Coda alta',  em:'🐎'},
+  {id:'codabassa',nome:'Coda bassa', em:'🎀'},
+  {id:'codini',   nome:'Due codine', em:'👧'},
+  {id:'chignon',  nome:'Chignon',    em:'🩰'},
+  {id:'treccia',  nome:'Treccia',    em:'🪢'},
+  {id:'mezzacoda',nome:'Mezza coda', em:'🌸'}
+];
+const ACCESSORI = [
+  {id:'nessuno',   nome:'Nessuno',    em:'🚫'},
+  {id:'fiocco',    nome:'Fiocco',     em:'🎀'},
+  {id:'cerchietto',nome:'Cerchietto', em:'👑'},
+  {id:'fermaglio', nome:'Fermaglio',  em:'🌺'},
+  {id:'corona',    nome:'Corona',     em:'👸'}
+];
+const LUNGHEZZE = [
+  {id:'corti', nome:'Corti', min:0,  max:32},
+  {id:'medi',  nome:'Medi',  min:33, max:66},
+  {id:'lunghi',nome:'Lunghi',min:67, max:100}
+];
+const lenCat = l => l<=32 ? 'corti' : (l<=66 ? 'medi' : 'lunghi');
+const lenNome = id => (LUNGHEZZE.find(x=>x.id===id)||LUNGHEZZE[1]).nome;
+
+const NOMI = ['Giulia','Marta','Sofia','Elena','Chiara','Anna','Viola','Alice','Nadia','Sara','Irene','Luna',
+              'Bianca','Greta','Aurora','Emma','Noemi','Diana','Carla','Rebecca'];
+const SKINS = ['#f5d3b8','#eec19c','#dda87c','#c5885c','#9c6440','#734327'];
+const CAPES = ['#2f6f8f','#8f2f5f','#3f7a4f','#6a3f8f','#8f6a2f'];
+
+const TOOLS = [
+  {id:'lavaggio',  nome:'Shampoo',  em:'🧴', hint:'Tieni premuto sui capelli per lavarli.'},
+  {id:'forbici',   nome:'Forbici',  em:'✂️', hint:'Trascina alla lunghezza giusta e stacca il dito per tagliare.'},
+  {id:'frangia',   nome:'Frangia',  em:'💇', hint:'Tocca la fronte per fare (o togliere) la frangia.'},
+  {id:'tinta',     nome:'Tinta',    em:'🎨', hint:'Scegli il colore, poi passa il pennello su tutti i capelli.'},
+  {id:'meches',    nome:'Meches',   em:'✨', hint:'Scegli il colore dei colpi di sole e pennella le ciocche.'},
+  {id:'phon',      nome:'Phon',     em:'💨', hint:'Tieni premuto sui capelli finche non sono asciutti.'},
+  {id:'bigodini',  nome:'Bigodini', em:'🧶', hint:'Metti 6 bigodini, aspetta la posa, poi toglili.'},
+  {id:'piastra',   nome:'Piastra',  em:'🔥', hint:'Passa la piastra dall alto verso il basso, 3 volte.'},
+  {id:'extension', nome:'Extension',em:'🧵', hint:'Scegli la lunghezza da aggiungere e tocca i capelli.'},
+  {id:'pettine',   nome:'Piega',    em:'💈', hint:'Scegli l acconciatura e tieni premuto sulla testa.'},
+  {id:'accessori', nome:'Accessori',em:'🎀', hint:'Scegli un accessorio e toccalo sulla testa.'}
+];
+
+/* ------------------------- utilita ------------------------------------ */
+function danneggia(v){ S.danno = Math.min(100, Math.max(0, S.danno+v)); }
+const $ = s => document.querySelector(s);
+const rnd = (a,b) => a + Math.random()*(b-a);
+const rint = (a,b) => Math.floor(rnd(a,b+1));
+const pick = arr => arr[Math.floor(Math.random()*arr.length)];
+const clamp = (v,a,b) => v<a?a:(v>b?b:v);
+function hx2rgb(h){h=h.replace('#','');return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
+function rgb2hx(r,g,b){const f=v=>clamp(Math.round(v),0,255).toString(16).padStart(2,'0');return '#'+f(r)+f(g)+f(b);}
+function shade(hex,amt){const [r,g,b]=hx2rgb(hex);const t=amt>0?255:0,a=Math.abs(amt);
+  return rgb2hx(r+(t-r)*a, g+(t-g)*a, b+(t-b)*a);}
+
+/* ------------------------- audio (sintetico) -------------------------- */
+const Audio_ = {
+  ctx:null, on:true, noise:null,
+  init(){ if(this.ctx) return;
+    try{ this.ctx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ this.on=false; return; }
+    const len = this.ctx.sampleRate*1.2, buf = this.ctx.createBuffer(1,len,this.ctx.sampleRate), d = buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
+    this.noise = buf;
+  },
+  beep(f,dur,type,vol){ if(!this.on) return; this.init(); if(!this.ctx) return;
+    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
+    o.type=type||'sine'; o.frequency.value=f;
+    g.gain.setValueAtTime(0,this.ctx.currentTime);
+    g.gain.linearRampToValueAtTime(vol||.12,this.ctx.currentTime+.01);
+    g.gain.exponentialRampToValueAtTime(.0001,this.ctx.currentTime+(dur||.12));
+    o.connect(g); g.connect(this.ctx.destination); o.start(); o.stop(this.ctx.currentTime+(dur||.12)+.02);
+  },
+  snip(){ this.beep(2400,.05,'square',.05); setTimeout(()=>this.beep(1800,.05,'square',.05),55); },
+  click(){ this.beep(680,.05,'triangle',.07); },
+  ok(){ this.beep(880,.1,'sine',.1); setTimeout(()=>this.beep(1320,.16,'sine',.1),90); },
+  bad(){ this.beep(180,.22,'sawtooth',.08); },
+  ding(){ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>this.beep(f,.22,'sine',.09),i*90)); },
+  hum(start){ if(!this.on){return;} this.init(); if(!this.ctx) return;
+    if(start){ if(this._src) return;
+      const s=this.ctx.createBufferSource(); s.buffer=this.noise; s.loop=true;
+      const f=this.ctx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=900; f.Q.value=.8;
+      const g=this.ctx.createGain(); g.gain.value=.055;
+      s.connect(f); f.connect(g); g.connect(this.ctx.destination); s.start();
+      this._src=s; this._g=g;
+    } else if(this._src){ try{this._src.stop();}catch(e){} this._src=null; }
+  }
+};
+
+/* ------------------------- stato -------------------------------------- */
+const G = {
+  giorno:1, clienteN:0, clientiPerGiorno:5, soldi:0, punti:0, stelleTot:0,
+  fase:'start',              // start | gioco | pausa | esito | fineGiorno
+  tempo:0, tempoMax:60,
+  tool:null, sub:{tinta:'rosso', meches:'platino', piega:'sciolti', acc:'fiocco', ext:30},
+  cliente:null, dirty:true, ultimo:null, record:0
+};
+let S = null;                 // stato capelli della cliente attuale
+
+function nuovaCliente(){
+  const lvl = (G.giorno-1)*G.clientiPerGiorno + G.clienteN;
+  const startLen = rint(28,92);
+  const startTex = pick(['lisci','mossi','ricci']);
+  const startCol = pick(COLORS.slice(0,7)).id;
+  S = {
+    len:startLen, colore:startCol, tex:startTex, meches:null, frangia:Math.random()<.25,
+    ext:false, piega:'sciolti', acc:'nessuno', bagnati:Math.random()<.3?100:0, sporchi:Math.random()<.45,
+    danno:rint(0,10), tintaCop:0, mechesCop:0, bigodini:[], posa:0, posaFatta:false,
+    piastraPass:0, tinteFatte:0, umore:1, blink:0, blinkT:rnd(1,4)
+  };
+  /* ---- richieste ---- */
+  const reqs = [];
+  const nReq = clamp(2 + Math.floor(lvl/2), 2, 6);
+  const pool = [];
+
+  // lunghezza: sempre presente
+  const catAttuale = lenCat(S.len);
+  let catTarget = pick(LUNGHEZZE.filter(c=>c.id!==catAttuale)).id;
+  if(Math.random()<.25) catTarget = catAttuale;
+  reqs.push(reqLunghezza(catTarget));
+  const targetIdx = LUNGHEZZE.findIndex(c=>c.id===catTarget);
+  const attualeIdx = LUNGHEZZE.findIndex(c=>c.id===catAttuale);
+  if(targetIdx>attualeIdx) reqs.push(reqExtension());
+
+  // colore: quasi sempre
+  const colTarget = pick(COLORS.filter(c=>c.id!==S.colore)).id;
+  pool.push(reqColore(colTarget));
+  pool.push(reqTexture(pick(TEXTURES.filter(t=>t.id!==S.tex)).id));
+  // le acconciature raccolte hanno bisogno di lunghezza: niente code sui capelli corti
+  if(catTarget!=='corti') pool.push(reqPiega(pick(STYLES.filter(s=>s.id!=='sciolti')).id));
+  // la frangia si puo' tagliare, non ricrescere: la chiedono solo se non ce l'ha
+  if(!S.frangia) pool.push(reqFrangia(true));
+  pool.push(reqMeches(pick([COLORS[5],COLORS[6],COLORS[7],COLORS[11]]).id));
+  pool.push(reqAccessorio(pick(ACCESSORI.filter(a=>a.id!=='nessuno')).id));
+
+  // il colore e' quasi sempre la richiesta principale
+  if(Math.random()<.8) reqs.push(pool.shift()); else pool.shift();
+  while(reqs.length<nReq && pool.length) reqs.push(pool.splice(Math.floor(Math.random()*pool.length),1)[0]);
+  if(S.sporchi) reqs.unshift(reqLavaggio());
+  reqs.push(reqAsciutti());
+
+  G.cliente = {
+    nome: pick(NOMI), skin: pick(SKINS), cape: pick(CAPES),
+    occhi: pick(['#3c2a20','#2f5d8a','#4d7a46','#6b4a8a']),
+    reqs
+  };
+  G.tempoMax = Math.max(38, Math.round(26 + reqs.length*15 - lvl*2.2));
+  G.tempo = G.tempoMax;
+  G.tool = null; G.dirty = true;
+}
+
+/* --- costruttori di richiesta: {key,testo,em,sw,check} --- */
+const reqLunghezza = cat => ({key:'len', em:'📏', testo:'Capelli '+lenNome(cat).toLowerCase(),
+  check:s=>lenCat(s.len)===cat, val:cat});
+const reqExtension = () => ({key:'ext', em:'🧵', testo:'Metti le extension', check:s=>s.ext});
+const reqColore = id => ({key:'col', em:'🎨', testo:'Tinta '+colorOf(id).nome.toLowerCase(), sw:colorOf(id).hex,
+  check:s=>s.colore===id, val:id});
+const reqMeches = id => ({key:'mec', em:'✨', testo:'Meches '+colorOf(id).nome.toLowerCase(), sw:colorOf(id).hex,
+  check:s=>s.meches===id, val:id});
+const reqTexture = id => ({key:'tex', em:'🌀', testo:'Capelli '+id, check:s=>s.tex===id, val:id});
+const reqPiega = id => ({key:'pie', em:'💈', testo:(STYLES.find(x=>x.id===id).nome), check:s=>s.piega===id, val:id});
+const reqFrangia = v => ({key:'fra', em:'💇', testo:v?'Con frangia':'Senza frangia', check:s=>s.frangia===v, val:v});
+const reqAccessorio = id => ({key:'acc', em:'🎀', testo:(ACCESSORI.find(x=>x.id===id).nome), check:s=>s.acc===id, val:id});
+const reqLavaggio = () => ({key:'lav', em:'🧴', testo:'Prima lo shampoo', check:s=>!s.sporchi});
+const reqAsciutti = () => ({key:'asc', em:'💨', testo:'Capelli asciutti', check:s=>s.bagnati<=2});
+
+/* ======================================================================
+   DISEGNO (SVG parametrico)
+   ====================================================================== */
+const CX=200, FACE_CY=212, FACE_RX=76, FACE_RY=92;
+const HAIR_Y=205, HW=102, DOME=58;
+const bottomOf = len => 190 + (len/100)*286;
+
+function sideX(t, tex, side, len){
+  let b;
+  if(tex==='mossi')      b = HW + 2 + Math.sin(t*7.2+.5)*12 - 2*t;
+  else if(tex==='ricci') b = HW + 6 + 16*t + Math.sin(t*8.8)*9;
+  else                   b = HW - 16*t;
+  if(len<20) b -= (20-len)*0.8;
+  return CX + side*b;
+}
+function hairMass(len, tex){
+  const bY = bottomOf(len), N = 16;
+  let d = `M ${CX-HW} ${HAIR_Y} C ${CX-HW} ${DOME}, ${CX+HW} ${DOME}, ${CX+HW} ${HAIR_Y} `;
+  for(let i=1;i<=N;i++){ const t=i/N, y=HAIR_Y+(bY-HAIR_Y)*t; d += `L ${sideX(t,tex,1,len).toFixed(1)} ${y.toFixed(1)} `; }
+  const xR=sideX(1,tex,1,len), xL=sideX(1,tex,-1,len);
+  if(bY>352){ // capelli lunghi: due falde ai lati del collo, cosi' si vede la mantellina
+    const nt=326;
+    d += `Q ${(CX+52).toFixed(1)} ${(bY+16).toFixed(1)} ${(CX+34).toFixed(1)} ${nt} `
+       + `Q ${CX} ${(nt-14)} ${(CX-34).toFixed(1)} ${nt} `
+       + `Q ${(CX-52).toFixed(1)} ${(bY+16).toFixed(1)} ${xL.toFixed(1)} ${bY.toFixed(1)} `;
+  } else {
+    d += `Q ${CX} ${(bY+22).toFixed(1)} ${xL.toFixed(1)} ${bY.toFixed(1)} `;
+  }
+  for(let i=N-1;i>=1;i--){ const t=i/N, y=HAIR_Y+(bY-HAIR_Y)*t; d += `L ${sideX(t,tex,-1,len).toFixed(1)} ${y.toFixed(1)} `; }
+  return d + 'Z';
+}
+function hairCap(){
+  return `M ${CX-HW} ${HAIR_Y+10} C ${CX-HW} ${DOME}, ${CX+HW} ${DOME}, ${CX+HW} ${HAIR_Y+10} `
+       + `L ${CX+84} ${HAIR_Y+10} C ${CX+82} 168, ${CX+46} 146, ${CX} 146 `
+       + `C ${CX-46} 146, ${CX-82} 168, ${CX-84} ${HAIR_Y+10} Z`;
+}
+function fringePath(){
+  return `M ${CX-84} 178 C ${CX-72} 116, ${CX+72} 116, ${CX+84} 178 `
+       + `C ${CX+54} 202, ${CX-54} 202, ${CX-84} 178 Z`;
+}
+/* ciocche davanti al viso: incorniciano la faccia */
+function ciocche(len, tex){
+  const bY = bottomOf(len), endY = HAIR_Y + (bY-HAIR_Y)*0.78;
+  if(endY < 200) return '';
+  const w = tex==='ricci' ? 10 : 4;
+  const r = `M ${CX+84} 168 C ${CX+100} 210, ${CX+94+w} 262, ${CX+86} ${endY.toFixed(1)} `
+          + `Q ${CX+80} ${(endY+12).toFixed(1)} ${CX+66} ${(endY-14).toFixed(1)} `
+          + `C ${CX+74} 250, ${CX+72} 200, ${CX+66} 172 Z`;
+  const l = `M ${CX-84} 168 C ${CX-100} 210, ${CX-94-w} 262, ${CX-86} ${endY.toFixed(1)} `
+          + `Q ${CX-80} ${(endY+12).toFixed(1)} ${CX-66} ${(endY-14).toFixed(1)} `
+          + `C ${CX-74} 250, ${CX-72} 200, ${CX-66} 172 Z`;
+  return {d:r+' '+l, r, l};
+}
+function curlBumps(len, tex, dome){
+  if(tex!=='ricci') return '';
+  const bY = bottomOf(len); let o='';
+  if(dome){
+    for(let i=1;i<=9;i++){ const a=Math.PI*i/10;
+      o += `<circle cx="${(CX+Math.cos(a)*(HW-6)).toFixed(1)}" cy="${(HAIR_Y-Math.sin(a)*140).toFixed(1)}" r="17" fill="url(#gHair)"/>`; }
+    return o;
+  }
+  for(const side of [-1,1]) for(let i=1;i<=9;i++){
+    const t=i/9.5, y=HAIR_Y+(bY-HAIR_Y)*t, x=sideX(t,tex,side,len);
+    o += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(13+3*Math.sin(i*2)).toFixed(1)}" fill="url(#gHair)"/>`;
+  }
+  for(let i=0;i<8;i++){ const x=CX-80+i*23;
+    o += `<circle cx="${x}" cy="${(bY-2+Math.sin(i)*6).toFixed(1)}" r="14" fill="url(#gHair)"/>`; }
+  return o;
+}
+function waveLines(len,tex,col){
+  if(tex==='lisci') return '';
+  const bY=bottomOf(len); let o='';
+  for(let k=-3;k<=3;k++){
+    if(k===0) continue;
+    let d=`M ${CX+k*24} 150 `;
+    for(let i=1;i<=8;i++){ const t=i/8, y=150+(bY-150)*t;
+      const x=CX+k*24+Math.sin(t*(tex==='ricci'?11:7)+k)*(tex==='ricci'?9:6);
+      d+=`L ${x.toFixed(1)} ${y.toFixed(1)} `; }
+    o += `<path d="${d}" fill="none" stroke="${shade(col,.26)}" stroke-width="2.5" opacity=".3" stroke-linecap="round"/>`;
+  }
+  return o;
+}
+function tailShape(pts, w, col, tex){
+  const d = `M ${pts[0][0]} ${pts[0][1]} C ${pts[1][0]} ${pts[1][1]}, ${pts[2][0]} ${pts[2][1]}, ${pts[3][0]} ${pts[3][1]}`;
+  let o = `<path d="${d}" fill="none" stroke="${shade(col,-.14)}" stroke-width="${w}" stroke-linecap="round"/>`
+        + `<path d="${d}" fill="none" stroke="url(#gHair)" stroke-width="${Math.max(6,w-7)}" stroke-linecap="round"/>`;
+  if(tex==='ricci'){
+    for(let i=0;i<=6;i++){ const t=i/6, p=bez(pts,t);
+      o += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${(w*0.5).toFixed(1)}" fill="url(#gHair)"/>`; }
+  } else if(tex==='mossi'){
+    for(let i=0;i<=5;i++){ const t=i/5, p=bez(pts,t);
+      o += `<circle cx="${(p[0]+Math.sin(i*2)*6).toFixed(1)}" cy="${p[1].toFixed(1)}" r="${(w*0.4).toFixed(1)}" fill="url(#gHair)"/>`; }
+  }
+  return o;
+}
+function bez(p,t){ const u=1-t;
+  return [u*u*u*p[0][0]+3*u*u*t*p[1][0]+3*u*t*t*p[2][0]+t*t*t*p[3][0],
+          u*u*u*p[0][1]+3*u*u*t*p[1][1]+3*u*t*t*p[2][1]+t*t*t*p[3][1]];
+}
+function elastico(x,y,col){ return `<ellipse cx="${x}" cy="${y}" rx="14" ry="9" fill="${col}" stroke="rgba(0,0,0,.28)" stroke-width="2"/>`; }
+
+function accessorio(id){
+  if(id==='fiocco') return `<g transform="translate(276,140) rotate(12)">
+      <path d="M0,0 L-32,-17 L-32,17 Z" fill="#ff5fa2"/><path d="M0,0 L32,-17 L32,17 Z" fill="#ff5fa2"/>
+      <circle r="9" fill="#ff8fc5" stroke="#fff" stroke-width="2"/></g>`;
+  if(id==='cerchietto') return `<path d="M ${CX-100} 206 C ${CX-100} ${DOME+8}, ${CX+100} ${DOME+8}, ${CX+100} 206"
+      fill="none" stroke="#ffd166" stroke-width="10" stroke-linecap="round"/>
+      <path d="M ${CX-100} 206 C ${CX-100} ${DOME+8}, ${CX+100} ${DOME+8}, ${CX+100} 206" fill="none" stroke="#fff3c4" stroke-width="3.5" opacity=".7"/>`;
+  if(id==='fermaglio') return `<g transform="translate(132,150)"><circle r="15" fill="#ff7ab8"/>
+      ${[0,1,2,3,4].map(i=>`<ellipse cx="${(Math.cos(i*1.257)*16).toFixed(1)}" cy="${(Math.sin(i*1.257)*16).toFixed(1)}" rx="10" ry="8" fill="#ffa8d4"/>`).join('')}
+      <circle r="7" fill="#fff0a8"/></g>`;
+  if(id==='corona') return `<g transform="translate(200,84)">
+      <path d="M-44,16 L-44,-16 L-22,3 L0,-25 L22,3 L44,-16 L44,16 Z" fill="#ffd166" stroke="#e0a93c" stroke-width="2"/>
+      <circle cx="0" cy="-16" r="5" fill="#ff6b9d"/><circle cx="-31" cy="7" r="4" fill="#6bd6ff"/><circle cx="31" cy="7" r="4" fill="#6bd6ff"/></g>`;
+  return '';
+}
+
+function faccia(){
+  const c=G.cliente, s=S;
+  const felice = s.umore;
+  const occhiChiusi = s.blink>0;
+  const boccaD = felice>.66 ? `M ${CX-22} 258 Q ${CX} 282, ${CX+22} 258 Q ${CX} 270, ${CX-22} 258`
+               : felice>.33 ? `M ${CX-16} 264 L ${CX+16} 264`
+                            : `M ${CX-18} 270 Q ${CX} 252, ${CX+18} 270`;
+  const soprS = felice>.33 ? 0 : 6;
+  return `
+  <ellipse cx="122" cy="224" rx="11" ry="16" fill="${shade(c.skin,-.12)}"/>
+  <ellipse cx="278" cy="224" rx="11" ry="16" fill="${shade(c.skin,-.12)}"/>
+  <path d="M 176 292 L 224 292 L 226 336 L 174 336 Z" fill="${shade(c.skin,-.12)}"/>
+  <ellipse cx="${CX}" cy="${FACE_CY}" rx="${FACE_RX}" ry="${FACE_RY}" fill="${c.skin}"/>
+  <ellipse cx="${CX}" cy="${FACE_CY}" rx="${FACE_RX}" ry="${FACE_RY}" fill="url(#gFace)"/>
+  <ellipse cx="158" cy="248" rx="16" ry="9" fill="#ff9aa8" opacity=".38"/>
+  <ellipse cx="242" cy="248" rx="16" ry="9" fill="#ff9aa8" opacity=".38"/>
+  <path d="M 158 ${186+soprS} Q 172 ${177+soprS}, 187 ${186+soprS}" stroke="${shade(c.skin,-.55)}" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+  <path d="M 213 ${186+soprS} Q 228 ${177+soprS}, 242 ${186+soprS}" stroke="${shade(c.skin,-.55)}" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+  ${occhiChiusi
+    ? `<path d="M 161 210 Q 172 217, 183 210" stroke="#3a2a24" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+       <path d="M 217 210 Q 228 217, 239 210" stroke="#3a2a24" stroke-width="3.5" fill="none" stroke-linecap="round"/>`
+    : `<ellipse cx="172" cy="209" rx="12" ry="13.5" fill="#fff"/>
+       <ellipse cx="228" cy="209" rx="12" ry="13.5" fill="#fff"/>
+       <circle cx="173" cy="210" r="7" fill="${c.occhi}"/><circle cx="229" cy="210" r="7" fill="${c.occhi}"/>
+       <circle cx="173" cy="210" r="3.2" fill="#140b12"/><circle cx="229" cy="210" r="3.2" fill="#140b12"/>
+       <circle cx="176" cy="206" r="2.4" fill="#fff"/><circle cx="232" cy="206" r="2.4" fill="#fff"/>
+       <path d="M 160 200 Q 172 193, 184 200" stroke="#2a1c18" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+       <path d="M 216 200 Q 228 193, 240 200" stroke="#2a1c18" stroke-width="2.5" fill="none" stroke-linecap="round"/>`}
+  <path d="M ${CX-5} 232 Q ${CX+5} 241, ${CX-3} 244" stroke="${shade(c.skin,-.35)}" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="${boccaD}" stroke="#a8324a" stroke-width="4" fill="${felice>.66?'#c94a63':'none'}" stroke-linejoin="round" stroke-linecap="round"/>`;
+}
+
+/* strati sopra i capelli: meches, tinta in corso, sporco, danno, bagnato.
+   Vengono disegnati due volte, dietro e davanti al viso, con clip diverse. */
+function strati(bY){
+  const s=S; let o='';
+  const mcol = s.meches ? colorOf(s.meches).hex : (s.mechesCop>0 ? colorOf(G.sub.meches).hex : null);
+  const mop  = s.meches ? .95 : s.mechesCop/100*.95;
+  if(mcol && mop>0){
+    for(let i=0;i<8;i++){ const x=CX-96+i*26;
+      o += `<rect x="${x}" y="70" width="12" height="${(bY-20).toFixed(1)}" fill="${mcol}" opacity="${mop.toFixed(2)}" transform="rotate(${(i-3.5)*3.2} ${x} 200)" rx="6"/>`; }
+  }
+  if(s.tintaCop>0 && s.tintaCop<100){
+    const h=(bY+40-70)*(s.tintaCop/100);
+    o += `<rect x="0" y="70" width="400" height="${h.toFixed(1)}" fill="${colorOf(G.sub.tinta).hex}" opacity=".93"/>`;
+  }
+  if(s.sporchi) o += `<rect x="0" y="50" width="400" height="500" fill="#6b6350" opacity=".3"/>`;
+  if(s.danno>45) o += `<rect x="0" y="50" width="400" height="500" fill="#d8bf94" opacity="${(Math.min(s.danno,100)/320).toFixed(2)}"/>`;
+  if(s.bagnati>2){
+    const op=(s.bagnati/100*.42).toFixed(2);
+    o += `<rect x="0" y="50" width="400" height="500" fill="#0d2036" opacity="${op}"/>`
+       + `<path d="M ${CX-58} 120 C ${CX-46} 200, ${CX-52} 260, ${CX-44} ${(bY-20).toFixed(1)}" stroke="#cfe8ff" stroke-width="5" fill="none" opacity="${(s.bagnati/100*.45).toFixed(2)}"/>`
+       + `<path d="M ${CX+50} 124 C ${CX+62} 200, ${CX+56} 270, ${CX+48} ${(bY-24).toFixed(1)}" stroke="#cfe8ff" stroke-width="4" fill="none" opacity="${(s.bagnati/100*.4).toFixed(2)}"/>`;
+  }
+  return o;
+}
+
+function scene(){
+  const s=S, c=G.cliente;
+  if(!s||!c) return '';
+  const col = colorOf(s.colore).hex;
+  const gathered = ['codaalta','codabassa','codini','chignon','treccia'].includes(s.piega);
+  const massLen = gathered ? Math.min(s.len, 14) : s.len;
+  const massTex = gathered ? 'lisci' : s.tex;
+  const bY = bottomOf(massLen);
+  const mass = hairMass(massLen, massTex), cap = hairCap();
+  const cio = gathered ? '' : ciocche(s.len, s.tex);
+  const tl = 0.35 + (s.len/100)*0.9;
+
+  let dietro='', davanti='';
+  if(s.piega==='codaalta'){
+    dietro += tailShape([[CX,104],[CX+78,148],[CX+70,250+120*tl],[CX+4,300+150*tl]], 38, col, s.tex);
+    davanti += elastico(CX,108,'#ff5fa2');
+  } else if(s.piega==='codabassa'){
+    dietro += tailShape([[CX,288],[CX+30,336],[CX+22,386+120*tl],[CX-6,414+160*tl]], 40, col, s.tex);
+    davanti += elastico(CX,294,'#6bd6ff');
+  } else if(s.piega==='codini'){
+    dietro += tailShape([[CX-92,192],[CX-156,212],[CX-152,270+90*tl],[CX-118,308+120*tl]], 30, col, s.tex);
+    dietro += tailShape([[CX+92,192],[CX+156,212],[CX+152,270+90*tl],[CX+118,308+120*tl]], 30, col, s.tex);
+    davanti += elastico(CX-90,194,'#ffd166') + elastico(CX+90,194,'#ffd166');
+  } else if(s.piega==='chignon'){
+    davanti += `<circle cx="${CX}" cy="86" r="${(30+11*tl).toFixed(1)}" fill="${shade(col,-.16)}"/>
+      <circle cx="${CX}" cy="86" r="${(23+9*tl).toFixed(1)}" fill="url(#gHair)"/>
+      <path d="M ${CX-17} 86 A 17 17 0 1 1 ${CX+17} 86" fill="none" stroke="${shade(col,.24)}" stroke-width="3.5" opacity=".65"/>`;
+  } else if(s.piega==='treccia'){
+    const n=Math.max(3,Math.round(4+5*tl));
+    for(let i=0;i<n;i++){ const y=300+i*25, r=19-i*0.8;
+      dietro += `<ellipse cx="${CX+(i%2?8:-8)}" cy="${y}" rx="${r.toFixed(1)}" ry="${(r*0.8).toFixed(1)}" fill="url(#gHair)" stroke="${shade(col,-.22)}" stroke-width="2" transform="rotate(${i%2?18:-18} ${CX} ${y})"/>`; }
+    davanti += elastico(CX,292,'#ff5fa2');
+  } else if(s.piega==='mezzacoda'){
+    davanti += `<ellipse cx="${CX}" cy="132" rx="26" ry="19" fill="${shade(col,-.12)}"/>` + elastico(CX,150,'#ff8fc5');
+  }
+
+  let rolls='';
+  const RC=['#ff8fc5','#ffd166','#6bd6ff','#8fe38f','#c9a0ff','#ff9f6b','#ff6b8f','#7be0c8'];
+  s.bigodini.forEach((b,i)=>{ const c2=RC[i%RC.length];
+    rolls += `<g transform="translate(${b.x.toFixed(1)},${b.y.toFixed(1)})">
+      <ellipse rx="20" ry="15" fill="${c2}" stroke="rgba(0,0,0,.3)" stroke-width="2"/>
+      <ellipse rx="20" ry="15" fill="none" stroke="rgba(255,255,255,.6)" stroke-width="2" stroke-dasharray="5 6"/></g>`; });
+
+  let gocce='';
+  if(s.bagnati>40) for(let i=0;i<3;i++)
+    gocce += `<ellipse cx="${CX-70+i*70}" cy="${(bY+18+i*8).toFixed(1)}" rx="4.5" ry="8" fill="#bfe3ff" opacity=".75"/>`;
+
+  let spark='';
+  if(s.umore>.82) spark = ['<text x="66" y="120" font-size="22" opacity=".6">✨</text>',
+                           '<text x="316" y="160" font-size="18" opacity=".5">✨</text>',
+                           '<text x="90" y="300" font-size="16" opacity=".45">✨</text>'].join('');
+
+  const defs = `
+  <defs>
+    <linearGradient id="gHair" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${shade(col,.3)}"/><stop offset="40%" stop-color="${col}"/>
+      <stop offset="100%" stop-color="${shade(col,-.26)}"/></linearGradient>
+    <linearGradient id="gFace" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="rgba(255,255,255,.20)"/><stop offset="60%" stop-color="rgba(255,255,255,0)"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,.12)"/></linearGradient>
+    <linearGradient id="gCape" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${shade(c.cape,.14)}"/><stop offset="100%" stop-color="${shade(c.cape,-.38)}"/></linearGradient>
+    <radialGradient id="gMirror" cx="50%" cy="45%">
+      <stop offset="0%" stop-color="rgba(255,240,220,.32)"/><stop offset="100%" stop-color="rgba(255,240,220,0)"/></radialGradient>
+    <clipPath id="clipBack"><path d="${mass}"/></clipPath>
+    <clipPath id="clipFront"><path d="${cap}"/>${s.frangia?`<path d="${fringePath()}"/>`:''}${cio?`<path d="${cio.d}"/>`:''}</clipPath>
+  </defs>`;
+
+  const salone = `
+  <circle cx="200" cy="186" r="172" fill="url(#gMirror)"/>
+  <circle cx="200" cy="186" r="156" fill="none" stroke="rgba(255,225,180,.18)" stroke-width="6"/>
+  ${[0,1,2,3,4,5].map(i=>{const a=Math.PI*(0.14+i*0.144);
+     return `<circle cx="${(200-Math.cos(a)*156).toFixed(1)}" cy="${(186-Math.sin(a)*156).toFixed(1)}" r="7" fill="#ffe9b0" opacity=".75"/>`;}).join('')}`;
+
+  return defs + salone + `
+  <path d="M 18 520 C 40 382, 116 328, 200 328 C 284 328, 360 382, 382 520 Z" fill="url(#gCape)"/>
+  <path d="M 166 330 Q 200 358, 234 330 L 238 314 Q 200 336, 162 314 Z" fill="${shade(c.cape,.22)}"/>
+  ${dietro}
+  <path d="${mass}" fill="url(#gHair)"/>
+  ${curlBumps(massLen, massTex, false)}
+  <g clip-path="url(#clipBack)">${strati(bY)}</g>
+  ${faccia()}
+  <path d="${cap}" fill="url(#gHair)"/>
+  ${curlBumps(massLen, massTex, true)}
+  ${s.frangia?`<path d="${fringePath()}" fill="url(#gHair)"/>`:''}
+  ${cio?`<path d="${cio.r}" fill="url(#gHair)"/><path d="${cio.l}" fill="url(#gHair)"/>`:''}
+  ${waveLines(massLen, massTex, col)}
+  <path d="M ${CX-56} 118 Q ${CX} 96, ${CX+40} 122" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="7" stroke-linecap="round" opacity=".5"/>
+  <g clip-path="url(#clipFront)">${strati(bY)}</g>
+  ${gocce}${davanti}${rolls}
+  ${accessorio(s.acc)}
+  ${spark}`;
+}
+
+/* ======================================================================
+   INTERFACCIA
+   ====================================================================== */
+const svg=$('#scene'), fx=$('#fx'), dock=$('#dock'), optBody=$('#optBody'), optTitle=$('#optTitle');
+const veil=$('#veil'), sheet=$('#sheet'), toastEl=$('#toast'), hintEl=$('#hint');
+const progWrap=$('#progWrap'), progBar=$('#progBar');
+
+function toast(msg,bad){
+  toastEl.textContent=msg; toastEl.classList.add('show');
+  toastEl.style.borderColor = bad? 'rgba(255,92,110,.8)':'rgba(255,255,255,.22)';
+  clearTimeout(toast._t); toast._t=setTimeout(()=>toastEl.classList.remove('show'),1400);
+}
+function svgRect(){
+  const r=svg.getBoundingClientRect(), sc=Math.min(r.width/400, r.height/520);
+  return {r,sc,ox:(r.width-400*sc)/2, oy:(r.height-520*sc)/2};
+}
+function toSvg(e){ const m=svgRect(); return {x:(e.clientX-m.r.left-m.ox)/m.sc, y:(e.clientY-m.r.top-m.oy)/m.sc}; }
+function toPx(x,y){ const m=svgRect(); return {x:m.ox+x*m.sc, y:m.oy+y*m.sc}; }
+
+function particle(html,x,y,style,dur){
+  const p=toPx(x,y), d=document.createElement('div');
+  d.className='part'; d.style.left=p.x+'px'; d.style.top=p.y+'px'; d.innerHTML=html;
+  for(const k in style) d.style.setProperty(k,style[k]);
+  fx.appendChild(d); setTimeout(()=>d.remove(),dur||1000);
+}
+function ciocca(x,y){
+  const col=colorOf(S.colore).hex;
+  particle(`<div style="width:5px;height:22px;border-radius:3px;background:${col}"></div>`, x, y,
+    {'--dx':(rnd(-40,40)).toFixed(0)+'px','--dy':(rnd(90,190)).toFixed(0)+'px','--rot':rnd(-260,260).toFixed(0)+'deg',
+     animation:'fall .9s ease-in forwards'}, 950);
+}
+function bolla(x,y){
+  particle(`<div style="width:${rint(8,18)}px;height:${rint(8,18)}px;border-radius:50%;background:rgba(255,255,255,.7);border:1px solid #fff"></div>`,
+    x,y,{'--dx':rnd(-30,30).toFixed(0)+'px','--dy':rnd(-70,-30).toFixed(0)+'px',animation:'puff .8s ease-out forwards'},850);
+}
+function soffio(x,y){
+  particle(`<div style="width:26px;height:5px;border-radius:9px;background:rgba(200,235,255,.75)"></div>`,
+    x,y,{'--dx':rnd(30,90).toFixed(0)+'px','--dy':rnd(-24,24).toFixed(0)+'px',animation:'puff .5s linear forwards'},550);
+}
+function goccia(x,y,col){
+  particle(`<div style="width:8px;height:8px;border-radius:50%;background:${col}"></div>`,
+    x,y,{'--dx':rnd(-14,14).toFixed(0)+'px','--dy':rnd(30,70).toFixed(0)+'px',animation:'fall .6s ease-in forwards'},650);
+}
+function fluttua(txt,x,y,col){
+  const p=toPx(x,y), d=document.createElement('div');
+  d.className='float'; d.style.left=p.x+'px'; d.style.top=p.y+'px'; d.style.color=col||'#fff'; d.textContent=txt;
+  fx.appendChild(d); setTimeout(()=>d.remove(),950);
+}
+
+/* ---------------- dock ---------------- */
+function buildDock(){
+  dock.innerHTML = TOOLS.map(t=>`<div class="tool" data-tool="${t.id}"><div class="em">${t.em}</div><div class="nm">${t.nome}</div></div>`).join('');
+  dock.querySelectorAll('.tool').forEach(el=>{
+    el.addEventListener('pointerdown', ev=>{ ev.preventDefault(); Audio_.click(); setTool(el.dataset.tool); });
+  });
+}
+function setTool(id){
+  G.tool = (G.tool===id) ? null : id;
+  A.hold=0; A.cutY=null; A.strokeY=null; setProg(0);
+  Audio_.hum(false);
+  dock.querySelectorAll('.tool').forEach(el=>el.classList.toggle('sel', el.dataset.tool===G.tool));
+  const t = TOOLS.find(x=>x.id===G.tool);
+  hintEl.textContent = t ? t.hint : 'Scegli uno strumento qui sotto';
+  buildOpts();
+  G.dirty=true;
+}
+/* ---------------- pannello opzioni ---------------- */
+function buildOpts(){
+  const t=G.tool;
+  if(!t){
+    optTitle.textContent='Stato capelli';
+    optBody.innerHTML = `
+      <div class="opt"><span>📏</span> ${lenNome(lenCat(S.len))}</div>
+      <div class="opt"><span class="dot" style="background:${colorOf(S.colore).hex}"></span> ${colorOf(S.colore).nome}</div>
+      <div class="opt"><span>🌀</span> ${S.tex}</div>
+      <div class="opt"><span>💈</span> ${STYLES.find(x=>x.id===S.piega).nome}</div>
+      ${S.meches?`<div class="opt"><span class="dot" style="background:${colorOf(S.meches).hex}"></span> meches</div>`:''}
+      ${S.frangia?`<div class="opt"><span>💇</span> frangia</div>`:''}
+      ${S.ext?`<div class="opt"><span>🧵</span> extension</div>`:''}
+      <div class="opt"><span>🎀</span> ${ACCESSORI.find(x=>x.id===S.acc).nome}</div>`;
+    return;
+  }
+  if(t==='tinta'||t==='meches'){
+    optTitle.textContent = t==='tinta'?'Colore tinta':'Colore meches';
+    const sel = t==='tinta'?G.sub.tinta:G.sub.meches;
+    optBody.innerHTML = `<div class="swatches">${COLORS.map(c=>
+      `<div class="sw2 ${c.id===sel?'sel':''}" data-col="${c.id}" style="background:${c.hex}" title="${c.nome}"></div>`).join('')}</div>
+      <div style="font-size:10px;opacity:.7;text-align:center;line-height:1.25">${colorOf(sel).nome}<br>pennella su tutta la chioma</div>`;
+    optBody.querySelectorAll('.sw2').forEach(el=>el.addEventListener('pointerdown',ev=>{ev.preventDefault();
+      Audio_.click(); if(t==='tinta'){G.sub.tinta=el.dataset.col; S.tintaCop=0;} else {G.sub.meches=el.dataset.col; S.mechesCop=0;}
+      buildOpts(); G.dirty=true;}));
+  } else if(t==='pettine'){
+    optTitle.textContent='Acconciatura';
+    optBody.innerHTML = STYLES.map(s=>`<div class="opt ${s.id===G.sub.piega?'sel':''}" data-st="${s.id}"><span>${s.em}</span> ${s.nome}</div>`).join('');
+    optBody.querySelectorAll('[data-st]').forEach(el=>el.addEventListener('pointerdown',ev=>{ev.preventDefault();
+      Audio_.click(); G.sub.piega=el.dataset.st; buildOpts();}));
+  } else if(t==='accessori'){
+    optTitle.textContent='Accessori';
+    optBody.innerHTML = ACCESSORI.map(a=>`<div class="opt ${a.id===G.sub.acc?'sel':''}" data-ac="${a.id}"><span>${a.em}</span> ${a.nome}</div>`).join('');
+    optBody.querySelectorAll('[data-ac]').forEach(el=>el.addEventListener('pointerdown',ev=>{ev.preventDefault();
+      Audio_.click(); G.sub.acc=el.dataset.ac; buildOpts();}));
+  } else if(t==='extension'){
+    optTitle.textContent='Extension';
+    optBody.innerHTML = [25,50].map(v=>`<div class="opt ${v===G.sub.ext?'sel':''}" data-ex="${v}"><span>🧵</span> +${v} cm</div>`).join('')
+      + `<div style="font-size:10px;opacity:.7;text-align:center">poi tocca i capelli</div>`;
+    optBody.querySelectorAll('[data-ex]').forEach(el=>el.addEventListener('pointerdown',ev=>{ev.preventDefault();
+      Audio_.click(); G.sub.ext=+el.dataset.ex; buildOpts();}));
+  } else if(t==='bigodini'){
+    optTitle.textContent='Bigodini';
+    const n=S.bigodini.length;
+    optBody.innerHTML = `<div class="opt"><span>🧶</span> messi: ${n}/6</div>`
+      + (S.posaFatta?`<div class="opt act">tocca per toglierli</div>`
+        : n>=6 ? `<div class="opt"><span>⏳</span> posa in corso…</div>`
+               : `<div style="font-size:10px;opacity:.75;text-align:center;line-height:1.3">Tocca la testa per mettere i bigodini. Da 6 in su parte la posa.</div>`);
+  } else {
+    const info=TOOLS.find(x=>x.id===t);
+    optTitle.textContent=info.nome;
+    optBody.innerHTML = `<div style="font-size:11px;opacity:.85;text-align:center;line-height:1.35;padding:6px">${info.em}<br><br>${info.hint}</div>`;
+  }
+}
+/* ---------------- brief ---------------- */
+function buildBrief(){
+  const c=G.cliente;
+  $('#clientName').innerHTML = `🙋‍♀️ <span>${c.nome}</span>`;
+  const ul=$('#reqList');
+  ul.innerHTML = c.reqs.map((r,i)=>{
+    const ok=r.check(S);
+    return `<li class="${ok?'ok':''}" data-i="${i}"><span class="tick">${ok?'✓':''}</span>
+      <span>${r.em}</span>${r.sw?`<span class="sw" style="background:${r.sw}"></span>`:''}<span>${r.testo}</span></li>`;
+  }).join('');
+  const b=[];
+  if(S.sporchi) b.push('<span class="badge warn">🧴 sporchi</span>');
+  if(S.bagnati>2) b.push('<span class="badge warn">💧 bagnati '+Math.round(S.bagnati)+'%</span>');
+  if(S.danno>0) b.push('<span class="badge '+(S.danno>45?'bad':'')+'">🔥 danno '+Math.round(S.danno)+'%</span>');
+  $('#statusRow').innerHTML=b.join('');
+}
+function setProg(v){
+  if(v<=0){ progWrap.classList.remove('on'); progBar.style.width='0%'; }
+  else { progWrap.classList.add('on'); progBar.style.width=clamp(v,0,100)+'%'; }
+}
+function updHud(){
+  $('#dayPill').textContent='Giorno '+G.giorno;
+  $('#clientPill').textContent='Cliente '+G.clienteN+'/'+G.clientiPerGiorno;
+  $('#moneyPill').textContent='💶 '+G.soldi;
+  const r=clamp(G.tempo/G.tempoMax,0,1);
+  $('#timerBar').style.width=(r*100)+'%';
+  $('#timerBar').style.background = r>.5?'linear-gradient(90deg,#57e39b,#b6f06a)': r>.22?'linear-gradient(90deg,#ffd166,#ff9f43)':'linear-gradient(90deg,#ff6b8f,#ff3b5c)';
+  const m=Math.floor(Math.max(0,G.tempo)/60), s=Math.floor(Math.max(0,G.tempo)%60);
+  $('#timerTxt').textContent=m+':'+String(s).padStart(2,'0');
+}
+
+/* ======================================================================
+   INTERAZIONE
+   ====================================================================== */
+const A = {down:false,x:0,y:0,sx:0,sy:0,hold:0,cutY:null,asciuttiDetto:false};
+const stage=$('#stage');
+
+const inHair   = p => p.y>60 && p.y<bottomOf(S.len)+36 && Math.abs(p.x-CX)<150;
+const inHead   = p => { const dx=(p.x-CX)/108, dy=(p.y-172)/116; return dx*dx+dy*dy<1; };
+const inFronte = p => p.y>120 && p.y<210 && Math.abs(p.x-CX)<86;
+
+stage.addEventListener('pointerdown', e=>{
+  if(G.fase!=='gioco') return;
+  e.preventDefault(); stage.setPointerCapture(e.pointerId);
+  const p=toSvg(e); A.down=true; A.x=p.x; A.y=p.y; A.sx=p.x; A.sy=p.y; A.hold=0;
+  Audio_.init();
+  switch(G.tool){
+    case null: toast('Scegli uno strumento in basso'); break;
+    case 'forbici': A.cutY=p.y; G.dirty=true; break;
+    case 'frangia':
+      if(!inFronte(p)){ toast('Tocca la fronte'); break; }
+      if(S.frangia){ toast('La frangia c’è già', true); break; }
+      S.frangia=true; Audio_.snip(); for(let i=0;i<8;i++) ciocca(CX-60+i*15, 190);
+      toast('Frangia tagliata!'); G.dirty=true; break;
+    case 'extension':
+      if(!inHair(p)){ toast('Tocca i capelli'); break; }
+      if(S.len>=97){ toast('Sono già lunghissimi', true); break; }
+      S.len=clamp(S.len+G.sub.ext,0,100); S.ext=true; Audio_.ok();
+      fluttua('+'+G.sub.ext+' cm', CX+70, 260, '#ffd166'); toast('Extension applicate!'); G.dirty=true; break;
+    case 'accessori':
+      if(!inHead(p)){ toast('Tocca la testa'); break; }
+      S.acc=G.sub.acc; Audio_.click();
+      toast(S.acc==='nessuno'?'Accessorio tolto':'Accessorio messo!'); G.dirty=true; break;
+    case 'bigodini': bigodinoTap(p); break;
+    case 'piastra':
+      if(S.bagnati>2){ toast('Prima asciuga: la piastra rovina il bagnato!', true); danneggia(6); G.dirty=true; }
+      break;
+  }
+});
+stage.addEventListener('pointermove', e=>{
+  if(!A.down || G.fase!=='gioco') return;
+  const p=toSvg(e), dx=p.x-A.x, dy=p.y-A.y, dist=Math.hypot(dx,dy);
+  A.x=p.x; A.y=p.y;
+  if(G.tool==='forbici'){ A.cutY=p.y; G.dirty=true; }
+  else if((G.tool==='tinta'||G.tool==='meches') && inHair(p) && dist>0){
+    const tinta = G.tool==='tinta';
+    const col = colorOf(tinta?G.sub.tinta:G.sub.meches).hex;
+    if(tinta) S.tintaCop = Math.min(100, S.tintaCop + dist*0.33);
+    else      S.mechesCop = Math.min(100, S.mechesCop + dist*0.42);
+    setProg(tinta?S.tintaCop:S.mechesCop);
+    if(Math.random()<.5) goccia(p.x, p.y, col);
+    if(tinta && S.tintaCop>=100) applicaTinta();
+    if(!tinta && S.mechesCop>=100) applicaMeches();
+    G.dirty=true;
+  }
+});
+function endPointer(e){
+  if(!A.down) return;
+  const p = e?toSvg(e):{x:A.x,y:A.y};
+  A.down=false; Audio_.hum(false);
+  if(G.tool==='forbici' && A.cutY!==null){ taglia(A.cutY); A.cutY=null; }
+  else if(G.tool==='piastra' && S.bagnati<=2 && (p.y-A.sy)>70 && inHair(p)) piastraPassata(p);
+  else if(G.tool==='tinta'||G.tool==='meches'){ /* la copertura resta */ }
+  if(G.tool!=='bigodini') setProg(G.tool==='tinta'?S.tintaCop:(G.tool==='meches'?S.mechesCop:0));
+  A.hold=0; G.dirty=true;
+}
+stage.addEventListener('pointerup', endPointer);
+stage.addEventListener('pointercancel', endPointer);
+stage.addEventListener('pointerleave', endPointer);
+
+function taglia(y){
+  const nuova = clamp(Math.round((y-190)/286*100), 2, 100);
+  if(nuova >= S.len-1){ toast('Più in alto per accorciare'); return; }
+  const tolto = S.len-nuova;
+  S.len = nuova; Audio_.snip();
+  for(let i=0;i<Math.min(16,4+tolto/4);i++) ciocca(CX-70+rnd(0,140), y+rnd(-10,10));
+  if(S.piega!=='sciolti'){ S.piega='sciolti'; toast('Capelli sciolti per tagliare'); }
+  else toast('Tagliati! ora '+lenNome(lenCat(S.len)).toLowerCase());
+  if(S.ext && S.len<42){ S.ext=false; toast('Hai tagliato via le extension!', true); }
+  S.danno = Math.max(0, S.danno-tolto*0.3);
+  G.dirty=true;
+}
+function applicaTinta(){
+  S.colore = G.sub.tinta; S.tintaCop=0; S.tinteFatte++;
+  S.bagnati = Math.max(S.bagnati, 65); S.sporchi=false;
+  danneggia(S.tinteFatte>1 ? 14 : 5);
+  if(S.meches){ S.meches=null; toast('Tinta '+colorOf(S.colore).nome.toLowerCase()+' (ha coperto le meches)'); }
+  else toast('Tinta '+colorOf(S.colore).nome.toLowerCase()+' fatta!');
+  Audio_.ok(); setProg(0); fluttua('🎨', CX, 150, colorOf(S.colore).hex);
+}
+function applicaMeches(){
+  S.meches = G.sub.meches; S.mechesCop=0; S.bagnati=Math.max(S.bagnati,40);
+  danneggia(7); Audio_.ok(); setProg(0); toast('Meches fatte!'); fluttua('✨', CX, 150, '#fff');
+}
+function piastraPassata(p){
+  S.piastraPass++; danneggia(5); Audio_.beep(1200,.18,'sawtooth',.05);
+  for(let i=0;i<5;i++) soffio(p.x+rnd(-30,30), p.y+rnd(-20,20));
+  if(S.tex!=='lisci' && S.piastraPass>=3){ S.tex='lisci'; S.piastraPass=0; S.bigodini=[]; S.posa=0; S.posaFatta=false;
+    toast('Capelli lisci e lucidi!'); Audio_.ok(); }
+  else if(S.tex==='lisci'){ toast('Sono già lisci: attenta al danno!', true); }
+  else toast('Passata '+S.piastraPass+'/3');
+  G.dirty=true;
+}
+function bigodinoTap(p){
+  if(S.posaFatta){
+    if(!S.bigodini.length) return;
+    let bi=0, bd=1e9;
+    S.bigodini.forEach((b,i)=>{ const d=Math.hypot(b.x-p.x,b.y-p.y); if(d<bd){bd=d;bi=i;} });
+    if(bd>60){ toast('Tocca un bigodino per toglierlo'); return; }
+    S.bigodini.splice(bi,1); Audio_.click();
+    if(!S.bigodini.length){ S.tex='ricci'; S.posa=0; S.posaFatta=false; S.piastraPass=0;
+      toast('Che ricci meravigliosi!'); Audio_.ok(); fluttua('🌀', CX, 150, '#ffd166'); }
+    buildOpts(); G.dirty=true; return;
+  }
+  if(S.bigodini.length>=6){ toast('Aspetta la posa…'); return; }
+  if(!inHead(p) && !inHair(p)){ toast('Mettili sulla testa'); return; }
+  if(S.len<12){ toast('Capelli troppo corti per i bigodini', true); return; }
+  S.bigodini.push({x:clamp(p.x,CX-84,CX+84), y:clamp(p.y,92,252)});
+  Audio_.click(); buildOpts(); G.dirty=true;
+  if(S.bigodini.length===6) toast('Posa avviata!');
+}
+function applicaPiega(){
+  const st=G.sub.piega;
+  const serveLunghezza=['codaalta','codabassa','codini','treccia','chignon','mezzacoda'].includes(st);
+  if(serveLunghezza && S.len<28){ toast('Troppo corti per questa acconciatura', true); A.hold=0; setProg(0); return; }
+  S.piega=st; A.hold=0; setProg(0); Audio_.ok();
+  toast(STYLES.find(x=>x.id===st).nome+' fatta!'); G.dirty=true; buildOpts();
+}
+
+/* ======================================================================
+   CICLO DI GIOCO
+   ====================================================================== */
+let last=0, briefT=0;
+function loop(ts){
+  const dt = last ? Math.min(.05,(ts-last)/1000) : 0; last=ts;
+  if(G.fase==='gioco') tick(dt);
+  if(G.dirty){ svg.innerHTML = scene(); G.dirty=false; }
+  requestAnimationFrame(loop);
+}
+function tick(dt){
+  G.tempo -= dt;
+  updHud();
+  briefT += dt; if(briefT>.2){ briefT=0; buildBrief(); }
+
+  S.blinkT = (S.blinkT||0) - dt;
+  if(S.blinkT<=0){ S.blink = S.blink>0?0:1; S.blinkT = S.blink? .13 : rnd(2.2,5.5); G.dirty=true; }
+  const um = clamp(.22 + .8*(G.tempo/G.tempoMax) - S.danno/220 - (S.sporchi?.06:0), 0, 1);
+  if(Math.abs(um-S.umore)>.015){ S.umore += (um-S.umore)*Math.min(1,dt*1.6); G.dirty=true; }
+
+  if(A.down){
+    const p={x:A.x,y:A.y};
+    if(G.tool==='lavaggio' && (inHair(p)||inHead(p))){
+      A.hold += dt; setProg(A.hold/2*100);
+      if(Math.random()<.6) bolla(p.x+rnd(-40,40), p.y+rnd(-30,30));
+      if(A.hold>=2){ A.hold=0; setProg(0); S.sporchi=false; S.bagnati=100; S.tintaCop=0; S.mechesCop=0;
+        toast('Capelli lavati e freschi!'); Audio_.ok(); for(let i=0;i<12;i++) bolla(CX+rnd(-70,70), rnd(130,240)); }
+      G.dirty=true;
+    } else if(G.tool==='phon' && inHair(p)){
+      Audio_.hum(true);
+      if(S.bagnati>0){
+        S.bagnati = Math.max(0, S.bagnati - 46*dt);
+        if(S.bagnati===0){ toast('Asciutti!'); Audio_.ok(); }
+      } else { danneggia(9*dt); if(!A.asciuttiDetto){ A.asciuttiDetto=true; toast('Già asciutti: rischi di bruciarli!', true);} }
+      for(let i=0;i<2;i++) soffio(p.x+rnd(-20,20), p.y+rnd(-24,24));
+      G.dirty=true;
+    } else if(G.tool==='pettine' && (inHead(p)||inHair(p))){
+      A.hold += dt; setProg(A.hold/1.2*100);
+      if(A.hold>=1.2) applicaPiega();
+      G.dirty=true;
+    } else if(G.tool!=='tinta' && G.tool!=='meches'){ Audio_.hum(false); }
+  } else { Audio_.hum(false); A.asciuttiDetto=false; }
+
+  if(S.bigodini.length>=6 && !S.posaFatta){
+    S.posa += dt; setProg(S.posa/5*100);
+    if(S.posa>=5){ S.posaFatta=true; setProg(0); toast('Posa pronta! Togli i bigodini'); Audio_.ding(); buildOpts(); }
+  }
+  if(G.tempo<=0){ G.tempo=0; updHud(); consegna(true); }
+}
+
+/* ---------------- taglio: linea guida ---------------- */
+const origScene = scene;
+scene = function(){
+  let out = origScene();
+  if(G.fase==='gioco' && G.tool==='forbici' && A.cutY!==null && A.down){
+    const y=A.cutY.toFixed(1);
+    out += `<line x1="70" y1="${y}" x2="330" y2="${y}" stroke="#fff" stroke-width="2.5" stroke-dasharray="10 7" opacity=".9"/>
+            <text x="46" y="${(+y+8).toFixed(1)}" font-size="26">✂️</text>
+            <text x="336" y="${(+y+7).toFixed(1)}" font-size="14" fill="#fff" opacity=".9">${lenNome(lenCat(clamp(Math.round((A.cutY-190)/286*100),2,100)))}</text>`;
+  }
+  return out;
+};
+
+/* ======================================================================
+   VALUTAZIONE E SCHERMATE
+   ====================================================================== */
+function consegna(scaduto){
+  if(G.fase!=='gioco') return;
+  G.fase='esito'; A.down=false; Audio_.hum(false); setProg(0);
+  const reqs=G.cliente.reqs;
+  const esiti=reqs.map(r=>({r, ok:r.check(S)}));
+  const ok=esiti.filter(e=>e.ok).length;
+  const base=ok*120;
+  const bonusTempo = scaduto?0:Math.round(G.tempo*3);
+  const malusDanno = Math.round(S.danno*1.2);
+  const perfetto = ok===reqs.length && S.danno<45;
+  const bonusPerf = perfetto?250:0;
+  const tot = Math.max(0, base+bonusTempo+bonusPerf-malusDanno);
+  const ratio = ok/reqs.length;
+  const stelle = ratio>=1 ? (S.danno<45?3:2) : ratio>=.7?2 : ratio>=.4?1:0;
+  const mancia = Math.round(tot/8);
+  G.soldi += mancia; G.punti += tot; G.stelleTot += stelle;
+  Audio_[stelle>=2?'ding':'bad']();
+  updHud();
+
+  const frasi = ['😤 «Non ci torno più!»','😐 «Insomma… si può fare.»','😊 «Mi piace davvero!»','🤩 «Sei un genio, torno di sicuro!»'];
+  sheet.innerHTML = `
+    <h2>${G.cliente.nome} si guarda allo specchio</h2>
+    <div class="stars">${'★'.repeat(stelle)}${'☆'.repeat(3-stelle)}</div>
+    <p>${frasi[stelle]}${scaduto?' <b style="color:#ff8fa0">Tempo scaduto!</b>':''}</p>
+    <div class="grid2">${esiti.map(e=>`<div><span>${e.r.em} ${e.r.testo}</span><b style="color:${e.ok?'#57e39b':'#ff6b8f'}">${e.ok?'✓ +120':'✗ 0'}</b></div>`).join('')}</div>
+    <div class="grid2">
+      <div><span>⏱ Bonus tempo</span><b>+${bonusTempo}</b></div>
+      <div><span>🔥 Danno capelli</span><b style="color:#ff8fa0">-${malusDanno}</b></div>
+      <div><span>⭐ Lavoro perfetto</span><b>+${bonusPerf}</b></div>
+      <div><span>💶 Mancia</span><b>+${mancia}</b></div>
+    </div>
+    <div class="scoreBig">+${tot} punti</div>
+    <div class="btn" id="btnNext">${G.clienteN>=G.clientiPerGiorno?'🌙 Chiudi il salone':'➡️ Prossima cliente'}</div>`;
+  veil.classList.remove('hide');
+  $('#btnNext').addEventListener('click', ()=>{
+    if(G.clienteN>=G.clientiPerGiorno) fineGiorno(); else prossimaCliente();
+  });
+}
+
+function fineGiorno(){
+  G.fase='fineGiorno';
+  if(G.punti>G.record){ G.record=G.punti; try{localStorage.setItem('saloneStarRecord',String(G.record));}catch(e){} }
+  const media=(G.stelleTot/(G.giorno*G.clientiPerGiorno));
+  const titolo = media>=2.6?'Parrucchiera dell’anno 💎' : media>=2?'Salone di quartiere amatissimo 🌟'
+               : media>=1.2?'Te la cavi, ma si può fare meglio 💇‍♀️' : 'Giornata dura… 😅';
+  sheet.innerHTML = `
+    <h1>Giorno ${G.giorno} finito!</h1>
+    <p>${titolo}</p>
+    <div class="grid2" style="max-width:420px;margin:10px auto">
+      <div><span>💶 Incasso totale</span><b>${G.soldi}</b></div>
+      <div><span>🏆 Punti</span><b>${G.punti}</b></div>
+      <div><span>⭐ Stelle</span><b>${G.stelleTot}</b></div>
+      <div><span>📈 Record</span><b>${G.record}</b></div>
+    </div>
+    <p style="opacity:.8">Domani le clienti hanno più fretta: meno tempo, più richieste.</p>
+    <div class="btn" id="btnNewDay">☀️ Giorno ${G.giorno+1}</div>
+    <div class="btn ghost" id="btnRestart">🔄 Ricomincia</div>`;
+  veil.classList.remove('hide');
+  $('#btnNewDay').addEventListener('click', ()=>{ G.giorno++; G.clienteN=0; prossimaCliente(); });
+  $('#btnRestart').addEventListener('click', ()=>{ G.giorno=1; G.clienteN=0; G.soldi=0; G.punti=0; G.stelleTot=0; prossimaCliente(); });
+}
+
+function prossimaCliente(){
+  G.clienteN++;
+  nuovaCliente();
+  setTool(null); buildBrief(); updHud();
+  veil.classList.add('hide');
+  G.fase='gioco'; last=0; G.dirty=true;
+  toast(G.cliente.nome+' si siede in poltrona');
+}
+
+function mostraStart(){
+  G.fase='start';
+  sheet.innerHTML = `
+    <h1>✂️ SALONE STAR</h1>
+    <p>Ogni cliente ha una richiesta e pochi minuti. Fai tutto in tempo e prenditi le tre stelle.</p>
+    <div class="tips">
+      🧴 <b>Shampoo</b>: tieni premuto sui capelli.<br>
+      ✂️ <b>Forbici</b>: trascina all’altezza giusta, poi stacca il dito.<br>
+      💇 <b>Frangia</b>: tocca la fronte.<br>
+      🎨 <b>Tinta</b>: scegli il colore e pennella tutta la chioma.<br>
+      ✨ <b>Meches</b>: come la tinta, ma solo ciocche (falle dopo la tinta).<br>
+      💨 <b>Phon</b>: tieni premuto finché non sono asciutti.<br>
+      🧶 <b>Bigodini</b>: 6 bigodini, attendi la posa, poi toglili → ricci.<br>
+      🔥 <b>Piastra</b>: 3 passate dall’alto in basso → lisci (solo su asciutto).<br>
+      🧵 <b>Extension</b>: allungano subito i capelli.<br>
+      💈 <b>Piega</b>: scegli l’acconciatura e tieni premuto sulla testa.<br>
+      🎀 <b>Accessori</b>: scegli e tocca la testa.<br>
+      ⚠️ Ogni calore e ogni tinta in più fanno <b>danno</b>: occhio al punteggio.
+    </div>
+    <p style="opacity:.75">Si gioca in orizzontale, a tutto schermo.</p>
+    <div class="btn" id="btnStart">▶️ Apri il salone</div>
+    ${G.record?`<p style="opacity:.7">Record: ${G.record} punti</p>`:''}`;
+  veil.classList.remove('hide');
+  $('#btnStart').addEventListener('click', ()=>{ Audio_.init(); goFull(); G.giorno=1; G.clienteN=0; G.soldi=0; G.punti=0; G.stelleTot=0; prossimaCliente(); });
+}
+
+function pausa(){
+  if(G.fase!=='gioco') return;
+  G.fase='pausa'; Audio_.hum(false);
+  sheet.innerHTML = `<h2>⏸ Pausa caffè</h2>
+    <p>${G.cliente.nome} ti aspetta in poltrona.</p>
+    <div class="btn" id="btnResume">▶️ Riprendi</div>
+    <div class="btn ghost" id="btnQuit">🏠 Menu</div>`;
+  veil.classList.remove('hide');
+  $('#btnResume').addEventListener('click', ()=>{ veil.classList.add('hide'); G.fase='gioco'; last=0; });
+  $('#btnQuit').addEventListener('click', mostraStart);
+}
+
+function goFull(){
+  const el=document.documentElement;
+  const rq=el.requestFullscreen||el.webkitRequestFullscreen||el.mozRequestFullScreen||el.msRequestFullscreen;
+  try{ const p=rq&&rq.call(el); if(p&&p.catch) p.catch(()=>{}); }catch(e){}
+  try{ if(screen.orientation&&screen.orientation.lock){ const q=screen.orientation.lock('landscape'); if(q&&q.catch) q.catch(()=>{}); } }catch(e){}
+}
+
+/* ---------------- pulsanti HUD ---------------- */
+$('#btnPause').addEventListener('click', pausa);
+$('#btnFull').addEventListener('click', goFull);
+$('#btnSound').addEventListener('click', ()=>{
+  Audio_.on=!Audio_.on; if(!Audio_.on) Audio_.hum(false);
+  $('#btnSound').textContent = Audio_.on?'🔊':'🔇';
+});
+$('#btnDone').addEventListener('click', ()=>{ if(G.fase==='gioco') consegna(false); });
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden) pausa(); });
+window.addEventListener('resize', ()=>{ G.dirty=true; });
+window.addEventListener('orientationchange', ()=>{ G.dirty=true; });
+document.addEventListener('gesturestart', e=>e.preventDefault());
+document.addEventListener('dblclick', e=>e.preventDefault());
+
+/* ---------------- avvio ---------------- */
+buildDock();
+try{ G.record = +(localStorage.getItem('saloneStarRecord')||0) || 0; }catch(e){ G.record=0; }
+mostraStart();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
